@@ -121,6 +121,9 @@ func TestProxySuccessForwardsAndTranslates(t *testing.T) {
 		if r.Header.Get("traceparent") != "tp-1" {
 			t.Errorf("traceparent not forwarded untouched: %q", r.Header.Get("traceparent"))
 		}
+		if r.Header.Get("X-Custom-Thing") != "keep-me" {
+			t.Errorf("non-allowlisted client header not passed through: %q", r.Header.Get("X-Custom-Thing"))
+		}
 		var got map[string]any
 		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
 			t.Errorf("upstream body not JSON: %v", err)
@@ -142,6 +145,7 @@ func TestProxySuccessForwardsAndTranslates(t *testing.T) {
 	req.Header.Set("X-Api-Contract-Version", "2024-11")
 	req.Header.Set("Authorization", "Bearer abc")
 	req.Header.Set("traceparent", "tp-1")
+	req.Header.Set("X-Custom-Thing", "keep-me")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
