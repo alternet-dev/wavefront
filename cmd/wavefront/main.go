@@ -1,17 +1,46 @@
 // Command wavefront is the edge contract-mediation proxy: it maps a versioned
 // external contract onto a single evolving internal HTTP/JSON backend.
 //
-// This is a pre-implementation stub. v0.1 is built in sequenced chunks; the
-// real entrypoint — config load, bundle load (fail-fast), and the data-plane
-// plus ops listeners — lands with internal/server.
+// Compose: parse config → load+validate the bundle (fail-fast; refuse to
+// start on a bad bundle) → serve the data-plane and ops listeners until
+// SIGINT/SIGTERM. SIGHUP hot-reload is v0.3.
 package main
 
 import (
-	"fmt"
+	"context"
+	"log/slog"
 	"os"
+	"os/signal"
+	"syscall"
+
+	"github.com/alternet-dev/wavefront/internal/bundle"
+	"github.com/alternet-dev/wavefront/internal/config"
+	"github.com/alternet-dev/wavefront/internal/server"
 )
 
 func main() {
-	fmt.Fprintln(os.Stderr, "wavefront: pre-implementation stub; not yet runnable")
-	os.Exit(1)
+	cfg, err := config.Load()
+	if err != nil {
+		slog.Error("invalid configuration", "err", err)
+		os.Exit(1)
+	}
+	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: cfg.LogLevel})))
+
+	b, err := bundle.Load(cfg.BundlePath)
+	if err != nil {
+		slog.Error("bundle load failed; refusing to start", "err", err)
+		os.Exit(1)
+	}
+
+	srv := server.New(cfg)
+	srv.SetBundle(b)
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	slog.Info("wavefront listening", "data", cfg.ListenAddr, "ops", cfg.MetricsAddr)
+	if err := srv.Run(ctx); err != nil {
+		slog.Error("server stopped with error", "err", err)
+		os.Exit(1)
+	}
 }

@@ -113,7 +113,7 @@ Operational notes:
   requests. A failed reload keeps the previous bundle serving.
 - **Fail-fast.** A missing/invalid bundle at boot → refuse to start.
 - **`GET /metrics`** exposes Prometheus/OpenMetrics counters keyed by contract
-  version + transform outcome; `/healthz` and `/readyz` are the probes.
+  version + transform outcome; `/health` and `/ready` are the probes.
 - **Codec.** `protobuf` is the reference inbound codec; adapters are selected by
   content negotiation. Auth + tracing headers are forwarded untouched.
 
