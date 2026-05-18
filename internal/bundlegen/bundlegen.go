@@ -12,11 +12,14 @@ package bundlegen
 import (
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protodesc"
@@ -68,10 +71,37 @@ var httpMethods = map[string]bool{
 
 var nonIdent = regexp.MustCompile(`[^A-Za-z0-9_]`)
 
-// Generate reads the OpenAPI doc at openapiPath and writes descriptors.binpb,
-// openapi.json, and versions.yaml into outDir.
-func Generate(openapiPath, outDir string) error {
-	raw, err := os.ReadFile(openapiPath)
+const (
+	openapiFetchTimeout = 30 * time.Second
+	maxOpenAPIBytes     = 32 << 20 // defensive cap on a fetched/loaded OpenAPI doc
+)
+
+// readOpenAPI loads the OpenAPI document from a local file path, or fetches
+// it when src is an http(s):// URL (GET, bounded timeout, 2xx required). A
+// URL fetch is still frozen at build time: Generate passes these bytes
+// through into the committed bundle, so the point-in-time guarantee holds.
+func readOpenAPI(src string) ([]byte, error) {
+	if strings.HasPrefix(src, "http://") || strings.HasPrefix(src, "https://") {
+		client := &http.Client{Timeout: openapiFetchTimeout}
+		resp, err := client.Get(src)
+		if err != nil {
+			return nil, fmt.Errorf("fetch %s: %w", src, err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			return nil, fmt.Errorf("fetch %s: status %d", src, resp.StatusCode)
+		}
+		return io.ReadAll(io.LimitReader(resp.Body, maxOpenAPIBytes))
+	}
+	return os.ReadFile(src)
+}
+
+// Generate reads the OpenAPI doc from openapiSrc — a local file path or an
+// http(s):// URL (fetched at build time; the bytes are passed through into
+// the committed bundle, so a URL fetch stays point-in-time) — and writes
+// descriptors.binpb, openapi.json, and versions.yaml into outDir.
+func Generate(openapiSrc, outDir string) error {
+	raw, err := readOpenAPI(openapiSrc)
 	if err != nil {
 		return fmt.Errorf("read openapi: %w", err)
 	}

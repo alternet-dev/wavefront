@@ -13,12 +13,12 @@ import (
 )
 
 func main() {
-	openapi := flag.String("openapi", "", "path to the source OpenAPI JSON document")
+	openapi := flag.String("openapi", "", "source OpenAPI JSON: a file path or an http(s):// URL")
 	out := flag.String("out", "", "output bundle directory")
 	flag.Parse()
 
 	if *openapi == "" || *out == "" {
-		fmt.Fprintln(os.Stderr, "usage: wavefront-bundlegen --openapi <openapi.json> --out <bundle-dir>")
+		fmt.Fprintln(os.Stderr, "usage: wavefront-bundlegen --openapi <file|url> --out <bundle-dir>")
 		os.Exit(2)
 	}
 	if err := bundlegen.Generate(*openapi, *out); err != nil {

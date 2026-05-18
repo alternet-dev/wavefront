@@ -1,6 +1,8 @@
 package bundlegen_test
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -46,6 +48,35 @@ func writeOpenAPI(t *testing.T, body string) string {
 		t.Fatalf("write openapi: %v", err)
 	}
 	return p
+}
+
+func TestGenerateFromURL(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(sampleOpenAPI))
+	}))
+	defer srv.Close()
+
+	out := t.TempDir()
+	if err := bundlegen.Generate(srv.URL+"/openapi.json", out); err != nil {
+		t.Fatalf("Generate from URL: %v", err)
+	}
+	b, err := bundle.Load(out)
+	if err != nil {
+		t.Fatalf("generated bundle did not load: %v", err)
+	}
+	if _, ok := b.Contract("2026-05-17"); !ok {
+		t.Fatal(`Contract("2026-05-17") not found`)
+	}
+}
+
+func TestGenerateFromURLNon200(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+	if err := bundlegen.Generate(srv.URL, t.TempDir()); err == nil {
+		t.Fatal("expected a hard error on non-200 OpenAPI fetch, got nil")
+	}
 }
 
 func TestGenerateProducesLoadableBundle(t *testing.T) {
