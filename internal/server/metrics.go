@@ -1,0 +1,35 @@
+package server
+
+import (
+	"github.com/prometheus/client_golang/prometheus"
+)
+
+// metrics is the v0.1 surface (deliberately small; rich per-version metrics
+// are v0.3). It uses a private registry — no global state.
+type metrics struct {
+	reg       *prometheus.Registry
+	requests  prometheus.Counter
+	errors    *prometheus.CounterVec
+	bundleSet prometheus.Gauge
+}
+
+func newMetrics() *metrics {
+	reg := prometheus.NewRegistry()
+	m := &metrics{
+		reg: reg,
+		requests: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "wavefront_requests_total",
+			Help: "Proxy requests handled since process start.",
+		}),
+		errors: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "wavefront_errors_total",
+			Help: "wavefront-originated errors, by code.",
+		}, []string{"code"}),
+		bundleSet: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "wavefront_bundle_loaded",
+			Help: "1 once a valid bundle is loaded and the proxy is ready.",
+		}),
+	}
+	reg.MustRegister(m.requests, m.errors, m.bundleSet)
+	return m
+}
