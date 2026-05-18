@@ -57,3 +57,11 @@ routing; service discovery beyond one upstream; WebSocket/streaming (the
   route-remap assumptions. The v0.1 `adapter` boundary is kept
   interaction-model-agnostic so it can be added without reworking the
   server/negotiate core. Out for v0.1.
+- **gRPC ↔ HTTP** is anticipated as another future adapter, on the same
+  model-agnostic `adapter` boundary. Unary first — it fits the
+  one-synchronous-upstream-call invariant; it is more than a codec swap
+  (HTTP/2 framing + `grpc-status` trailers, so it touches transport, like
+  GraphQL). Streaming gRPC is a *distant-future* wavefront extension in its
+  own right — point-to-point streaming RPC, which is a different problem
+  from the `wss-mux` sibling's server-driven WS *fanout* (that stays out;
+  see non-goals). Out for v0.1.
