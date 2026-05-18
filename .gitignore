@@ -1,0 +1,21 @@
+# Binaries
+/wavefront
+/dist/
+*.exe
+
+# Test / coverage
+*.test
+*.out
+coverage.*
+
+# Go workspace
+go.work
+go.work.sum
+
+# Editor / OS
+.DS_Store
+.idea/
+*.swp
+
+# Local-only bundle (consumers commit theirs in their own repo)
+/bundle/
