@@ -5,12 +5,13 @@ import (
 )
 
 // metrics is the v0.1 surface (deliberately small; rich per-version metrics
-// are v0.3). It uses a private registry — no global state.
+// are v0.3). It uses a private registry — no global state. Bundle-loaded
+// status is intentionally NOT a metric: it is a readiness boolean, served by
+// /readyz, not a time series.
 type metrics struct {
-	reg       *prometheus.Registry
-	requests  prometheus.Counter
-	errors    *prometheus.CounterVec
-	bundleSet prometheus.Gauge
+	reg      *prometheus.Registry
+	requests prometheus.Counter
+	errors   *prometheus.CounterVec
 }
 
 func newMetrics() *metrics {
@@ -25,11 +26,7 @@ func newMetrics() *metrics {
 			Name: "wavefront_errors_total",
 			Help: "wavefront-originated errors, by code.",
 		}, []string{"code"}),
-		bundleSet: prometheus.NewGauge(prometheus.GaugeOpts{
-			Name: "wavefront_bundle_loaded",
-			Help: "1 once a valid bundle is loaded and the proxy is ready.",
-		}),
 	}
-	reg.MustRegister(m.requests, m.errors, m.bundleSet)
+	reg.MustRegister(m.requests, m.errors)
 	return m
 }

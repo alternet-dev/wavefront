@@ -7,8 +7,10 @@ package server
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
+	httppprof "net/http/pprof"
 	"sync/atomic"
 	"time"
 
@@ -18,6 +20,19 @@ import (
 	"github.com/alternet-dev/wavefront/internal/adapter"
 	"github.com/alternet-dev/wavefront/internal/bundle"
 	"github.com/alternet-dev/wavefront/internal/config"
+)
+
+// HTTP server timeouts. The data-plane WriteTimeout is deliberately left
+// unset: a response is bounded by the per-request upstream context
+// (WAVEFRONT_REQUEST_TIMEOUT_MS — the operator's override), and a fixed
+// WriteTimeout would truncate a legitimately slow-but-valid upstream. The
+// ops listener serves only tiny, fast bodies, so it gets a WriteTimeout too.
+const (
+	srvReadHeaderTimeout = 5 * time.Second
+	srvReadTimeout       = 15 * time.Second
+	srvIdleTimeout       = 60 * time.Second
+	opsWriteTimeout      = 10 * time.Second
+	shutdownTimeout      = 10 * time.Second
 )
 
 type Server struct {
@@ -42,7 +57,6 @@ func New(cfg *config.Config) *Server {
 // once at boot; the atomic pointer is the v0.3 hot-swap hook point.
 func (s *Server) SetBundle(b *bundle.Bundle) {
 	s.bundle.Store(b)
-	s.metrics.bundleSet.Set(1)
 }
 
 func (s *Server) Bundle() *bundle.Bundle { return s.bundle.Load() }
@@ -58,15 +72,23 @@ func (s *Server) Message(fullName string) (protoreflect.MessageDescriptor, error
 
 func (s *Server) DataHandler() http.Handler { return http.HandlerFunc(s.proxy) }
 
+// OpsHandler serves the ops surface: Prometheus /metrics (the varz
+// equivalent), liveness/readiness probes, a human /statusz, and pprof. This
+// is intentionally bound to the ops listener (WAVEFRONT_METRICS_ADDR) only —
+// pprof and statusz must never be reachable on the data plane. pprof is
+// registered explicitly on this mux, not the global DefaultServeMux.
 func (s *Server) OpsHandler() http.Handler {
+	const plain = "text/plain; charset=utf-8"
 	mux := http.NewServeMux()
+
 	mux.Handle("/metrics", promhttp.HandlerFor(s.metrics.reg, promhttp.HandlerOpts{}))
+
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.Header().Set(headerContentType, plain)
 		_, _ = io.WriteString(w, "ok")
 	})
 	mux.HandleFunc("/readyz", func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.Header().Set(headerContentType, plain)
 		if s.bundle.Load() == nil {
 			w.WriteHeader(http.StatusServiceUnavailable)
 			_, _ = io.WriteString(w, "not ready")
@@ -74,13 +96,44 @@ func (s *Server) OpsHandler() http.Handler {
 		}
 		_, _ = io.WriteString(w, "ready")
 	})
+	mux.HandleFunc("/statusz", func(w http.ResponseWriter, _ *http.Request) {
+		status := "ready"
+		if s.bundle.Load() == nil {
+			status = "not ready"
+		}
+		w.Header().Set(headerContentType, plain)
+		_, _ = fmt.Fprintf(w, "wavefront\nstatus: %s\ndata:   %s\nops:    %s\n",
+			status, s.cfg.ListenAddr, s.cfg.MetricsAddr)
+	})
+
+	// pprof — ops listener only.
+	mux.HandleFunc("/debug/pprof/", httppprof.Index)
+	mux.HandleFunc("/debug/pprof/cmdline", httppprof.Cmdline)
+	mux.HandleFunc("/debug/pprof/profile", httppprof.Profile)
+	mux.HandleFunc("/debug/pprof/symbol", httppprof.Symbol)
+	mux.HandleFunc("/debug/pprof/trace", httppprof.Trace)
+
 	return mux
 }
 
 // Run starts both listeners and shuts them down gracefully when ctx is done.
 func (s *Server) Run(ctx context.Context) error {
-	data := &http.Server{Addr: s.cfg.ListenAddr, Handler: s.DataHandler()}
-	ops := &http.Server{Addr: s.cfg.MetricsAddr, Handler: s.OpsHandler()}
+	data := &http.Server{
+		Addr:              s.cfg.ListenAddr,
+		Handler:           s.DataHandler(),
+		ReadHeaderTimeout: srvReadHeaderTimeout,
+		ReadTimeout:       srvReadTimeout,
+		IdleTimeout:       srvIdleTimeout,
+		// WriteTimeout intentionally unset — see the timeout consts.
+	}
+	ops := &http.Server{
+		Addr:              s.cfg.MetricsAddr,
+		Handler:           s.OpsHandler(),
+		ReadHeaderTimeout: srvReadHeaderTimeout,
+		ReadTimeout:       srvReadTimeout,
+		WriteTimeout:      opsWriteTimeout,
+		IdleTimeout:       srvIdleTimeout,
+	}
 
 	errc := make(chan error, 2)
 	go func() { errc <- data.ListenAndServe() }()
@@ -88,7 +141,7 @@ func (s *Server) Run(ctx context.Context) error {
 
 	select {
 	case <-ctx.Done():
-		shutCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		shutCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 		defer cancel()
 		_ = data.Shutdown(shutCtx)
 		_ = ops.Shutdown(shutCtx)

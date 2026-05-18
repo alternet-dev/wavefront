@@ -13,14 +13,37 @@ import (
 	"github.com/alternet-dev/wavefront/internal/wireerror"
 )
 
-// forwardHeaders is the explicit allowlist passed to the upstream untouched:
-// the bearer (wavefront is auth-transparent) and common tracing propagation.
-// The client speaks protobuf to us; we do not relay arbitrary client headers.
+// Wavefront response/extension header names — centralized so the success and
+// error paths can't drift or typo them.
+const (
+	headerContentType     = "Content-Type"
+	headerContractVersion = "X-Wavefront-Contract-Version"
+	headerWavefrontError  = "X-Wavefront-Error"
+)
+
+// forwardHeaders is the explicit, exhaustive allowlist relayed to the
+// upstream untouched. wavefront is auth-transparent and the client speaks
+// protobuf to us, so we deliberately do NOT relay arbitrary client headers
+// onto the internal JSON API — only the bearer and the standard
+// distributed-tracing propagation formats:
+//
+//   - Authorization                  — the bearer (the upstream validates it)
+//   - W3C Trace Context              — traceparent, tracestate, baggage
+//   - B3 / Zipkin, multi-header      — X-B3-TraceId, X-B3-SpanId,
+//     X-B3-ParentSpanId, X-B3-Sampled,
+//     X-B3-Flags
+//   - B3 / Zipkin, single-header     — b3
+//   - de-facto correlation id        — X-Request-Id
+//
+// Anything outside this set is intentionally dropped. A new propagation
+// format is an explicit, reviewed addition here (+ a protocol.md note),
+// never an implicit passthrough.
 var forwardHeaders = []string{
 	"Authorization",
 	"traceparent", "tracestate", "baggage",
-	"X-Request-Id",
 	"X-B3-TraceId", "X-B3-SpanId", "X-B3-ParentSpanId", "X-B3-Sampled", "X-B3-Flags",
+	"b3",
+	"X-Request-Id",
 }
 
 func (s *Server) proxy(w http.ResponseWriter, r *http.Request) {
@@ -69,7 +92,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, wireerror.UpstreamError("could not build upstream request"), c.ContractVersion())
 		return
 	}
-	ureq.Header.Set("Content-Type", call.ContentType)
+	ureq.Header.Set(headerContentType, call.ContentType)
 	for _, h := range forwardHeaders {
 		for _, v := range r.Header.Values(h) {
 			ureq.Header.Add(h, v)
@@ -102,8 +125,8 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, werr, c.ContractVersion())
 		return
 	}
-	w.Header().Set("Content-Type", ct)
-	w.Header().Set("X-Wavefront-Contract-Version", c.ContractVersion())
+	w.Header().Set(headerContentType, ct)
+	w.Header().Set(headerContractVersion, c.ContractVersion())
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(out)
 }
@@ -115,12 +138,12 @@ func (s *Server) writeError(w http.ResponseWriter, werr *wireerror.Error, contra
 			w.Header().Add(k, v)
 		}
 	}
-	w.Header().Set("X-Wavefront-Error", werr.Code())
+	w.Header().Set(headerWavefrontError, werr.Code())
 	cv := strings.TrimSpace(contractVersion)
 	if cv == "" {
 		cv = "unknown"
 	}
-	w.Header().Set("X-Wavefront-Contract-Version", cv)
+	w.Header().Set(headerContractVersion, cv)
 	w.WriteHeader(werr.HTTPStatus())
 	_, _ = w.Write(werr.ProtoBody())
 }
