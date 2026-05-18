@@ -59,6 +59,21 @@ It IS NOT:
 
 ## Quick start
 
+Generate the bundle from your OpenAPI — a file, or the live service's
+`/openapi.json` (no manual export step) — then run the proxy against it:
+
+```bash
+go build -o wavefront-bundlegen ./cmd/wavefront-bundlegen
+
+# from a file…
+./wavefront-bundlegen --openapi ./openapi.json --out ./bundle
+# …or straight from a running service:
+./wavefront-bundlegen --openapi https://api.internal/openapi.json --out ./bundle
+```
+
+The bundle is committed in your repo (it is the contract source of truth) and
+mounted or baked in for wavefront.
+
 From source:
 
 ```bash

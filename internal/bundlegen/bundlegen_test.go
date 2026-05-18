@@ -1,0 +1,195 @@
+package bundlegen_test
+
+import (
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/alternet-dev/wavefront/internal/bundle"
+	"github.com/alternet-dev/wavefront/internal/bundlegen"
+)
+
+const sampleOpenAPI = `{
+  "openapi": "3.0.0",
+  "info": {"title": "acme", "version": "2026-05-17"},
+  "paths": {
+    "/v3/echo": {
+      "post": {
+        "operationId": "echo",
+        "requestBody": {"content": {"application/json": {"schema": {"$ref": "#/components/schemas/EchoRequest"}}}},
+        "responses": {"200": {"content": {"application/json": {"schema": {"$ref": "#/components/schemas/EchoReply"}}}}}
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "EchoRequest": {"type": "object", "properties": {
+        "text": {"type": "string"},
+        "count": {"type": "integer", "format": "int64"}
+      }},
+      "EchoReply": {"type": "object", "properties": {
+        "text": {"type": "string"},
+        "note": {"type": "string", "nullable": true},
+        "tags": {"type": "array", "items": {"type": "string"}},
+        "inner": {"$ref": "#/components/schemas/Inner"}
+      }},
+      "Inner": {"type": "object", "properties": {"v": {"type": "string"}}}
+    }
+  }
+}`
+
+func writeOpenAPI(t *testing.T, body string) string {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), "openapi.json")
+	if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+		t.Fatalf("write openapi: %v", err)
+	}
+	return p
+}
+
+func TestGenerateFromURL(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(sampleOpenAPI))
+	}))
+	defer srv.Close()
+
+	out := t.TempDir()
+	if err := bundlegen.Generate(srv.URL+"/openapi.json", out); err != nil {
+		t.Fatalf("Generate from URL: %v", err)
+	}
+	b, err := bundle.Load(out)
+	if err != nil {
+		t.Fatalf("generated bundle did not load: %v", err)
+	}
+	if _, ok := b.Contract("2026-05-17"); !ok {
+		t.Fatal(`Contract("2026-05-17") not found`)
+	}
+}
+
+func TestGenerateFromURLNon200(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+	if err := bundlegen.Generate(srv.URL, t.TempDir()); err == nil {
+		t.Fatal("expected a hard error on non-200 OpenAPI fetch, got nil")
+	}
+}
+
+func TestGenerateProducesLoadableBundle(t *testing.T) {
+	in := writeOpenAPI(t, sampleOpenAPI)
+	out := t.TempDir()
+	if err := bundlegen.Generate(in, out); err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	for _, f := range []string{"descriptors.binpb", "openapi.json", "versions.yaml"} {
+		if _, err := os.Stat(filepath.Join(out, f)); err != nil {
+			t.Fatalf("missing %s: %v", f, err)
+		}
+	}
+
+	b, err := bundle.Load(out)
+	if err != nil {
+		t.Fatalf("generated bundle did not load: %v", err)
+	}
+	c, ok := b.Contract("2026-05-17")
+	if !ok {
+		t.Fatal(`Contract("2026-05-17") not found`)
+	}
+	if c.Route() != "/v3/echo" || c.Method() != "POST" {
+		t.Errorf("route/method = %q %q", c.Route(), c.Method())
+	}
+	if !strings.HasSuffix(c.RequestMessage(), ".EchoRequest") {
+		t.Errorf("request_message = %q", c.RequestMessage())
+	}
+	if !strings.HasSuffix(c.ResponseMessage(), ".EchoReply") {
+		t.Errorf("response_message = %q", c.ResponseMessage())
+	}
+
+	rm, err := b.Message(c.RequestMessage())
+	if err != nil {
+		t.Fatalf("resolve request message: %v", err)
+	}
+	if rm.Fields().ByName("text") == nil || rm.Fields().ByName("count") == nil {
+		t.Error("EchoRequest missing fields text/count")
+	}
+	if f := rm.Fields().ByName("count"); f != nil && f.Kind().String() != "int64" {
+		t.Errorf("count kind = %s, want int64", f.Kind())
+	}
+
+	rp, err := b.Message(c.ResponseMessage())
+	if err != nil {
+		t.Fatalf("resolve response message: %v", err)
+	}
+	tags := rp.Fields().ByName("tags")
+	if tags == nil || !tags.IsList() {
+		t.Error("EchoReply.tags should be a repeated field")
+	}
+	note := rp.Fields().ByName("note")
+	if note == nil || !note.HasPresence() {
+		t.Error("EchoReply.note (nullable) should be a proto3 optional with presence")
+	}
+	inner := rp.Fields().ByName("inner")
+	if inner == nil || inner.Message() == nil || !strings.HasSuffix(string(inner.Message().FullName()), ".Inner") {
+		t.Error("EchoReply.inner should be a message field referencing Inner")
+	}
+}
+
+func TestGenerateIsDeterministic(t *testing.T) {
+	in := writeOpenAPI(t, sampleOpenAPI)
+	o1, o2 := t.TempDir(), t.TempDir()
+	if err := bundlegen.Generate(in, o1); err != nil {
+		t.Fatalf("gen1: %v", err)
+	}
+	if err := bundlegen.Generate(in, o2); err != nil {
+		t.Fatalf("gen2: %v", err)
+	}
+	a, _ := os.ReadFile(filepath.Join(o1, "descriptors.binpb"))
+	b, _ := os.ReadFile(filepath.Join(o2, "descriptors.binpb"))
+	if string(a) != string(b) {
+		t.Error("descriptors.binpb is not byte-reproducible across runs")
+	}
+}
+
+func TestGenerateHardErrors(t *testing.T) {
+	cases := map[string]string{
+		"oneOf": `{"openapi":"3.0.0","info":{"version":"1"},"paths":{"/x":{"post":{
+			"requestBody":{"content":{"application/json":{"schema":{"$ref":"#/components/schemas/A"}}}},
+			"responses":{"200":{"content":{"application/json":{"schema":{"$ref":"#/components/schemas/A"}}}}}}}},
+			"components":{"schemas":{"A":{"type":"object","properties":{"x":{"oneOf":[{"type":"string"}]}}}}}}`,
+		"additionalProperties": `{"openapi":"3.0.0","info":{"version":"1"},"paths":{"/x":{"post":{
+			"requestBody":{"content":{"application/json":{"schema":{"$ref":"#/components/schemas/A"}}}},
+			"responses":{"200":{"content":{"application/json":{"schema":{"$ref":"#/components/schemas/A"}}}}}}}},
+			"components":{"schemas":{"A":{"type":"object","additionalProperties":true,"properties":{"x":{"type":"string"}}}}}}`,
+		"no requestBody": `{"openapi":"3.0.0","info":{"version":"1"},"paths":{"/x":{"post":{
+			"responses":{"200":{"content":{"application/json":{"schema":{"$ref":"#/components/schemas/A"}}}}}}}},
+			"components":{"schemas":{"A":{"type":"object","properties":{"x":{"type":"string"}}}}}}`,
+		"two operations": `{"openapi":"3.0.0","info":{"version":"1"},"paths":{
+			"/x":{"post":{"requestBody":{"content":{"application/json":{"schema":{"$ref":"#/components/schemas/A"}}}},"responses":{"200":{"content":{"application/json":{"schema":{"$ref":"#/components/schemas/A"}}}}}}},
+			"/y":{"post":{"requestBody":{"content":{"application/json":{"schema":{"$ref":"#/components/schemas/A"}}}},"responses":{"200":{"content":{"application/json":{"schema":{"$ref":"#/components/schemas/A"}}}}}}}},
+			"components":{"schemas":{"A":{"type":"object","properties":{"x":{"type":"string"}}}}}}`,
+		"inline non-ref schema": `{"openapi":"3.0.0","info":{"version":"1"},"paths":{"/x":{"post":{
+			"requestBody":{"content":{"application/json":{"schema":{"type":"object","properties":{"x":{"type":"string"}}}}}},
+			"responses":{"200":{"content":{"application/json":{"schema":{"$ref":"#/components/schemas/A"}}}}}}}},
+			"components":{"schemas":{"A":{"type":"object","properties":{"x":{"type":"string"}}}}}}`,
+		"untyped property": `{"openapi":"3.0.0","info":{"version":"1"},"paths":{"/x":{"post":{
+			"requestBody":{"content":{"application/json":{"schema":{"$ref":"#/components/schemas/A"}}}},
+			"responses":{"200":{"content":{"application/json":{"schema":{"$ref":"#/components/schemas/A"}}}}}}}},
+			"components":{"schemas":{"A":{"type":"object","properties":{"x":{}}}}}}`,
+		"missing info.version": `{"openapi":"3.0.0","info":{"title":"x"},"paths":{"/x":{"post":{
+			"requestBody":{"content":{"application/json":{"schema":{"$ref":"#/components/schemas/A"}}}},
+			"responses":{"200":{"content":{"application/json":{"schema":{"$ref":"#/components/schemas/A"}}}}}}}},
+			"components":{"schemas":{"A":{"type":"object","properties":{"x":{"type":"string"}}}}}}`,
+	}
+	for name, body := range cases {
+		t.Run(name, func(t *testing.T) {
+			in := writeOpenAPI(t, body)
+			if err := bundlegen.Generate(in, t.TempDir()); err == nil {
+				t.Fatalf("%s: expected a hard error, got nil", name)
+			}
+		})
+	}
+}

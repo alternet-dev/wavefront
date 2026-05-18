@@ -11,6 +11,18 @@ app's in-process OpenAPI export → proto `FileDescriptorSet` + a generated
 only contract between the two projects. `wavefront` never reaches into the
 consumer.
 
+Concretely, run the shipped generator in the consumer's CI against either the
+exported file or the live service's OpenAPI endpoint (so there is no manual
+export step):
+
+```bash
+wavefront-bundlegen --openapi ./openapi.json            --out ./bundle
+wavefront-bundlegen --openapi https://api.internal/openapi.json --out ./bundle
+```
+
+The generator passes the OpenAPI through into the committed bundle, so a
+URL fetch is still frozen at build time — the bundle stays point-in-time.
+
 ## 2. Pinning + deploying
 
 Pin `wavefront` by image tag/digest, exactly like the `wss-mux` sibling:
