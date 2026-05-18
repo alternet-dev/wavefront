@@ -1,6 +1,6 @@
 # wavefront v0.2 — multi-contract generator design
 
-Status: **draft / proposed** · 2026-05-18 · for review (not accepted)
+Status: **proposed — ready for review** · 2026-05-18 · open questions resolved against stated constraints; implementation gated on the v0.2 transform runtime
 
 ## Context
 
@@ -66,17 +66,34 @@ generator must emit, per old version, the transforms that bridge that
 version's frozen external shape ↔ the current internal shape. This design
 should land in lockstep with the v0.2 transform runtime, not before it.
 
-## Open questions
+## Decisions
 
-- How does the consumer declare "still-supported versions" — a checked-in
-  policy file, or generator flags listing versions?
-- Frozen-shape source on re-emit: read back from the committed bundle
-  (proposed — it's the source of truth) vs. archived per-version OpenAPI.
-- How are per-version transform stanzas authored/derived (hand-tuned by the
-  consumer vs. generator-diffed old-vs-current OpenAPI)? Likely consumer-
-  authored, since a shape delta can need semantic intent the generator
-  cannot infer (consistent with "semantic logic is consumer-side").
-- `buf breaking` wiring: gate per frozen package in the consumer's CI.
+Each prior open question resolves directly against a stated constraint or
+the proposed approach — none is a free design choice:
+
+- **Supported-versions declaration: a checked-in declarative list in the
+  consumer's repo, not generator flags.** Approach #4 already requires the
+  retention decision be *auditable* and *CI-gated*; flags are ephemeral and
+  unreviewable, so a committed list is the only form that satisfies the
+  constraint. (Its exact schema is build-time mechanics — see below.)
+- **Frozen-shape source on re-emit: read back from the committed bundle.**
+  The "bundle is the committed source of truth" constraint already mandates
+  re-emit *without* archived per-version OpenAPI; this is settled, not open.
+- **Per-version transform stanzas: consumer-authored, not generator-diffed.**
+  A shape delta can carry semantic intent the generator cannot infer
+  (AGENTS.md: semantic logic is consumer-side). The generator may scaffold
+  the *mechanical* stanzas, but authorship and sign-off stay with the
+  consumer.
+- **`buf breaking` gating: one gate per frozen proto package, in the
+  consumer's CI.** The byte-reproducible + disjoint-package constraints make
+  per-package breaking checks well-defined; this gate is how the
+  immutability constraint is *enforced*, not a new policy.
+
+## Deferred to implementation
+
+Not design questions — build-time mechanics to settle alongside the v0.2
+transform runtime: the supported-versions list's concrete schema/location,
+and the exact `buf` config wiring for the per-package breaking gate.
 
 ## Out of scope
 
