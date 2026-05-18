@@ -1,0 +1,23 @@
+# Build artifacts the host produced — don't ship to the daemon.
+/wavefront
+/dist/
+*.test
+*.out
+
+# VCS / CI / docs not needed inside the image.
+.git/
+.github/
+docs/
+*.md
+
+# Dockerfile + dockerignore themselves don't need to be COPYed.
+Dockerfile
+.dockerignore
+
+# Local-only bundle (consumers commit theirs in their own repo).
+/bundle/
+
+# Editor noise.
+*.swp
+*.swo
+.DS_Store
