@@ -1,0 +1,222 @@
+// Package config parses the WAVEFRONT_* environment once at startup into an
+// immutable Config. Required vars missing ⇒ MissingError; malformed values ⇒
+// InvalidError (both name the offending var). Load uses the functional-options
+// pattern: production calls config.Load(); tests inject a fixed environment
+// with config.Load(config.WithLookup(fake)).
+package config
+
+import (
+	"errors"
+	"fmt"
+	"log/slog"
+	"net"
+	"net/url"
+	"os"
+	"strconv"
+	"strings"
+	"time"
+)
+
+type Config struct {
+	BundlePath            string
+	UpstreamBaseURL       string
+	ListenAddr            string
+	MetricsAddr           string
+	ContractVersionHeader string
+	RequestTimeout        time.Duration
+	MaxBodyBytes          int64
+	LogLevel              slog.Level
+}
+
+type MissingError struct{ Var string }
+
+func (e *MissingError) Error() string { return "missing required env var: " + e.Var }
+
+type InvalidError struct {
+	Var   string
+	Value string
+	Err   error
+}
+
+func (e *InvalidError) Error() string {
+	return fmt.Sprintf("invalid %s %q: %v", e.Var, e.Value, e.Err)
+}
+
+func (e *InvalidError) Unwrap() error { return e.Err }
+
+const (
+	defListenAddr  = "0.0.0.0:8080"
+	defMetricsAddr = "0.0.0.0:9090"
+	defCVHeader    = "X-Api-Contract-Version"
+	defTimeoutMS   = 15000
+	defMaxBody     = 1 << 20
+)
+
+var errPositive = errors.New("must be greater than zero")
+
+// Lookuper resolves an environment variable: its value and whether it is set.
+// It matches the signature of os.LookupEnv.
+type Lookuper func(key string) (string, bool)
+
+// Option configures Load.
+type Option func(*loader)
+
+// WithLookup overrides the environment source (default os.LookupEnv). Tests
+// use it to supply a fixed, in-memory environment.
+func WithLookup(fn Lookuper) Option {
+	return func(l *loader) { l.lookup = fn }
+}
+
+type loader struct {
+	lookup Lookuper
+}
+
+// Load parses the WAVEFRONT_* environment once into an immutable Config.
+// Production: config.Load(). Tests: config.Load(config.WithLookup(fake)).
+func Load(opts ...Option) (*Config, error) {
+	l := &loader{lookup: os.LookupEnv}
+	for _, o := range opts {
+		o(l)
+	}
+	get := l.lookup
+
+	nonBlank := func(k string) (string, bool) {
+		v, ok := get(k)
+		if !ok {
+			return "", false
+		}
+		v = strings.TrimSpace(v)
+		return v, v != ""
+	}
+	required := func(k string) (string, error) {
+		if v, ok := nonBlank(k); ok {
+			return v, nil
+		}
+		return "", &MissingError{Var: k}
+	}
+	withDefault := func(k, def string) string {
+		if v, ok := nonBlank(k); ok {
+			return v
+		}
+		return def
+	}
+
+	cfg := &Config{}
+	var err error
+
+	if cfg.BundlePath, err = required("WAVEFRONT_BUNDLE_PATH"); err != nil {
+		return nil, err
+	}
+	if cfg.UpstreamBaseURL, err = required("WAVEFRONT_UPSTREAM_BASE_URL"); err != nil {
+		return nil, err
+	}
+	if e := validateBaseURL(cfg.UpstreamBaseURL); e != nil {
+		return nil, &InvalidError{Var: "WAVEFRONT_UPSTREAM_BASE_URL", Value: cfg.UpstreamBaseURL, Err: e}
+	}
+
+	cfg.ListenAddr = withDefault("WAVEFRONT_LISTEN_ADDR", defListenAddr)
+	if e := validateHostPort(cfg.ListenAddr); e != nil {
+		return nil, &InvalidError{Var: "WAVEFRONT_LISTEN_ADDR", Value: cfg.ListenAddr, Err: e}
+	}
+	cfg.MetricsAddr = withDefault("WAVEFRONT_METRICS_ADDR", defMetricsAddr)
+	if e := validateHostPort(cfg.MetricsAddr); e != nil {
+		return nil, &InvalidError{Var: "WAVEFRONT_METRICS_ADDR", Value: cfg.MetricsAddr, Err: e}
+	}
+
+	cfg.ContractVersionHeader = withDefault("WAVEFRONT_CONTRACT_VERSION_HEADER", defCVHeader)
+
+	timeoutMS, e := parseIntVar(nonBlank, "WAVEFRONT_REQUEST_TIMEOUT_MS", defTimeoutMS)
+	if e != nil {
+		return nil, e
+	}
+	if timeoutMS <= 0 {
+		return nil, &InvalidError{Var: "WAVEFRONT_REQUEST_TIMEOUT_MS", Value: strconv.Itoa(timeoutMS), Err: errPositive}
+	}
+	cfg.RequestTimeout = time.Duration(timeoutMS) * time.Millisecond
+
+	maxBody, e := parseInt64Var(nonBlank, "WAVEFRONT_MAX_BODY_BYTES", defMaxBody)
+	if e != nil {
+		return nil, e
+	}
+	if maxBody <= 0 {
+		return nil, &InvalidError{Var: "WAVEFRONT_MAX_BODY_BYTES", Value: strconv.FormatInt(maxBody, 10), Err: errPositive}
+	}
+	cfg.MaxBodyBytes = maxBody
+
+	lvl, e := parseLevel(withDefault("WAVEFRONT_LOG_LEVEL", "info"))
+	if e != nil {
+		raw, _ := nonBlank("WAVEFRONT_LOG_LEVEL")
+		return nil, &InvalidError{Var: "WAVEFRONT_LOG_LEVEL", Value: raw, Err: e}
+	}
+	cfg.LogLevel = lvl
+
+	return cfg, nil
+}
+
+func parseIntVar(nonBlank func(string) (string, bool), key string, def int) (int, error) {
+	v, ok := nonBlank(key)
+	if !ok {
+		return def, nil
+	}
+	n, perr := strconv.Atoi(v)
+	if perr != nil {
+		return 0, &InvalidError{Var: key, Value: v, Err: perr}
+	}
+	return n, nil
+}
+
+func parseInt64Var(nonBlank func(string) (string, bool), key string, def int64) (int64, error) {
+	v, ok := nonBlank(key)
+	if !ok {
+		return def, nil
+	}
+	n, perr := strconv.ParseInt(v, 10, 64)
+	if perr != nil {
+		return 0, &InvalidError{Var: key, Value: v, Err: perr}
+	}
+	return n, nil
+}
+
+func validateBaseURL(s string) error {
+	u, err := url.Parse(s)
+	if err != nil {
+		return err
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return errors.New("scheme must be http or https")
+	}
+	if u.Host == "" {
+		return errors.New("missing host")
+	}
+	return nil
+}
+
+func validateHostPort(s string) error {
+	_, port, err := net.SplitHostPort(s)
+	if err != nil {
+		return err
+	}
+	pn, err := strconv.Atoi(port)
+	if err != nil {
+		return fmt.Errorf("port %q not numeric", port)
+	}
+	if pn < 1 || pn > 65535 {
+		return fmt.Errorf("port %d out of range", pn)
+	}
+	return nil
+}
+
+func parseLevel(s string) (slog.Level, error) {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "debug":
+		return slog.LevelDebug, nil
+	case "info":
+		return slog.LevelInfo, nil
+	case "warn":
+		return slog.LevelWarn, nil
+	case "error":
+		return slog.LevelError, nil
+	default:
+		return 0, fmt.Errorf("unknown log level %q", s)
+	}
+}
