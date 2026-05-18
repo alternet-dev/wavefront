@@ -27,7 +27,7 @@ deliberately, so a bad rollout cannot start.
   Headline series: **translation-failure rate keyed by contract version** —
   this is how an operator sees an old client cohort breaking against a new
   backend *before* it pages someone.
-- `/healthz` (liveness), `/readyz` (readiness — 200 only after a valid bundle
+- `/health` (liveness), `/ready` (readiness — 200 only after a valid bundle
   is loaded).
 - Structured logs keyed by contract version + transform outcome. Tracing
   headers are propagated, not terminated.

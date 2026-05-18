@@ -39,7 +39,7 @@ project's WebSocket/stream/peer domain do not carry over.
    without reworking server/negotiate.
 6. **SIGHUP is v0.3.** v0.1 loads the bundle once at boot, fail-fast. Bundle is
    held behind `atomic.Pointer[bundle.Bundle]` (set once; v0.3 hook point).
-   `/readyz` → 200 only after a valid bundle; `/healthz` always 200.
+   `/ready` → 200 only after a valid bundle; `/health` always 200.
 7. **Generator** logic in `internal/bundlegen` (exported `Generate`), thin
    `cmd/wavefront-bundlegen`. v0.1 emits `descriptors.binpb` + a binding-only
    `versions.yaml`; transform-stanza emission rolls to v0.2 in lockstep with
@@ -68,7 +68,7 @@ project's WebSocket/stream/peer domain do not carry over.
 | `internal/bundle` | Load+validate the 3 bundle files; typed per-step errors; strict unknown-field reject; resolve bindings against the `FileDescriptorSet` at boot. |
 | `internal/negotiate` | Contract-version header → contract, or typed `wireerror`. |
 | `internal/adapter` | `Adapter`/`Binding` interfaces (model-agnostic) + protobuf↔JSON impl. |
-| `internal/server` | `Server` (atomic bundle, config, metrics, one `*http.Client`); proxy pipeline; `/metrics` `/healthz` `/readyz`. |
+| `internal/server` | `Server` (atomic bundle, config, metrics, one `*http.Client`); proxy pipeline; `/metrics` `/health` `/ready`. |
 | `internal/bundlegen` | `Generate`: OpenAPI → `FileDescriptorSet` + binding-only `versions.yaml`. |
 | `internal/e2e` | Flagship e2e: real generate → bundle → proxy → `httptest` stub. |
 

@@ -53,39 +53,39 @@ func baseCfg(upstream string) *config.Config {
 	}
 }
 
-func TestHealthzAlways200(t *testing.T) {
+func TestHealthAlways200(t *testing.T) {
 	s := server.New(baseCfg("http://unused"))
 	ts := httptest.NewServer(s.OpsHandler())
 	defer ts.Close()
-	resp, err := http.Get(ts.URL + "/healthz")
+	resp, err := http.Get(ts.URL + "/health")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
-		t.Fatalf("healthz = %d", resp.StatusCode)
+		t.Fatalf("health = %d", resp.StatusCode)
 	}
 	body, _ := io.ReadAll(resp.Body)
 	if strings.TrimSpace(string(body)) != "ok" {
-		t.Errorf("healthz body = %q", body)
+		t.Errorf("health body = %q", body)
 	}
 }
 
-func TestReadyzGatesOnBundle(t *testing.T) {
+func TestReadyGatesOnBundle(t *testing.T) {
 	s := server.New(baseCfg("http://unused"))
 	ts := httptest.NewServer(s.OpsHandler())
 	defer ts.Close()
 
-	resp, _ := http.Get(ts.URL + "/readyz")
+	resp, _ := http.Get(ts.URL + "/ready")
 	if resp.StatusCode != http.StatusServiceUnavailable {
-		t.Fatalf("readyz before bundle = %d, want 503", resp.StatusCode)
+		t.Fatalf("ready before bundle = %d, want 503", resp.StatusCode)
 	}
 	resp.Body.Close()
 
 	s.SetBundle(loadBundle(t))
-	resp, _ = http.Get(ts.URL + "/readyz")
+	resp, _ = http.Get(ts.URL + "/ready")
 	if resp.StatusCode != 200 {
-		t.Fatalf("readyz after bundle = %d, want 200", resp.StatusCode)
+		t.Fatalf("ready after bundle = %d, want 200", resp.StatusCode)
 	}
 	resp.Body.Close()
 }

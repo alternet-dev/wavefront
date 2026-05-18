@@ -4,8 +4,8 @@ Versioned plan. Pre-implementation; this is the intended sequence.
 
 ## v0.1 — initial
 
-- Go module skeleton (`cmd/wavefront`, `internal/`), config, `/healthz`,
-  `/readyz`, Dockerfile, CI, **published multi-arch image**.
+- Go module skeleton (`cmd/wavefront`, `internal/`), config, `/health`,
+  `/ready`, Dockerfile, CI, **published multi-arch image**.
 - Bundle loader + schema validation; fail-fast boot. The route → message
   binding (`route`/`method`/`request_message`/`response_message`) is
   generator-materialized; `wavefront` does zero inference.

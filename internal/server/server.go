@@ -1,13 +1,12 @@
 // Package server is the proxy core: a data-plane listener that runs the
 // negotiate → decode → one upstream call → encode pipeline, and an ops
-// listener for /metrics, /healthz, /readyz. The bundle is held behind an
+// listener for /metrics, /health, /ready. The bundle is held behind an
 // atomic.Pointer (set once at boot in v0.1; the v0.3 SIGHUP-swap hook point).
 package server
 
 import (
 	"context"
 	"errors"
-	"fmt"
 	"io"
 	"net/http"
 	httppprof "net/http/pprof"
@@ -72,22 +71,22 @@ func (s *Server) Message(fullName string) (protoreflect.MessageDescriptor, error
 
 func (s *Server) DataHandler() http.Handler { return http.HandlerFunc(s.proxy) }
 
-// OpsHandler serves the ops surface: Prometheus /metrics (the varz
-// equivalent), liveness/readiness probes, a human /statusz, and pprof. This
-// is intentionally bound to the ops listener (WAVEFRONT_METRICS_ADDR) only —
-// pprof and statusz must never be reachable on the data plane. pprof is
-// registered explicitly on this mux, not the global DefaultServeMux.
+// OpsHandler serves the ops surface: Prometheus /metrics, liveness/readiness
+// probes (/health, /ready), and pprof. It is intentionally bound to the ops
+// listener (WAVEFRONT_METRICS_ADDR) only — pprof must never be reachable on
+// the data plane, and is registered explicitly on this mux, not the global
+// DefaultServeMux.
 func (s *Server) OpsHandler() http.Handler {
 	const plain = "text/plain; charset=utf-8"
 	mux := http.NewServeMux()
 
 	mux.Handle("/metrics", promhttp.HandlerFor(s.metrics.reg, promhttp.HandlerOpts{}))
 
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set(headerContentType, plain)
 		_, _ = io.WriteString(w, "ok")
 	})
-	mux.HandleFunc("/readyz", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("/ready", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set(headerContentType, plain)
 		if s.bundle.Load() == nil {
 			w.WriteHeader(http.StatusServiceUnavailable)
@@ -95,15 +94,6 @@ func (s *Server) OpsHandler() http.Handler {
 			return
 		}
 		_, _ = io.WriteString(w, "ready")
-	})
-	mux.HandleFunc("/statusz", func(w http.ResponseWriter, _ *http.Request) {
-		status := "ready"
-		if s.bundle.Load() == nil {
-			status = "not ready"
-		}
-		w.Header().Set(headerContentType, plain)
-		_, _ = fmt.Fprintf(w, "wavefront\nstatus: %s\ndata:   %s\nops:    %s\n",
-			status, s.cfg.ListenAddr, s.cfg.MetricsAddr)
 	})
 
 	// pprof — ops listener only.

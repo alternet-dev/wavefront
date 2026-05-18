@@ -7,7 +7,7 @@ import (
 // metrics is the v0.1 surface (deliberately small; rich per-version metrics
 // are v0.3). It uses a private registry — no global state. Bundle-loaded
 // status is intentionally NOT a metric: it is a readiness boolean, served by
-// /readyz, not a time series.
+// /ready, not a time series.
 type metrics struct {
 	reg      *prometheus.Registry
 	requests prometheus.Counter
