@@ -3,13 +3,8 @@
 The bundle schema and the wire contract. This is the part that must not change
 silently — changes here go through a roadmap entry.
 
-> **v0.1 scope.** v0.1 is single-version **passthrough**: the bundle is loaded
-> and validated, the contract is selected, and the request/response are
-> codec-converted (`protobuf ↔ JSON`) and proxied verbatim. The mechanical
-> transform vocabulary below is **v0.2** — a v0.1 binary *rejects* a bundle
-> that carries transform stanzas (fail-fast, never a silent skip). `wavefront`
-> performs **zero inference**: the route → message binding is materialized in
-> the bundle by the generator and read verbatim.
+`wavefront` performs **zero inference**: the route → message binding is
+materialized in the bundle by the generator and read verbatim.
 
 ## The bundle
 
@@ -29,11 +24,11 @@ version: 1                              # bundle-schema version (bumped via road
 contracts:
   - contract_version: "2024-11"         # selector value (the contract a client speaks)
     route: /v3/me/session               # internal path this maps to (path remap only)
-    method: GET                         # internal HTTP method (v0.1, required)
+    method: GET                         # internal HTTP method (required)
     request_message:  acme.v2024_11.SessionRequest   # FQ proto: decode the body into this
     response_message: acme.v2024_11.SessionResponse  # FQ proto: encode the reply from this
 
-    # --- v0.2 (mechanical transforms; a v0.1 binary rejects these) ---
+    # --- mechanical transform stanzas (optional) ---
     request:
       - rename:  { from: displayName, to: display_name }
       - default: { field: locale, value: en-US }
@@ -42,14 +37,14 @@ contracts:
       - rename:      { from: created_at, to: createdAt }
 ```
 
-`route`, `method`, `request_message`, `response_message` are the **v0.1
-binding**. Cardinality is **1:1** — exactly one upstream call per inbound
-request; `route` is a path remap, never fan-out.
+`route`, `method`, `request_message`, `response_message` are the **binding**.
+Cardinality is **1:1** — exactly one upstream call per inbound request;
+`route` is a path remap, never fan-out.
 
-## Transform vocabulary (v0.2)
+## Transform vocabulary
 
-Mechanical only — no expressions, no code. **Not interpreted in v0.1**; a v0.1
-binary refuses a bundle that carries these stanzas (fail-fast, not silent skip):
+Mechanical only — no expressions, no code. Unknown verbs are refused at load
+(strict decode, fail-fast):
 
 - `rename { from, to }`
 - `default { field, value }` — fill when absent
@@ -60,15 +55,14 @@ binary refuses a bundle that carries these stanzas (fail-fast, not silent skip):
 Anything not expressible mechanically is out of scope (see non-goals); it does
 not belong in `wavefront`.
 
-`route` is realized by the per-contract `route:` binding (present since v0.1); the v0.2 transform-runtime slice adds no separate route mechanism. That slice's verb engine covers rename/default/optionalize/coerce over top-level body fields.
+`route` is realized by the per-contract `route:` binding; the transform-runtime slice adds no separate route mechanism. Its verb engine covers rename/default/optionalize/coerce over top-level body fields.
 
 ## Version negotiation
 
 The client declares its contract version in
 `WAVEFRONT_CONTRACT_VERSION_HEADER` (default `X-Api-Contract-Version`).
 Missing / unknown / unsupported ⇒ a typed `unsupported_contract_version`
-error (see the error contract below), never a silent best-guess. Also keying
-off the proto package version for defense-in-depth is **v0.2**.
+error (see the error contract below), never a silent best-guess.
 
 ## Error contract
 
@@ -104,9 +98,9 @@ from a backend domain error) return:
 
 No client library is shipped: a client checks the HTTP status; structured
 handling (reading the header or decoding `wavefront.v1.Error`) is the
-consumer's own choice. `transform_failed` is established in v0.2 (422 request-side / 502 response-side). Finer upstream/domain-error typing remains additive future work.
+consumer's own choice. Finer upstream/domain-error typing remains additive future work.
 
-## Deferred to v0.2
+## Deferred
 
 Named here so they are not silently dropped: **param-space** transforms
 (query-string field mapping, same verbs); nested / array-element path
