@@ -277,21 +277,25 @@ func toOps(cv, dir string, raw []yamlOp) ([]transform.Op, error) {
 			if o.Rename.From == "" || o.Rename.To == "" || o.Rename.From == o.Rename.To {
 				return nil, &ValidationError{Contract: cv, Field: dir + ".rename", Reason: "from/to must be non-empty and distinct"}
 			}
-			op = transform.Op{Kind: "rename", From: o.Rename.From, To: o.Rename.To}
+			op = transform.Op{Kind: transform.KindRename, From: o.Rename.From, To: o.Rename.To}
 		}
 		if o.Default != nil {
 			set++
 			if o.Default.Field == "" {
 				return nil, &ValidationError{Contract: cv, Field: dir + ".default", Reason: "field must be non-empty"}
 			}
-			op = transform.Op{Kind: "default", Field: o.Default.Field, Value: o.Default.Value}
+			dv, derr := transform.NewDefaultValue(o.Default.Value)
+			if derr != nil {
+				return nil, &ValidationError{Contract: cv, Field: dir + ".default.value", Reason: derr.Error()}
+			}
+			op = transform.Op{Kind: transform.KindDefault, Field: o.Default.Field, Value: dv}
 		}
 		if o.Optionalize != nil {
 			set++
 			if o.Optionalize.Field == "" {
 				return nil, &ValidationError{Contract: cv, Field: dir + ".optionalize", Reason: "field must be non-empty"}
 			}
-			op = transform.Op{Kind: "optionalize", Field: o.Optionalize.Field}
+			op = transform.Op{Kind: transform.KindOptionalize, Field: o.Optionalize.Field}
 		}
 		if o.Coerce != nil {
 			set++
@@ -301,7 +305,7 @@ func toOps(cv, dir string, raw []yamlOp) ([]transform.Op, error) {
 			if o.Coerce.To != "string" && o.Coerce.To != "number" && o.Coerce.To != "bool" {
 				return nil, &ValidationError{Contract: cv, Field: dir + ".coerce.to", Reason: "must be string|number|bool"}
 			}
-			op = transform.Op{Kind: "coerce", Field: o.Coerce.Field, CoerceTo: o.Coerce.To}
+			op = transform.Op{Kind: transform.KindCoerce, Field: o.Coerce.Field, CoerceTo: o.Coerce.To}
 		}
 		if set != 1 {
 			return nil, &ValidationError{Contract: cv, Field: dir, Reason: "each transform op must set exactly one verb"}

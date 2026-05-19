@@ -153,6 +153,24 @@ contracts:
 	}
 }
 
+func TestNonScalarDefaultRejected(t *testing.T) {
+	bad := `version: 2
+contracts:
+  - contract_version: "2024-11"
+    route: /v3/echo
+    method: POST
+    request_message: acme.v1.Ping
+    response_message: acme.v1.Pong
+    request:
+      - default: { field: meta, value: { nested: 1 } }
+`
+	_, err := Load(bundletest.Dir(t, bad))
+	var ve *ValidationError
+	if !errors.As(err, &ve) {
+		t.Fatalf("non-scalar default value must be a ValidationError at load, got %v", err)
+	}
+}
+
 func TestV1BundleStillLoadsUnderV2Binary(t *testing.T) {
 	b, err := Load(bundletest.Dir(t, "")) // ValidVersions == version: 1, no stanzas
 	if err != nil {
