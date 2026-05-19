@@ -14,15 +14,30 @@ import (
 	"github.com/alternet-dev/wavefront/internal/wireerror"
 )
 
+// The closed set of mechanical verbs. Op.Kind is always one of these; the
+// generator/bundle loader and this interpreter share them as the single
+// source of truth (no scattered string literals).
+const (
+	KindRename      = "rename"
+	KindDefault     = "default"
+	KindOptionalize = "optionalize"
+	KindCoerce      = "coerce"
+)
+
 // Op is one parsed, statically-validated transform stanza. Exactly one verb
 // is represented by Kind; bundle.Load validates shape before constructing it,
 // so the runtime only ever meets data-dependent failures.
 type Op struct {
-	Kind     string // rename | default | optionalize | coerce
-	From     string // rename
-	To       string // rename
-	Field    string // default | optionalize | coerce
-	Value    any    // default
+	Kind  string // one of the Kind* constants
+	From  string // rename
+	To    string // rename
+	Field string // default | optionalize | coerce
+	// Value is the literal a `default` injects when the field is absent. It
+	// is intentionally `any`: a default is an arbitrary JSON scalar
+	// (string/number/bool/null) decoded from the bundle YAML and written
+	// through verbatim. A narrower Go type would drop numeric/bool defaults;
+	// the scalar-only contract is enforced at bundle load, not by this type.
+	Value    any
 	CoerceTo string // coerce: string | number | bool
 }
 
@@ -53,9 +68,9 @@ func apply(ops []Op, body []byte, request bool) ([]byte, *wireerror.Error) {
 	optional := map[string]bool{}
 	for _, op := range ops {
 		switch op.Kind {
-		case "optionalize":
+		case KindOptionalize:
 			optional[op.Field] = true
-		case "rename":
+		case KindRename:
 			v, ok := obj[op.From]
 			if !ok {
 				if optional[op.From] {
@@ -68,11 +83,11 @@ func apply(ops []Op, body []byte, request bool) ([]byte, *wireerror.Error) {
 			}
 			delete(obj, op.From)
 			obj[op.To] = v
-		case "default":
+		case KindDefault:
 			if cur, ok := obj[op.Field]; !ok || cur == nil {
 				obj[op.Field] = op.Value
 			}
-		case "coerce":
+		case KindCoerce:
 			v, ok := obj[op.Field]
 			if !ok {
 				if optional[op.Field] {
