@@ -9,36 +9,56 @@ package transform
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strconv"
 
 	"github.com/alternet-dev/wavefront/internal/wireerror"
 )
 
-// The closed set of mechanical verbs. Op.Kind is always one of these; the
-// generator/bundle loader and this interpreter share them as the single
-// source of truth (no scattered string literals).
+// Kind is a mechanical transform verb. The set is closed and shared by the
+// bundle loader and this interpreter as the single source of truth.
+type Kind string
+
 const (
-	KindRename      = "rename"
-	KindDefault     = "default"
-	KindOptionalize = "optionalize"
-	KindCoerce      = "coerce"
+	KindRename      Kind = "rename"
+	KindDefault     Kind = "default"
+	KindOptionalize Kind = "optionalize"
+	KindCoerce      Kind = "coerce"
 )
+
+// DefaultValue is the literal a `default` verb injects when the target field
+// is absent. Construct it via NewDefaultValue, which admits only JSON scalars
+// and preserves the original value losslessly (notably, it does not narrow
+// integers to float64). Non-scalar defaults are rejected at construction
+// (bundle load), so an illegal default is unrepresentable rather than a
+// runtime surprise.
+type DefaultValue struct{ v any }
+
+// NewDefaultValue wraps a bundle-authored scalar (string, bool, null, or a
+// number as decoded by the YAML loader). A map/slice/other non-scalar is
+// rejected; the caller surfaces that as a load-time ValidationError.
+func NewDefaultValue(v any) (DefaultValue, error) {
+	switch v.(type) {
+	case nil, bool, string, int, int64, uint64, float64:
+		return DefaultValue{v: v}, nil
+	default:
+		return DefaultValue{}, fmt.Errorf("default value must be a JSON scalar, got %T", v)
+	}
+}
+
+// JSON returns the wrapped scalar for verbatim injection into the body.
+func (d DefaultValue) JSON() any { return d.v }
 
 // Op is one parsed, statically-validated transform stanza. Exactly one verb
 // is represented by Kind; bundle.Load validates shape before constructing it,
 // so the runtime only ever meets data-dependent failures.
 type Op struct {
-	Kind  string // one of the Kind* constants
-	From  string // rename
-	To    string // rename
-	Field string // default | optionalize | coerce
-	// Value is the literal a `default` injects when the field is absent. It
-	// is intentionally `any`: a default is an arbitrary JSON scalar
-	// (string/number/bool/null) decoded from the bundle YAML and written
-	// through verbatim. A narrower Go type would drop numeric/bool defaults;
-	// the scalar-only contract is enforced at bundle load, not by this type.
-	Value    any
-	CoerceTo string // coerce: string | number | bool
+	Kind     Kind         // the verb
+	From     string       // rename
+	To       string       // rename
+	Field    string       // default | optionalize | coerce
+	Value    DefaultValue // default: the scalar to inject
+	CoerceTo string       // coerce: string | number | bool
 }
 
 // ApplyRequest runs request ops (external→internal); failures are 422.
@@ -85,7 +105,7 @@ func apply(ops []Op, body []byte, request bool) ([]byte, *wireerror.Error) {
 			obj[op.To] = v
 		case KindDefault:
 			if cur, ok := obj[op.Field]; !ok || cur == nil {
-				obj[op.Field] = op.Value
+				obj[op.Field] = op.Value.JSON()
 			}
 		case KindCoerce:
 			v, ok := obj[op.Field]

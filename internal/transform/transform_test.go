@@ -5,6 +5,28 @@ import (
 	"testing"
 )
 
+func mustDV(t *testing.T, v any) DefaultValue {
+	t.Helper()
+	d, err := NewDefaultValue(v)
+	if err != nil {
+		t.Fatalf("NewDefaultValue(%#v): %v", v, err)
+	}
+	return d
+}
+
+func TestNewDefaultValueRejectsNonScalar(t *testing.T) {
+	for _, v := range []any{map[string]any{"a": 1}, []any{1, 2}} {
+		if _, err := NewDefaultValue(v); err == nil {
+			t.Errorf("NewDefaultValue(%#v) should reject non-scalar", v)
+		}
+	}
+	for _, v := range []any{"s", 7, int64(1 << 60), 3.5, true, nil} {
+		if _, err := NewDefaultValue(v); err != nil {
+			t.Errorf("NewDefaultValue(%#v) should accept scalar: %v", v, err)
+		}
+	}
+}
+
 func TestNoOpsIsByteIdenticalPassthrough(t *testing.T) {
 	in := []byte(`{"a":1}` + "\n  trailing")
 	out, e := ApplyRequest(nil, in)
@@ -62,12 +84,12 @@ func TestOptionalizeBeforeRenameSkips(t *testing.T) {
 }
 
 func TestDefaultFillsWhenAbsentOrNull(t *testing.T) {
-	out, e := ApplyRequest([]Op{{Kind: "default", Field: "locale", Value: "en-US"}},
+	out, e := ApplyRequest([]Op{{Kind: KindDefault, Field: "locale", Value: mustDV(t, "en-US")}},
 		[]byte(`{"x":1}`))
 	if e != nil || string(out) != `{"locale":"en-US","x":1}` {
 		t.Fatalf("got %s err %v", out, e)
 	}
-	out, _ = ApplyRequest([]Op{{Kind: "default", Field: "locale", Value: "en-US"}},
+	out, _ = ApplyRequest([]Op{{Kind: KindDefault, Field: "locale", Value: mustDV(t, "en-US")}},
 		[]byte(`{"locale":"fr"}`))
 	if string(out) != `{"locale":"fr"}` {
 		t.Errorf("must not overwrite present value: %s", out)
@@ -127,7 +149,7 @@ func TestOptionalizeBeforeCoerceSkips(t *testing.T) {
 }
 
 func TestNonObjectBodyWithOpsFails(t *testing.T) {
-	_, e := ApplyRequest([]Op{{Kind: "default", Field: "a", Value: 1}}, []byte(`[1,2]`))
+	_, e := ApplyRequest([]Op{{Kind: KindDefault, Field: "a", Value: mustDV(t, 1)}}, []byte(`[1,2]`))
 	if e == nil || e.HTTPStatus() != 422 {
 		t.Fatalf("array body with ops must 422, got %v", e)
 	}
