@@ -60,7 +60,7 @@ binary refuses a bundle that carries these stanzas (fail-fast, not silent skip):
 Anything not expressible mechanically is out of scope (see non-goals); it does
 not belong in `wavefront`.
 
-`route` is realized by the per-contract `route:` binding (present since v0.1); the v0.2 transform-runtime slice adds no separate route mechanism. That slice's verb engine covers rename/default/optionalize/coerce over top-level body fields. A v0.2 binary reads both `version: 1` bundles (no stanzas → passthrough) and `version: 2` bundles; a v0.1 binary still rejects `version: 2`.
+`route` is realized by the per-contract `route:` binding (present since v0.1); the v0.2 transform-runtime slice adds no separate route mechanism. That slice's verb engine covers rename/default/optionalize/coerce over top-level body fields.
 
 ## Version negotiation
 
@@ -117,6 +117,5 @@ defense-in-depth; richer upstream/domain-error typing and status mapping.
 
 ## Forward compatibility
 
-Additive bundle-schema changes bump `version:` and stay backward-readable.
 Removing/renaming a schema field or a transform verb is a breaking change
 gated by `buf breaking` in CI and a roadmap entry.

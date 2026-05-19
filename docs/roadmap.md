@@ -20,9 +20,9 @@ Versioned plan. Pre-implementation; this is the intended sequence.
 ## v0.2
 
 - **Transform runtime (slice 1 — active).** Mechanical verb interpreter
-  (rename/default/optionalize/coerce) over top-level body fields; bundle
-  schema v2; `transform_failed` (422 request / 502 response). `route` is the
-  v0.1 binding.
+  (rename/default/optionalize/coerce) over top-level body fields;
+  `transform_failed` (422 request / 502 response). `route` is the v0.1
+  binding.
 - **Transform follow-ups, ordered:** **slice 2** — nested/array-element path
   syntax (`data[].field`), pure addressing; **slice 3** — param-space
   (query-string) transforms (same verbs over query params). Both depend on
