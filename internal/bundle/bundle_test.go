@@ -142,11 +142,11 @@ func TestMalformedFilesAreParseErrors(t *testing.T) {
 }
 
 func TestUnsupportedVersion(t *testing.T) {
-	dir := writeBundle(t, fdsBytes(t), validOpenAPI, "version: 2\ncontracts: []\n")
+	dir := writeBundle(t, fdsBytes(t), validOpenAPI, "version: 3\ncontracts: []\n")
 	_, err := Load(dir)
 	var ue *UnsupportedVersionError
-	if !errors.As(err, &ue) || ue.Version != 2 {
-		t.Fatalf("want UnsupportedVersionError(2), got %v", err)
+	if !errors.As(err, &ue) || ue.Version != 3 {
+		t.Fatalf("want UnsupportedVersionError(3), got %v", err)
 	}
 }
 
@@ -214,9 +214,10 @@ contracts:
 	}
 }
 
-// A v0.2 bundle carries request:/response: transform stanzas. A v0.1 binary
-// must REFUSE it (strict unknown-field decode), never half-apply it.
-func TestStrictRejectsV02TransformStanzas(t *testing.T) {
+// A v1 bundle must not carry request:/response: transform stanzas.
+// Since v2 stanzas are declared fields, strict decode accepts them, but Load
+// rejects them with a ValidationError when schema version is 1.
+func TestV1WithTransformStanzasRejected(t *testing.T) {
 	y := `version: 1
 contracts:
   - contract_version: "2024-11"
@@ -229,9 +230,9 @@ contracts:
 `
 	dir := writeBundle(t, fdsBytes(t), validOpenAPI, y)
 	_, err := Load(dir)
-	var pe *ParseError
-	if !errors.As(err, &pe) || pe.File != fileVersions {
-		t.Fatalf("v0.2 transform bundle must be refused as ParseError(versions.yaml), got %v", err)
+	var ve *ValidationError
+	if !errors.As(err, &ve) {
+		t.Fatalf("v1 bundle with transform stanzas must be refused as ValidationError, got %v", err)
 	}
 }
 
