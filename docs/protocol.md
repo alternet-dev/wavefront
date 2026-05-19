@@ -60,7 +60,7 @@ binary refuses a bundle that carries these stanzas (fail-fast, not silent skip):
 Anything not expressible mechanically is out of scope (see non-goals); it does
 not belong in `wavefront`.
 
-`route` is realized by the per-contract `route:` binding (present since v0.1); the v0.2 transform-runtime slice adds no separate route mechanism. That slice's verb engine covers rename/default/optionalize/coerce over top-level body fields; a v0.2 binary reads both `version: 1` bundles (no stanzas → passthrough) and `version: 2` bundles (a v0.1 binary still rejects `version: 2`).
+`route` is realized by the per-contract `route:` binding (present since v0.1); the v0.2 transform-runtime slice adds no separate route mechanism. That slice's verb engine covers rename/default/optionalize/coerce over top-level body fields. A v0.2 binary reads both `version: 1` bundles (no stanzas → passthrough) and `version: 2` bundles; a v0.1 binary still rejects `version: 2`.
 
 ## Version negotiation
 
@@ -104,13 +104,13 @@ from a backend domain error) return:
 
 No client library is shipped: a client checks the HTTP status; structured
 handling (reading the header or decoding `wavefront.v1.Error`) is the
-consumer's own choice. `transform_failed` is established here in v0.2 (422 request-side / 502 response-side). Finer upstream/domain-error typing remains additive future work.
+consumer's own choice. `transform_failed` is established in v0.2 (422 request-side / 502 response-side). Finer upstream/domain-error typing remains additive future work.
 
 ## Deferred to v0.2
 
-Named here so they are not silently dropped: the mechanical transform
-vocabulary; **param-space** transforms (query-string field mapping, same
-verbs); nested / array-element path syntax (e.g. `data[].createdAt`);
+Named here so they are not silently dropped: **param-space** transforms
+(query-string field mapping, same verbs); nested / array-element path
+syntax (e.g. `data[].createdAt`);
 opaque-cursor rename (pagination *wire-format* only — strategy-changing
 pagination is a permanent non-goal, see roadmap); proto-package-version
 defense-in-depth; richer upstream/domain-error typing and status mapping.
