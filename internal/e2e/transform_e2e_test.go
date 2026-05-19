@@ -82,7 +82,10 @@ func TestTransformE2EBothDirections(t *testing.T) {
 	if got != `{"message":"hi","n":"7"}` {
 		t.Errorf("upstream saw %q", got)
 	}
-	md, _ := b.Message("acme.v1.Pong")
+	md, merr := b.Message("acme.v1.Pong")
+	if merr != nil {
+		t.Fatalf("Pong: %v", merr)
+	}
 	out := dynamicpb.NewMessage(md)
 	raw, _ := io.ReadAll(resp.Body)
 	if err := proto.Unmarshal(raw, out); err != nil {
@@ -121,8 +124,11 @@ func TestV1BundleStillPassthrough(t *testing.T) {
 	mu.Lock()
 	got := saw
 	mu.Unlock()
-	if resp.StatusCode != 200 || got != `{"text":"hi","n":7}` {
-		t.Errorf("v1 passthrough changed: status=%d saw=%q", resp.StatusCode, got)
+	if resp.StatusCode != 200 {
+		t.Fatalf("v1 passthrough: status=%d want 200", resp.StatusCode)
+	}
+	if got != `{"text":"hi","n":7}` {
+		t.Errorf("v1 passthrough body changed: saw=%q want {\"text\":\"hi\",\"n\":7}", got)
 	}
 }
 
