@@ -60,6 +60,8 @@ binary refuses a bundle that carries these stanzas (fail-fast, not silent skip):
 Anything not expressible mechanically is out of scope (see non-goals); it does
 not belong in `wavefront`.
 
+`route` is realized by the per-contract `route:` binding (present since v0.1); the v0.2 transform-runtime slice adds no separate route mechanism. That slice's verb engine covers rename/default/optionalize/coerce over top-level body fields; a v0.2 binary reads both `version: 1` bundles (no stanzas → passthrough) and `version: 2` bundles (a v0.1 binary still rejects `version: 2`).
+
 ## Version negotiation
 
 The client declares its contract version in
@@ -97,11 +99,12 @@ from a backend domain error) return:
 | `request_body_too_large` | 413 | `Content-Type` | inbound body exceeds `WAVEFRONT_MAX_BODY_BYTES` |
 | `upstream_timeout` | 504 | `Content-Type`, `Retry-After` | upstream exceeds `WAVEFRONT_REQUEST_TIMEOUT_MS` |
 | `upstream_error` | 502 | `Content-Type` | upstream non-2xx / unreachable / reply un-encodable |
+| `transform_failed` | 422 | `Content-Type` | a request transform verb can't apply — well-formed request, unprocessable under this contract's mapping |
+| `transform_failed` | 502 | `Content-Type` | a response transform verb can't apply — live internal shape drifted from the bundle's response stanzas |
 
 No client library is shipped: a client checks the HTTP status; structured
 handling (reading the header or decoding `wavefront.v1.Error`) is the
-consumer's own choice. `transform_failed` and finer upstream/domain-error
-typing are **v0.2** (no transforms in v0.1).
+consumer's own choice. `transform_failed` is established here in v0.2 (422 request-side / 502 response-side). Finer upstream/domain-error typing remains additive future work.
 
 ## Deferred to v0.2
 
