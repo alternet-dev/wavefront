@@ -13,6 +13,7 @@ const (
 	codeRequestBodyTooLarge        = "request_body_too_large"
 	codeUpstreamTimeout            = "upstream_timeout"
 	codeUpstreamError              = "upstream_error"
+	codeTransformFailed            = "transform_failed"
 )
 
 // Error is a typed, wavefront-originated failure. It satisfies the error
@@ -79,4 +80,18 @@ func UpstreamTimeout(msg string) *Error {
 // reply could not be encoded. 502.
 func UpstreamError(msg string) *Error {
 	return &Error{codeUpstreamError, msgOr(msg, "upstream error"), http.StatusBadGateway}
+}
+
+// TransformFailedRequest — a request transform verb could not apply: the
+// decoded request is well-formed but unprocessable under this contract's
+// mapping. 422 (RFC 9110 §15.5.21).
+func TransformFailedRequest(msg string) *Error {
+	return &Error{codeTransformFailed, msgOr(msg, "request could not be transformed to the internal contract"), http.StatusUnprocessableEntity}
+}
+
+// TransformFailedResponse — a response transform verb could not apply: the
+// live internal shape drifted from the bundle's response stanzas. Same fault
+// class as upstream_error. 502.
+func TransformFailedResponse(msg string) *Error {
+	return &Error{codeTransformFailed, msgOr(msg, "upstream response could not be transformed to the client contract"), http.StatusBadGateway}
 }
