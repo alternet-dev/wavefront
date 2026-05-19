@@ -103,7 +103,7 @@ func coerce(v any, to string) (any, error) {
 		case string:
 			return x, nil
 		case float64:
-			return strconv.FormatFloat(x, 'g', -1, 64), nil
+			return strconv.FormatFloat(x, 'f', -1, 64), nil
 		case bool:
 			return strconv.FormatBool(x), nil
 		}

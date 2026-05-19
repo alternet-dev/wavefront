@@ -95,6 +95,35 @@ func TestCoerce(t *testing.T) {
 	if e == nil {
 		t.Error("non-scalar coerce must fail")
 	}
+	out, e = ApplyRequest([]Op{{Kind: "coerce", Field: "id", CoerceTo: "string"}},
+		[]byte(`{"id":1234567}`))
+	if e != nil || string(out) != `{"id":"1234567"}` {
+		t.Fatalf("large integer->string: got %s err %v", out, e)
+	}
+}
+
+func TestApplyResponseSuccess(t *testing.T) {
+	out, e := ApplyResponse([]Op{{Kind: "rename", From: "internalId", To: "id"}},
+		[]byte(`{"internalId":1}`))
+	if e != nil {
+		t.Fatalf("unexpected error: %v", e)
+	}
+	if string(out) != `{"id":1}` {
+		t.Errorf("got %s", out)
+	}
+}
+
+func TestOptionalizeBeforeCoerceSkips(t *testing.T) {
+	out, e := ApplyRequest([]Op{
+		{Kind: "optionalize", Field: "n"},
+		{Kind: "coerce", Field: "n", CoerceTo: "string"},
+	}, []byte(`{"keep":1}`))
+	if e != nil {
+		t.Fatalf("err: %v", e)
+	}
+	if string(out) != `{"keep":1}` {
+		t.Errorf("got %s", out)
+	}
 }
 
 func TestNonObjectBodyWithOpsFails(t *testing.T) {
