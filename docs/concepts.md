@@ -43,6 +43,21 @@ Synchronous request/response only. Decode → resolve selector → transform
 request → call upstream → transform response → encode. Exactly one upstream
 call per inbound request. No batching, no fan-out, no streaming.
 
+## Bundle lifecycle
+
+The one committed bundle must serve **every still-pinned external contract
+version at once**, all mapped onto *today's* internal backend. So the
+generator **accumulates**: each build merges the current contract version in
+and copies every previously-frozen version through **verbatim** — a prior
+version's external shapes are immutable, and that immutability *is* the
+anti-corruption guarantee. Each version is its own proto package, so the
+merge is a well-defined, byte-reproducible union (a rebuild is a no-op diff).
+Retention is **consumer-side and explicit**: the consumer declares the
+still-supported versions and prunes a retired one as an auditable, CI-gated
+decision, never automatically. `wavefront` infers none of this — it reads the
+multi-entry binding verbatim; lifecycle is wholly a generation/consumer
+concern.
+
 ## Auth model
 
 Auth-transparent. `wavefront` forwards `Authorization` (and tracing headers)

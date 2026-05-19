@@ -22,6 +22,17 @@ Versioned plan. Pre-implementation; this is the intended sequence.
 - Version-map interpreter + the mechanical transform vocabulary
   (rename/default/optionalize/coerce/route).
 - Contract-version negotiation + the typed error model.
+- **Multi-contract generator.** Accumulates every still-pinned external
+  contract version into the one committed bundle: multi-entry `versions.yaml`
+  + disjoint per-version proto packages, a deterministic byte-reproducible
+  merge that never mutates a frozen version, re-emitted from the committed
+  bundle (its own source of truth). Each frozen external is re-pointed at the
+  *current* internal surface via the transform vocabulary above — so
+  multi-contract assembly and transform-stanza emission are one effort and
+  land together, not before. Retention is consumer-declared and CI-gated (no
+  automatic pruning); per-version transform stanzas are consumer-authored (a
+  shape delta can carry intent the generator cannot infer); `buf breaking`
+  gates each frozen package in the consumer's CI.
 
 ## v0.3
 
