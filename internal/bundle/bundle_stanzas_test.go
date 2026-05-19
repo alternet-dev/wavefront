@@ -5,9 +5,10 @@ import (
 	"testing"
 
 	"github.com/alternet-dev/wavefront/internal/bundletest"
+	"github.com/alternet-dev/wavefront/internal/transform"
 )
 
-const v2OK = `version: 2
+const stanzaBundle = `version: 1
 contracts:
   - contract_version: "2024-11"
     route: /v3/echo
@@ -21,53 +22,33 @@ contracts:
       - optionalize: { field: at }
 `
 
-func TestV2BundleParsesOps(t *testing.T) {
-	b, err := Load(bundletest.Dir(t, v2OK))
+func TestStanzasParseIntoOps(t *testing.T) {
+	b, err := Load(bundletest.Dir(t, stanzaBundle))
 	if err != nil {
-		t.Fatalf("v2 load: %v", err)
+		t.Fatalf("load: %v", err)
 	}
 	c, ok := b.Contract("2024-11")
 	if !ok {
 		t.Fatal("contract missing")
 	}
-	if len(c.RequestOps()) != 2 || c.RequestOps()[0].Kind != "rename" {
-		t.Errorf("request ops wrong: %+v", c.RequestOps())
-	}
-	if len(c.ResponseOps()) != 1 || c.ResponseOps()[0].Kind != "optionalize" {
-		t.Errorf("response ops wrong: %+v", c.ResponseOps())
-	}
 	r := c.RequestOps()
-	if r[0].Kind != "rename" || r[0].From != "text" || r[0].To != "message" {
+	if len(r) != 2 {
+		t.Fatalf("request ops: got %d want 2 (%+v)", len(r), r)
+	}
+	if r[0].Kind != transform.KindRename || r[0].From != "text" || r[0].To != "message" {
 		t.Errorf("rename op wrong: %+v", r[0])
 	}
-	if r[1].Kind != "coerce" || r[1].Field != "n" || r[1].CoerceTo != "string" {
+	if r[1].Kind != transform.KindCoerce || r[1].Field != "n" || r[1].CoerceTo != "string" {
 		t.Errorf("coerce op wrong: %+v", r[1])
 	}
-	if op := c.ResponseOps()[0]; op.Kind != "optionalize" || op.Field != "at" {
-		t.Errorf("optionalize op wrong: %+v", op)
-	}
-}
-
-func TestV1WithStanzasRejected(t *testing.T) {
-	bad := `version: 1
-contracts:
-  - contract_version: "2024-11"
-    route: /v3/echo
-    method: POST
-    request_message: acme.v1.Ping
-    response_message: acme.v1.Pong
-    request:
-      - rename: { from: text, to: message }
-`
-	_, err := Load(bundletest.Dir(t, bad))
-	var ve *ValidationError
-	if !errors.As(err, &ve) {
-		t.Fatalf("want ValidationError, got %v", err)
+	resp := c.ResponseOps()
+	if len(resp) != 1 || resp[0].Kind != transform.KindOptionalize || resp[0].Field != "at" {
+		t.Errorf("response ops wrong: %+v", resp)
 	}
 }
 
 func TestUnknownVerbRejected(t *testing.T) {
-	bad := `version: 2
+	bad := `version: 1
 contracts:
   - contract_version: "2024-11"
     route: /v3/echo
@@ -85,7 +66,7 @@ contracts:
 }
 
 func TestRenameFromEqualsToRejected(t *testing.T) {
-	bad := `version: 2
+	bad := `version: 1
 contracts:
   - contract_version: "2024-11"
     route: /v3/echo
@@ -101,7 +82,7 @@ contracts:
 }
 
 func TestCoerceToInvalidRejected(t *testing.T) {
-	bad := `version: 2
+	bad := `version: 1
 contracts:
   - contract_version: "2024-11"
     route: /v3/echo
@@ -117,7 +98,7 @@ contracts:
 }
 
 func TestTwoVerbOpRejected(t *testing.T) {
-	bad := `version: 2
+	bad := `version: 1
 contracts:
   - contract_version: "2024-11"
     route: /v3/echo
@@ -136,7 +117,7 @@ contracts:
 }
 
 func TestEmptyOpRejected(t *testing.T) {
-	bad := `version: 2
+	bad := `version: 1
 contracts:
   - contract_version: "2024-11"
     route: /v3/echo
@@ -154,7 +135,7 @@ contracts:
 }
 
 func TestNonScalarDefaultRejected(t *testing.T) {
-	bad := `version: 2
+	bad := `version: 1
 contracts:
   - contract_version: "2024-11"
     route: /v3/echo
@@ -171,13 +152,13 @@ contracts:
 	}
 }
 
-func TestV1BundleStillLoadsUnderV2Binary(t *testing.T) {
-	b, err := Load(bundletest.Dir(t, "")) // ValidVersions == version: 1, no stanzas
+func TestBundleWithoutStanzasHasNoOps(t *testing.T) {
+	b, err := Load(bundletest.Dir(t, "")) // default ValidVersions: no stanzas
 	if err != nil {
-		t.Fatalf("v1 bundle must still load: %v", err)
+		t.Fatalf("load: %v", err)
 	}
 	c, _ := b.Contract("2024-11")
 	if len(c.RequestOps()) != 0 || len(c.ResponseOps()) != 0 {
-		t.Error("v1 contract must have zero ops")
+		t.Error("a contract without stanzas must have zero ops")
 	}
 }

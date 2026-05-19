@@ -52,7 +52,7 @@ func (e *ParseError) Unwrap() error { return e.Err }
 type UnsupportedVersionError struct{ Version int }
 
 func (e *UnsupportedVersionError) Error() string {
-	return fmt.Sprintf("unsupported bundle schema version %d (only 1 and 2 are supported)", e.Version)
+	return fmt.Sprintf("unsupported bundle schema version %d (only 1 is supported)", e.Version)
 }
 
 type ValidationError struct {
@@ -181,7 +181,7 @@ func Load(dir string) (*Bundle, error) {
 		return nil, err
 	}
 
-	if yb.Version != 1 && yb.Version != 2 {
+	if yb.Version != 1 {
 		return nil, &UnsupportedVersionError{Version: yb.Version}
 	}
 	if len(yb.Contracts) == 0 {
@@ -196,9 +196,6 @@ func Load(dir string) (*Bundle, error) {
 		}
 		if _, dup := contracts[c.contractVersion]; dup {
 			return nil, &ValidationError{Contract: c.contractVersion, Field: "contract_version", Reason: "duplicate"}
-		}
-		if yb.Version == 1 && (len(yc.Request) > 0 || len(yc.Response) > 0) {
-			return nil, &ValidationError{Contract: c.contractVersion, Field: "request/response", Reason: "transform stanzas require bundle schema version 2"}
 		}
 		for _, msg := range []string{c.requestMessage, c.responseMessage} {
 			d, ferr := files.FindDescriptorByName(protoreflect.FullName(msg))

@@ -142,11 +142,11 @@ func TestMalformedFilesAreParseErrors(t *testing.T) {
 }
 
 func TestUnsupportedVersion(t *testing.T) {
-	dir := writeBundle(t, fdsBytes(t), validOpenAPI, "version: 3\ncontracts: []\n")
+	dir := writeBundle(t, fdsBytes(t), validOpenAPI, "version: 2\ncontracts: []\n")
 	_, err := Load(dir)
 	var ue *UnsupportedVersionError
-	if !errors.As(err, &ue) || ue.Version != 3 {
-		t.Fatalf("want UnsupportedVersionError(3), got %v", err)
+	if !errors.As(err, &ue) || ue.Version != 2 {
+		t.Fatalf("want UnsupportedVersionError(2), got %v", err)
 	}
 }
 
