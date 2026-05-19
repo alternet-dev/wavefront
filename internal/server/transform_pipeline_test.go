@@ -1,13 +1,16 @@
 package server
 
 import (
+	"bytes"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/reflect/protoreflect"
 	"google.golang.org/protobuf/types/dynamicpb"
 
 	"github.com/alternet-dev/wavefront/internal/bundle"
@@ -37,14 +40,14 @@ func testCfg(up string) *config.Config {
 	}
 }
 
-func pingBytes(t *testing.T, b *bundle.Bundle) []byte {
+func transformPing(t *testing.T, b *bundle.Bundle) []byte {
 	t.Helper()
 	md, err := b.Message("acme.v1.Ping")
 	if err != nil {
 		t.Fatalf("resolve Ping: %v", err)
 	}
 	m := dynamicpb.NewMessage(md)
-	m.Set(md.Fields().ByName("text"), protoStr("hi"))
+	m.Set(md.Fields().ByName("text"), protoreflect.ValueOfString("hi"))
 	raw, err := proto.Marshal(m)
 	if err != nil {
 		t.Fatalf("marshal Ping: %v", err)
@@ -57,10 +60,13 @@ func TestPipelineAppliesTransformBothDirections(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
+	var mu sync.Mutex
 	var sawBody string
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
+		mu.Lock()
 		sawBody = string(body)
+		mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = io.WriteString(w, `{"msg":"pong"}`)
 	}))
@@ -71,7 +77,7 @@ func TestPipelineAppliesTransformBothDirections(t *testing.T) {
 	fs := httptest.NewServer(s.DataHandler())
 	defer fs.Close()
 
-	req, _ := http.NewRequest(http.MethodPost, fs.URL, bytesReader(pingBytes(t, b)))
+	req, _ := http.NewRequest(http.MethodPost, fs.URL, bytes.NewReader(transformPing(t, b)))
 	req.Header.Set("X-Api-Contract-Version", "2024-11")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -82,8 +88,11 @@ func TestPipelineAppliesTransformBothDirections(t *testing.T) {
 	if resp.StatusCode != 200 {
 		t.Fatalf("status %d", resp.StatusCode)
 	}
-	if sawBody != `{"message":"hi"}` {
-		t.Errorf("upstream saw %q want {\"message\":\"hi\"}", sawBody)
+	mu.Lock()
+	got := sawBody
+	mu.Unlock()
+	if got != `{"message":"hi"}` {
+		t.Errorf("upstream saw %q want {\"message\":\"hi\"}", got)
 	}
 	md, _ := b.Message("acme.v1.Pong")
 	out := dynamicpb.NewMessage(md)
@@ -112,7 +121,7 @@ func TestPipelineResponseDriftIs502(t *testing.T) {
 	fs := httptest.NewServer(s.DataHandler())
 	defer fs.Close()
 
-	req, _ := http.NewRequest(http.MethodPost, fs.URL, bytesReader(pingBytes(t, b)))
+	req, _ := http.NewRequest(http.MethodPost, fs.URL, bytes.NewReader(transformPing(t, b)))
 	req.Header.Set("X-Api-Contract-Version", "2024-11")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -127,5 +136,47 @@ func TestPipelineResponseDriftIs502(t *testing.T) {
 	}
 	if resp.Header.Get("X-Wavefront-Contract-Version") != "2024-11" {
 		t.Errorf("contract-version header = %q", resp.Header.Get("X-Wavefront-Contract-Version"))
+	}
+}
+
+func TestPipelineRequestTransformFailureIs422(t *testing.T) {
+	b, err := bundle.Load(bundletest.Dir(t, v2))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		t.Error("upstream must not be called when the request transform fails")
+	}))
+	defer up.Close()
+
+	s := New(testCfg(up.URL))
+	s.SetBundle(b)
+	fs := httptest.NewServer(s.DataHandler())
+	defer fs.Close()
+
+	md, merr := b.Message("acme.v1.Ping")
+	if merr != nil {
+		t.Fatalf("resolve Ping: %v", merr)
+	}
+	empty, perr := proto.Marshal(dynamicpb.NewMessage(md)) // no fields set -> {}
+	if perr != nil {
+		t.Fatalf("marshal: %v", perr)
+	}
+
+	req, _ := http.NewRequest(http.MethodPost, fs.URL, bytes.NewReader(empty))
+	req.Header.Set("X-Api-Contract-Version", "2024-11")
+	resp, derr := http.DefaultClient.Do(req)
+	if derr != nil {
+		t.Fatalf("request: %v", derr)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnprocessableEntity {
+		t.Fatalf("want 422, got %d", resp.StatusCode)
+	}
+	if resp.Header.Get("X-Wavefront-Error") != "transform_failed" {
+		t.Errorf("X-Wavefront-Error=%q want transform_failed", resp.Header.Get("X-Wavefront-Error"))
+	}
+	if resp.Header.Get("X-Wavefront-Contract-Version") != "2024-11" {
+		t.Errorf("contract-version header=%q", resp.Header.Get("X-Wavefront-Contract-Version"))
 	}
 }
