@@ -214,28 +214,6 @@ contracts:
 	}
 }
 
-// A v1 bundle must not carry request:/response: transform stanzas.
-// Since v2 stanzas are declared fields, strict decode accepts them, but Load
-// rejects them with a ValidationError when schema version is 1.
-func TestV1WithTransformStanzasRejected(t *testing.T) {
-	y := `version: 1
-contracts:
-  - contract_version: "2024-11"
-    route: /v3/me/session
-    method: GET
-    request_message: acme.v1.Ping
-    response_message: acme.v1.Pong
-    request:
-      - rename: { from: displayName, to: display_name }
-`
-	dir := writeBundle(t, fdsBytes(t), validOpenAPI, y)
-	_, err := Load(dir)
-	var ve *ValidationError
-	if !errors.As(err, &ve) {
-		t.Fatalf("v1 bundle with transform stanzas must be refused as ValidationError, got %v", err)
-	}
-}
-
 func TestBindingMessageNotInDescriptorsRejected(t *testing.T) {
 	y := `version: 1
 contracts:

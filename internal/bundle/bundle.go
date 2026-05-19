@@ -197,6 +197,9 @@ func Load(dir string) (*Bundle, error) {
 		if _, dup := contracts[c.contractVersion]; dup {
 			return nil, &ValidationError{Contract: c.contractVersion, Field: "contract_version", Reason: "duplicate"}
 		}
+		if yb.Version == 1 && (len(yc.Request) > 0 || len(yc.Response) > 0) {
+			return nil, &ValidationError{Contract: c.contractVersion, Field: "request/response", Reason: "transform stanzas require bundle schema version 2"}
+		}
 		for _, msg := range []string{c.requestMessage, c.responseMessage} {
 			d, ferr := files.FindDescriptorByName(protoreflect.FullName(msg))
 			if ferr != nil {
@@ -205,9 +208,6 @@ func Load(dir string) (*Bundle, error) {
 			if _, ok := d.(protoreflect.MessageDescriptor); !ok {
 				return nil, &MessageNotFoundError{Contract: c.contractVersion, Message: msg}
 			}
-		}
-		if yb.Version == 1 && (len(yc.Request) > 0 || len(yc.Response) > 0) {
-			return nil, &ValidationError{Contract: c.contractVersion, Field: "request/response", Reason: "transform stanzas require bundle schema version 2"}
 		}
 		reqOps, oerr := toOps(c.contractVersion, "request", yc.Request)
 		if oerr != nil {
