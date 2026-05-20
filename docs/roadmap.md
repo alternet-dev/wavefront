@@ -17,39 +17,47 @@ Versioned plan. Pre-implementation; this is the intended sequence.
   `descriptors.binpb` + the binding-only `versions.yaml` (transform-stanza
   emission rolls to v0.2 with runtime transform support).
 
-## v0.2
+## v0.2 — transform runtime
 
-- **Transform runtime — shipped.** Mechanical verb interpreter over the
-  request/response body JSON: rename / default / optionalize / coerce,
-  with `transform_failed` (422 request / 502 response). Addressing
-  covers top-level fields plus nested + array-element paths via the
-  path grammar (`data.user.email`, `data[].createdAt`). `route` is the
-  v0.1 binding.
-- Contract-version negotiation + the typed error model.
-- **Multi-contract generator.** Accumulates every still-pinned external
-  contract version into the one committed bundle: multi-entry `versions.yaml`
-  + disjoint per-version proto packages, a deterministic byte-reproducible
-  merge that never mutates a frozen version, re-emitted from the committed
-  bundle (its own source of truth). Each frozen external is re-pointed at the
-  *current* internal surface via the transform vocabulary above — so
-  multi-contract assembly and transform-stanza emission are one effort and
-  land together, not before. Retention is consumer-declared and CI-gated (no
-  automatic pruning); per-version transform stanzas are consumer-authored (a
-  shape delta can carry intent the generator cannot infer); `buf breaking`
-  gates each frozen package in the consumer's CI.
+- Mechanical verb interpreter over the request/response body JSON:
+  rename / default / optionalize / coerce, with `transform_failed`
+  (422 request / 502 response). Addressing covers top-level fields plus
+  nested + array-element paths via the path grammar
+  (`data.user.email`, `data[].createdAt`). `route` is the v0.1 binding.
 
-## v0.3
+## v0.3 — multi-contract generator
 
-- Per-version observability (translation-outcome metrics/logs).
+- Accumulates every still-pinned external contract version into the
+  one committed bundle: multi-entry `versions.yaml` + disjoint
+  per-version proto packages, a deterministic byte-reproducible merge
+  that never mutates a frozen version, re-emitted from the committed
+  bundle (its own source of truth). Each frozen external is re-pointed
+  at the *current* internal surface via the transform vocabulary —
+  multi-contract assembly and transform-stanza emission are one effort
+  and land together, not before. Retention is consumer-declared and
+  CI-gated (no automatic pruning); per-version transform stanzas are
+  consumer-authored (a shape delta can carry intent the generator
+  cannot infer); `buf breaking` gates each frozen package in the
+  consumer's CI.
+
+## v0.4+ — to renegotiate
+
+Pinned here without minor-version commitments; reshuffled after v0.3
+ships and we have prod feedback. v0.x stays open for as long as it
+takes to work the kinks out; v1.0 isn't an explicit target. Candidate
+work:
+
+- Per-version observability (translation-outcome metrics / logs).
 - `SIGHUP` hot reload with previous-bundle fallback.
-- **Version-skew test suite** (old bundle vs new internal shape) + `buf
+- Version-skew test suite (old bundle vs new internal shape) + `buf
   breaking` CI gate.
-
-## v1.0
-
-- Stable bundle schema + wire contract. Second codec adapter (proves
-  codec-agnosticism). Selector generalization documented for the non-version
-  selectors (codec / profile / tenant / cohort).
+- Second codec adapter (proves codec-agnosticism — the adapter
+  boundary already expects this).
+- Selector generalization documented for the non-version selectors
+  (codec / profile / tenant / cohort).
+- Bundle-schema and wire-contract stability declaration (a stability
+  promise that consumers can rely on across minor versions; lands
+  whenever the surface has actually settled in practice).
 
 ## Non-goals (any version)
 
@@ -75,7 +83,7 @@ fanout).
   `POST /graphql`, which breaks the fixed-`response_message`-per-route and
   route-remap assumptions. The v0.1 `adapter` boundary is kept
   interaction-model-agnostic so it can be added without reworking the
-  server/negotiate core. Out for v0.1.
+  server/negotiate core. Future minor.
 - **gRPC ↔ HTTP** is anticipated as another future adapter, on the same
   model-agnostic `adapter` boundary. Unary first — it fits the
   one-synchronous-upstream-call invariant; it is more than a codec swap
@@ -83,4 +91,4 @@ fanout).
   GraphQL). Streaming gRPC is a *distant-future* wavefront extension in its
   own right — point-to-point streaming RPC, which is a different problem
   from the `wss-mux` sibling's server-driven WS *fanout* (that stays out;
-  see non-goals). Out for v0.1.
+  see non-goals). Future minor.
