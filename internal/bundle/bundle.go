@@ -300,6 +300,9 @@ func sameParentDifferentLeaf(p, q transform.Path) bool {
 // spec's validation table; internal-targeting paths get only the grammar
 // + structural checks (the live upstream is the gate).
 func toOps(cv, dir string, raw []yamlOp, reqMsg, respMsg protoreflect.MessageDescriptor) ([]transform.Op, error) {
+	if dir != "request" && dir != "response" {
+		return nil, fmt.Errorf("toOps: unknown direction %q (must be request or response)", dir)
+	}
 	// external returns the descriptor a given stanza-role's path targets,
 	// or nil if it targets the internal (upstream) shape.
 	external := func(role string) protoreflect.MessageDescriptor {

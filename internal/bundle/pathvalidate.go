@@ -14,6 +14,9 @@ import (
 // (LABEL_REPEATED). The final segment's field must exist (any type — leaf
 // type rules belong to runtime).
 //
+// A repeated field at the final (leaf) position is accepted regardless of
+// the [] annotation; leaf arity rules are deferred to the runtime.
+//
 // segLabel: a label for error messages identifying the path's role
 // (e.g. "request.rename.from").
 func validatePathAgainstMessage(p transform.Path, md protoreflect.MessageDescriptor, segLabel string) error {

@@ -62,6 +62,22 @@ func e2ePing(t *testing.T, b *bundle.Bundle) []byte {
 	return raw
 }
 
+func e2ePingTextOnly(t *testing.T, b *bundle.Bundle) []byte {
+	t.Helper()
+	md, err := b.Message("acme.v1.Ping")
+	if err != nil {
+		t.Fatalf("Ping: %v", err)
+	}
+	m := dynamicpb.NewMessage(md)
+	m.Set(md.Fields().ByName("text"), protoreflect.ValueOfString("hi"))
+	// n deliberately unset — proto3 zero value will be omitted by protojson.
+	raw, err := proto.Marshal(m)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	return raw
+}
+
 func TestTransformE2EBothDirections(t *testing.T) {
 	b, err := bundle.Load(bundletest.Dir(t, stanzaVersions))
 	if err != nil {
@@ -179,5 +195,44 @@ contracts:
 	}
 	if resp.Header.Get("X-Wavefront-Error") != "transform_failed" {
 		t.Errorf("X-Wavefront-Error=%q", resp.Header.Get("X-Wavefront-Error"))
+	}
+}
+
+func TestRenameSourceAbsentRequestIs422E2E(t *testing.T) {
+	// Bundle: rename `n` -> `renamed_n`. `n` exists on the descriptor
+	// (passes load-time cross-check) but the request has it unset (proto3
+	// zero-value omitted by protojson), so runtime rename source is absent
+	// -> 422 transform_failed.
+	bundleYAML := `version: 1
+contracts:
+  - contract_version: "2024-11"
+    route: /v3/echo
+    method: POST
+    request_message: acme.v1.Ping
+    response_message: acme.v1.Pong
+    request:
+      - rename: { from: n, to: renamed_n }
+`
+	b, err := bundle.Load(bundletest.Dir(t, bundleYAML))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	up := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
+		t.Error("upstream must not be called on request transform failure")
+	}))
+	defer up.Close()
+	fs := front(t, b, cfg(up.URL))
+	req, _ := http.NewRequest(http.MethodPost, fs.URL, bytes.NewReader(e2ePingTextOnly(t, b)))
+	req.Header.Set("X-Api-Contract-Version", "2024-11")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("do: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnprocessableEntity {
+		t.Fatalf("want 422, got %d", resp.StatusCode)
+	}
+	if resp.Header.Get("X-Wavefront-Error") != "transform_failed" {
+		t.Errorf("X-Wavefront-Error=%q want transform_failed", resp.Header.Get("X-Wavefront-Error"))
 	}
 }
