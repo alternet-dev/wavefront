@@ -18,7 +18,7 @@ import (
 	"github.com/alternet-dev/wavefront/internal/config"
 )
 
-const v2 = `version: 2
+const stanzaBundle = `version: 1
 contracts:
   - contract_version: "2024-11"
     route: /v3/echo
@@ -56,7 +56,7 @@ func transformPing(t *testing.T, b *bundle.Bundle) []byte {
 }
 
 func TestPipelineAppliesTransformBothDirections(t *testing.T) {
-	b, err := bundle.Load(bundletest.Dir(t, v2))
+	b, err := bundle.Load(bundletest.Dir(t, stanzaBundle))
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
@@ -106,7 +106,7 @@ func TestPipelineAppliesTransformBothDirections(t *testing.T) {
 }
 
 func TestPipelineResponseDriftIs502(t *testing.T) {
-	b, err := bundle.Load(bundletest.Dir(t, v2))
+	b, err := bundle.Load(bundletest.Dir(t, stanzaBundle))
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
@@ -140,7 +140,7 @@ func TestPipelineResponseDriftIs502(t *testing.T) {
 }
 
 func TestPipelineRequestTransformFailureIs422(t *testing.T) {
-	b, err := bundle.Load(bundletest.Dir(t, v2))
+	b, err := bundle.Load(bundletest.Dir(t, stanzaBundle))
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
