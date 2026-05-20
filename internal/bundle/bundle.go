@@ -257,7 +257,7 @@ func loadVersions(path string) (*yamlBundle, error) {
 		return nil, &ReadError{File: fileVersions, Err: err}
 	}
 	dec := yaml.NewDecoder(bytes.NewReader(raw))
-	dec.KnownFields(true) // refuse unknown keys; declared v2 stanzas are valid
+	dec.KnownFields(true) // refuse any unknown key
 	var yb yamlBundle
 	if err := dec.Decode(&yb); err != nil {
 		return nil, &ParseError{File: fileVersions, Err: err}

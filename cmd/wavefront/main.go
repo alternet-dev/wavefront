@@ -3,7 +3,7 @@
 //
 // Compose: parse config → load+validate the bundle (fail-fast; refuse to
 // start on a bad bundle) → serve the data-plane and ops listeners until
-// SIGINT/SIGTERM. SIGHUP hot-reload is v0.3.
+// SIGINT/SIGTERM.
 package main
 
 import (
