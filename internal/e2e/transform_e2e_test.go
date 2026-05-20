@@ -16,7 +16,7 @@ import (
 	"github.com/alternet-dev/wavefront/internal/bundletest"
 )
 
-const v2Versions = `version: 2
+const stanzaVersions = `version: 1
 contracts:
   - contract_version: "2024-11"
     route: /v3/echo
@@ -47,7 +47,7 @@ func e2ePing(t *testing.T, b *bundle.Bundle) []byte {
 }
 
 func TestTransformE2EBothDirections(t *testing.T) {
-	b, err := bundle.Load(bundletest.Dir(t, v2Versions))
+	b, err := bundle.Load(bundletest.Dir(t, stanzaVersions))
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
@@ -96,10 +96,10 @@ func TestTransformE2EBothDirections(t *testing.T) {
 	}
 }
 
-func TestV1BundleStillPassthrough(t *testing.T) {
-	b, err := bundle.Load(bundletest.Dir(t, "")) // v1, no stanzas
+func TestNoStanzasPassthrough(t *testing.T) {
+	b, err := bundle.Load(bundletest.Dir(t, "")) // no stanzas
 	if err != nil {
-		t.Fatalf("load v1: %v", err)
+		t.Fatalf("load: %v", err)
 	}
 	var mu sync.Mutex
 	var saw string
@@ -125,15 +125,15 @@ func TestV1BundleStillPassthrough(t *testing.T) {
 	got := saw
 	mu.Unlock()
 	if resp.StatusCode != 200 {
-		t.Fatalf("v1 passthrough: status=%d want 200", resp.StatusCode)
+		t.Fatalf("passthrough: status=%d want 200", resp.StatusCode)
 	}
 	if got != `{"text":"hi","n":7}` {
-		t.Errorf("v1 passthrough body changed: saw=%q want {\"text\":\"hi\",\"n\":7}", got)
+		t.Errorf("passthrough body changed: saw=%q want {\"text\":\"hi\",\"n\":7}", got)
 	}
 }
 
 func TestRequestTransformFailureIs422E2E(t *testing.T) {
-	noText := `version: 2
+	noText := `version: 1
 contracts:
   - contract_version: "2024-11"
     route: /v3/echo
