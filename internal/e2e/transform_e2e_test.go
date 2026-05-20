@@ -2,9 +2,11 @@ package e2e
 
 import (
 	"bytes"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"sync"
 	"testing"
 
@@ -15,6 +17,20 @@ import (
 	"github.com/alternet-dev/wavefront/internal/bundle"
 	"github.com/alternet-dev/wavefront/internal/bundletest"
 )
+
+// upstreamJSONEquals decodes `got` and compares against `want` semantically.
+// protojson.Marshal deliberately injects randomized whitespace between
+// tokens, so exact-byte comparison against its output is flaky on CI.
+func upstreamJSONEquals(t *testing.T, got string, want map[string]any) {
+	t.Helper()
+	var have map[string]any
+	if err := json.Unmarshal([]byte(got), &have); err != nil {
+		t.Fatalf("upstream body not JSON: %v (raw=%q)", err, got)
+	}
+	if !reflect.DeepEqual(have, want) {
+		t.Errorf("upstream body wrong: got=%v want=%v", have, want)
+	}
+}
 
 const stanzaVersions = `version: 1
 contracts:
@@ -79,9 +95,7 @@ func TestTransformE2EBothDirections(t *testing.T) {
 	got := saw
 	mu.Unlock()
 	// proto3 JSON renders int32 as a number; coerce n->string makes it "7"
-	if got != `{"message":"hi","n":"7"}` {
-		t.Errorf("upstream saw %q", got)
-	}
+	upstreamJSONEquals(t, got, map[string]any{"message": "hi", "n": "7"})
 	md, merr := b.Message("acme.v1.Pong")
 	if merr != nil {
 		t.Fatalf("Pong: %v", merr)
@@ -127,9 +141,7 @@ func TestNoStanzasPassthrough(t *testing.T) {
 	if resp.StatusCode != 200 {
 		t.Fatalf("passthrough: status=%d want 200", resp.StatusCode)
 	}
-	if got != `{"text":"hi","n":7}` {
-		t.Errorf("passthrough body changed: saw=%q want {\"text\":\"hi\",\"n\":7}", got)
-	}
+	upstreamJSONEquals(t, got, map[string]any{"text": "hi", "n": float64(7)})
 }
 
 func TestRequestTransformFailureIs422E2E(t *testing.T) {
