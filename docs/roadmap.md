@@ -19,14 +19,12 @@ Versioned plan. Pre-implementation; this is the intended sequence.
 
 ## v0.2
 
-- **Transform runtime (slice 1 — active).** Mechanical verb interpreter
-  (rename/default/optionalize/coerce) over top-level body fields;
-  `transform_failed` (422 request / 502 response). `route` is the v0.1
-  binding.
-- Transform follow-ups: **slice 2 (shipped)** — nested/array-element path
-  syntax (`data[].field`), pure addressing extension to the verb engine.
-  **slice 3** — param-space (query-string) transforms (same verbs over
-  query params). Depends on slice 1.
+- **Transform runtime — shipped.** Mechanical verb interpreter over the
+  request/response body JSON: rename / default / optionalize / coerce,
+  with `transform_failed` (422 request / 502 response). Addressing
+  covers top-level fields plus nested + array-element paths via the
+  path grammar (`data.user.email`, `data[].createdAt`). `route` is the
+  v0.1 binding.
 - Contract-version negotiation + the typed error model.
 - **Multi-contract generator.** Accumulates every still-pinned external
   contract version into the one committed bundle: multi-entry `versions.yaml`
@@ -59,9 +57,13 @@ Auth/policy/PII redaction; business logic; non-mechanical/scripted transforms;
 **semantic transformation of any kind — `wavefront` only ever maps wire
 format, never content**, so **strategy-changing pagination** (offset↔cursor,
 page-number↔token) is permanently out (opaque-cursor *rename* is fine — that
-is wire-format); message broker / database / persistence; TLS/cert/host
-routing; service discovery beyond one upstream; WebSocket/streaming (the
-`wss-mux` sibling owns WS fanout).
+is wire-format); **query-param transforms** — cross-version param-shape
+differences belong to the routing layer (each contract routes to its own
+internal version, whose OpenAPI owns that version's param names), so the
+proxy forwards `r.URL.RawQuery` verbatim and never translates it; message
+broker / database / persistence; TLS/cert/host routing; service discovery
+beyond one upstream; WebSocket/streaming (the `wss-mux` sibling owns WS
+fanout).
 
 ## Open questions
 
