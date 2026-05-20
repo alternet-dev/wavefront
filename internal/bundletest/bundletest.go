@@ -31,7 +31,10 @@ contracts:
 
 // FDSBytes returns the wire bytes of a self-contained FileDescriptorSet:
 // google.protobuf.Timestamp plus acme.v1 {Ping{string text=1; int32 n=2},
-// Pong{string text=1; google.protobuf.Timestamp at=2}}.
+// Pong{string text=1; google.protobuf.Timestamp at=2}}. It also includes
+// Item{int32 id=1; string text=2}, Meta{string locale=1}, and
+// PingV2{repeated Item items=1; optional Meta meta=2} for nested/array
+// transform coverage.
 func FDSBytes(t testing.TB) []byte {
 	t.Helper()
 	tsFDP := protodesc.ToFileDescriptorProto(timestamppb.File_google_protobuf_timestamp_proto)
@@ -59,6 +62,34 @@ func FDSBytes(t testing.TB) []byte {
 		TypeName: proto.String(".google.protobuf.Timestamp"),
 		JsonName: proto.String("at"),
 	}
+	itemMsg := &descriptorpb.DescriptorProto{
+		Name:  proto.String("Item"),
+		Field: []*descriptorpb.FieldDescriptorProto{i32("id", 1), str("text", 2)},
+	}
+	metaMsg := &descriptorpb.DescriptorProto{
+		Name:  proto.String("Meta"),
+		Field: []*descriptorpb.FieldDescriptorProto{str("locale", 1)},
+	}
+	pingV2Items := &descriptorpb.FieldDescriptorProto{
+		Name:     proto.String("items"),
+		Number:   proto.Int32(1),
+		Label:    descriptorpb.FieldDescriptorProto_LABEL_REPEATED.Enum(),
+		Type:     descriptorpb.FieldDescriptorProto_TYPE_MESSAGE.Enum(),
+		TypeName: proto.String(".acme.v1.Item"),
+		JsonName: proto.String("items"),
+	}
+	pingV2Meta := &descriptorpb.FieldDescriptorProto{
+		Name:     proto.String("meta"),
+		Number:   proto.Int32(2),
+		Label:    descriptorpb.FieldDescriptorProto_LABEL_OPTIONAL.Enum(),
+		Type:     descriptorpb.FieldDescriptorProto_TYPE_MESSAGE.Enum(),
+		TypeName: proto.String(".acme.v1.Meta"),
+		JsonName: proto.String("meta"),
+	}
+	pingV2 := &descriptorpb.DescriptorProto{
+		Name:  proto.String("PingV2"),
+		Field: []*descriptorpb.FieldDescriptorProto{pingV2Items, pingV2Meta},
+	}
 	acme := &descriptorpb.FileDescriptorProto{
 		Name:       proto.String("acme/v1/types.proto"),
 		Package:    proto.String("acme.v1"),
@@ -67,6 +98,9 @@ func FDSBytes(t testing.TB) []byte {
 		MessageType: []*descriptorpb.DescriptorProto{
 			{Name: proto.String("Ping"), Field: []*descriptorpb.FieldDescriptorProto{str("text", 1), i32("n", 2)}},
 			{Name: proto.String("Pong"), Field: []*descriptorpb.FieldDescriptorProto{str("text", 1), ts}},
+			itemMsg,
+			metaMsg,
+			pingV2,
 		},
 	}
 	b, err := proto.Marshal(&descriptorpb.FileDescriptorSet{
