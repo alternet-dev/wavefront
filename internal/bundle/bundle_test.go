@@ -214,27 +214,6 @@ contracts:
 	}
 }
 
-// A v0.2 bundle carries request:/response: transform stanzas. A v0.1 binary
-// must REFUSE it (strict unknown-field decode), never half-apply it.
-func TestStrictRejectsV02TransformStanzas(t *testing.T) {
-	y := `version: 1
-contracts:
-  - contract_version: "2024-11"
-    route: /v3/me/session
-    method: GET
-    request_message: acme.v1.Ping
-    response_message: acme.v1.Pong
-    request:
-      - rename: { from: displayName, to: display_name }
-`
-	dir := writeBundle(t, fdsBytes(t), validOpenAPI, y)
-	_, err := Load(dir)
-	var pe *ParseError
-	if !errors.As(err, &pe) || pe.File != fileVersions {
-		t.Fatalf("v0.2 transform bundle must be refused as ParseError(versions.yaml), got %v", err)
-	}
-}
-
 func TestBindingMessageNotInDescriptorsRejected(t *testing.T) {
 	y := `version: 1
 contracts:

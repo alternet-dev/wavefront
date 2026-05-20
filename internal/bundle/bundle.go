@@ -2,8 +2,9 @@
 // (descriptors.binpb + openapi.json + versions.yaml) at boot, fail-fast. The
 // route → message binding is read verbatim (zero inference); every binding is
 // resolved against the FileDescriptorSet here so the runtime never has to.
-// A v0.2 bundle (transform stanzas) is refused by strict decode, not
-// half-applied. SIGHUP hot-reload is v0.3; v0.1 loads once.
+// Bundles may carry optional request/response transform stanzas (additive
+// fields parsed into per-contract `[]transform.Op`). Unknown keys are
+// refused by strict decode.
 package bundle
 
 import (
@@ -21,6 +22,8 @@ import (
 	"google.golang.org/protobuf/reflect/protoregistry"
 	"google.golang.org/protobuf/types/descriptorpb"
 	"gopkg.in/yaml.v3"
+
+	"github.com/alternet-dev/wavefront/internal/transform"
 )
 
 const (
@@ -74,7 +77,7 @@ func (e *MessageNotFoundError) Error() string {
 
 // --- model ---
 
-// Contract is one resolved v0.1 binding. Fields are unexported with accessors
+// Contract is one resolved binding. Fields are unexported with accessors
 // so it satisfies an adapter Binding interface (RequestMessage/ResponseMessage)
 // structurally, with no import cycle.
 type Contract struct {
@@ -83,13 +86,17 @@ type Contract struct {
 	method          string
 	requestMessage  string
 	responseMessage string
+	requestOps      []transform.Op
+	responseOps     []transform.Op
 }
 
-func (c *Contract) ContractVersion() string { return c.contractVersion }
-func (c *Contract) Route() string           { return c.route }
-func (c *Contract) Method() string          { return c.method }
-func (c *Contract) RequestMessage() string  { return c.requestMessage }
-func (c *Contract) ResponseMessage() string { return c.responseMessage }
+func (c *Contract) ContractVersion() string     { return c.contractVersion }
+func (c *Contract) Route() string               { return c.route }
+func (c *Contract) Method() string              { return c.method }
+func (c *Contract) RequestMessage() string      { return c.requestMessage }
+func (c *Contract) ResponseMessage() string     { return c.responseMessage }
+func (c *Contract) RequestOps() []transform.Op  { return c.requestOps }
+func (c *Contract) ResponseOps() []transform.Op { return c.responseOps }
 
 type Bundle struct {
 	contracts map[string]*Contract
@@ -118,11 +125,35 @@ func (b *Bundle) Message(fullName string) (protoreflect.MessageDescriptor, error
 // --- on-disk shape (strict-decoded) ---
 
 type yamlContract struct {
-	ContractVersion string `yaml:"contract_version"`
-	Route           string `yaml:"route"`
-	Method          string `yaml:"method"`
-	RequestMessage  string `yaml:"request_message"`
-	ResponseMessage string `yaml:"response_message"`
+	ContractVersion string   `yaml:"contract_version"`
+	Route           string   `yaml:"route"`
+	Method          string   `yaml:"method"`
+	RequestMessage  string   `yaml:"request_message"`
+	ResponseMessage string   `yaml:"response_message"`
+	Request         []yamlOp `yaml:"request"`
+	Response        []yamlOp `yaml:"response"`
+}
+
+type yamlRename struct {
+	From string `yaml:"from"`
+	To   string `yaml:"to"`
+}
+type yamlDefault struct {
+	Field string `yaml:"field"`
+	Value any    `yaml:"value"`
+}
+type yamlField struct {
+	Field string `yaml:"field"`
+}
+type yamlCoerce struct {
+	Field string `yaml:"field"`
+	To    string `yaml:"to"`
+}
+type yamlOp struct {
+	Rename      *yamlRename  `yaml:"rename"`
+	Default     *yamlDefault `yaml:"default"`
+	Optionalize *yamlField   `yaml:"optionalize"`
+	Coerce      *yamlCoerce  `yaml:"coerce"`
 }
 
 type yamlBundle struct {
@@ -176,6 +207,16 @@ func Load(dir string) (*Bundle, error) {
 				return nil, &MessageNotFoundError{Contract: c.contractVersion, Message: msg}
 			}
 		}
+		reqOps, oerr := toOps(c.contractVersion, "request", yc.Request)
+		if oerr != nil {
+			return nil, oerr
+		}
+		respOps, oerr := toOps(c.contractVersion, "response", yc.Response)
+		if oerr != nil {
+			return nil, oerr
+		}
+		c.requestOps = reqOps
+		c.responseOps = respOps
 		contracts[c.contractVersion] = c
 	}
 
@@ -216,12 +257,60 @@ func loadVersions(path string) (*yamlBundle, error) {
 		return nil, &ReadError{File: fileVersions, Err: err}
 	}
 	dec := yaml.NewDecoder(bytes.NewReader(raw))
-	dec.KnownFields(true) // refuse v0.2 transform stanzas / any unknown key
+	dec.KnownFields(true) // refuse unknown keys; declared v2 stanzas are valid
 	var yb yamlBundle
 	if err := dec.Decode(&yb); err != nil {
 		return nil, &ParseError{File: fileVersions, Err: err}
 	}
 	return &yb, nil
+}
+
+func toOps(cv, dir string, raw []yamlOp) ([]transform.Op, error) {
+	ops := make([]transform.Op, 0, len(raw))
+	for _, o := range raw {
+		set := 0
+		var op transform.Op
+		if o.Rename != nil {
+			set++
+			if o.Rename.From == "" || o.Rename.To == "" || o.Rename.From == o.Rename.To {
+				return nil, &ValidationError{Contract: cv, Field: dir + ".rename", Reason: "from/to must be non-empty and distinct"}
+			}
+			op = transform.Op{Kind: transform.KindRename, From: o.Rename.From, To: o.Rename.To}
+		}
+		if o.Default != nil {
+			set++
+			if o.Default.Field == "" {
+				return nil, &ValidationError{Contract: cv, Field: dir + ".default", Reason: "field must be non-empty"}
+			}
+			dv, derr := transform.NewDefaultValue(o.Default.Value)
+			if derr != nil {
+				return nil, &ValidationError{Contract: cv, Field: dir + ".default.value", Reason: derr.Error()}
+			}
+			op = transform.Op{Kind: transform.KindDefault, Field: o.Default.Field, Value: dv}
+		}
+		if o.Optionalize != nil {
+			set++
+			if o.Optionalize.Field == "" {
+				return nil, &ValidationError{Contract: cv, Field: dir + ".optionalize", Reason: "field must be non-empty"}
+			}
+			op = transform.Op{Kind: transform.KindOptionalize, Field: o.Optionalize.Field}
+		}
+		if o.Coerce != nil {
+			set++
+			if o.Coerce.Field == "" {
+				return nil, &ValidationError{Contract: cv, Field: dir + ".coerce", Reason: "field must be non-empty"}
+			}
+			if o.Coerce.To != "string" && o.Coerce.To != "number" && o.Coerce.To != "bool" {
+				return nil, &ValidationError{Contract: cv, Field: dir + ".coerce.to", Reason: "must be string|number|bool"}
+			}
+			op = transform.Op{Kind: transform.KindCoerce, Field: o.Coerce.Field, CoerceTo: o.Coerce.To}
+		}
+		if set != 1 {
+			return nil, &ValidationError{Contract: cv, Field: dir, Reason: "each transform op must set exactly one verb"}
+		}
+		ops = append(ops, op)
+	}
+	return ops, nil
 }
 
 func validateContract(yc yamlContract) (*Contract, error) {
