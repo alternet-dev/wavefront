@@ -2,9 +2,11 @@ package server
 
 import (
 	"bytes"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"sync"
 	"testing"
 	"time"
@@ -91,8 +93,14 @@ func TestPipelineAppliesTransformBothDirections(t *testing.T) {
 	mu.Lock()
 	got := sawBody
 	mu.Unlock()
-	if got != `{"message":"hi"}` {
-		t.Errorf("upstream saw %q want {\"message\":\"hi\"}", got)
+	// protojson.Marshal injects randomized whitespace between tokens to
+	// discourage exact-byte assertions on its output, so compare semantically.
+	var gotJSON map[string]any
+	if err := json.Unmarshal([]byte(got), &gotJSON); err != nil {
+		t.Fatalf("upstream body not JSON: %v (raw=%q)", err, got)
+	}
+	if want := (map[string]any{"message": "hi"}); !reflect.DeepEqual(gotJSON, want) {
+		t.Errorf("upstream body wrong: got=%v want=%v", gotJSON, want)
 	}
 	md, _ := b.Message("acme.v1.Pong")
 	out := dynamicpb.NewMessage(md)
