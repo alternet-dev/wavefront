@@ -265,6 +265,25 @@ func loadVersions(path string) (*yamlBundle, error) {
 	return &yb, nil
 }
 
+// sameParentDifferentLeaf reports whether p and q are the same length, agree
+// segment-for-segment on every non-final segment (same Name AND same Array
+// flag — the structural parent path must be identical), and differ at the
+// final leaf's Name. It is the load-time invariant for rename: apply()
+// writes the new leaf into the from-leaf's parent map, so any cross-parent
+// rename would silently land at the wrong location.
+func sameParentDifferentLeaf(p, q transform.Path) bool {
+	if len(p) != len(q) || len(p) == 0 {
+		return false
+	}
+	for i := 0; i < len(p)-1; i++ {
+		if p[i] != q[i] {
+			return false
+		}
+	}
+	last := len(p) - 1
+	return p[last].Name != q[last].Name
+}
+
 func toOps(cv, dir string, raw []yamlOp) ([]transform.Op, error) {
 	ops := make([]transform.Op, 0, len(raw))
 	for _, o := range raw {
@@ -282,6 +301,13 @@ func toOps(cv, dir string, raw []yamlOp) ([]transform.Op, error) {
 			toPath, perr := transform.ParsePath(o.Rename.To)
 			if perr != nil {
 				return nil, &ValidationError{Contract: cv, Field: dir + ".rename.to", Reason: perr.Error()}
+			}
+			// Rename is leaf-only: from and to must share every non-final segment
+			// (same parent) AND differ at the final leaf. The runtime apply()
+			// ASSUMES this invariant — it writes the new leaf into the from-leaf's
+			// parent map. Cross-parent rename would silently corrupt data.
+			if !sameParentDifferentLeaf(fromPath, toPath) {
+				return nil, &ValidationError{Contract: cv, Field: dir + ".rename", Reason: "from/to must share every non-final segment AND differ at the leaf (leaf-only rename)"}
 			}
 			op = transform.Op{Kind: transform.KindRename, From: fromPath, To: toPath}
 		}

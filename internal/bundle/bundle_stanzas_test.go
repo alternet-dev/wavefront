@@ -162,3 +162,38 @@ func TestBundleWithoutStanzasHasNoOps(t *testing.T) {
 		t.Error("a contract without stanzas must have zero ops")
 	}
 }
+
+func TestCrossParentRenameRejected(t *testing.T) {
+	bad := `version: 1
+contracts:
+  - contract_version: "2024-11"
+    route: /v3/echo
+    method: POST
+    request_message: acme.v1.Ping
+    response_message: acme.v1.Pong
+    request:
+      - rename: { from: a.b, to: x.y }
+`
+	_, err := Load(bundletest.Dir(t, bad))
+	var ve *ValidationError
+	if !errors.As(err, &ve) {
+		t.Fatalf("cross-parent rename must be ValidationError, got %v", err)
+	}
+}
+
+func TestSameParentDifferentLeafRenameAccepted(t *testing.T) {
+	// Single-segment paths (slice-1 case) — different leaves at same (empty) parent.
+	good := `version: 1
+contracts:
+  - contract_version: "2024-11"
+    route: /v3/echo
+    method: POST
+    request_message: acme.v1.Ping
+    response_message: acme.v1.Pong
+    request:
+      - rename: { from: text, to: message }
+`
+	if _, err := Load(bundletest.Dir(t, good)); err != nil {
+		t.Fatalf("same-parent rename must load, got %v", err)
+	}
+}
