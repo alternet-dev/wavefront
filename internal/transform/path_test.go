@@ -81,6 +81,13 @@ func TestPathEqualAndPrefix(t *testing.T) {
 		t.Errorf("data[].user.email should be prefix-matched by 'data' (Array flag ignored)")
 	}
 
+	// Converse: prefix has Array=true but path doesn't — still matches by name only.
+	prefixArrayed, _ := ParsePath("data[].user")
+	pNoArr2, _ := ParsePath("data.user")
+	if !pNoArr2.HasPrefixByName(prefixArrayed) {
+		t.Errorf("HasPrefixByName must ignore Array on the prefix too (data[].user prefix of data.user)")
+	}
+
 	// Equal is strict on Array
 	pNoArr, _ := ParsePath("data")
 	if pNoArr.Equal(Path{{Name: "data", Array: true}}) {

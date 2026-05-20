@@ -23,7 +23,7 @@ type Path []Segment
 //
 //	path    = segment ( "." segment )*
 //	segment = name | name "[]"
-//	name    = one or more UTF-8 bytes excluding "." and "["
+//	name    = one or more UTF-8 bytes excluding ".", "[", and "]"
 //
 // The LAST segment must NOT be an array segment — paths must end on a Name
 // leaf (otherwise no verb has a leaf to act on). Returns an error for any
@@ -51,7 +51,7 @@ func ParsePath(s string) (Path, error) {
 		if seg == "" {
 			return nil, fmt.Errorf("empty name before [] in path %q", s)
 		}
-		if strings.ContainsAny(seg, ".[") || strings.Contains(seg, "]") {
+		if strings.ContainsAny(seg, ".[]") {
 			return nil, fmt.Errorf("invalid character in segment %q of path %q", seg, s)
 		}
 		if array && i == len(segs)-1 {
