@@ -265,6 +265,25 @@ func loadVersions(path string) (*yamlBundle, error) {
 	return &yb, nil
 }
 
+// sameParentDifferentLeaf reports whether p and q are the same length, agree
+// segment-for-segment on every non-final segment (same Name AND same Array
+// flag — the structural parent path must be identical), and differ at the
+// final leaf's Name. It is the load-time invariant for rename: apply()
+// writes the new leaf into the from-leaf's parent map, so any cross-parent
+// rename would silently land at the wrong location.
+func sameParentDifferentLeaf(p, q transform.Path) bool {
+	if len(p) != len(q) || len(p) == 0 {
+		return false
+	}
+	for i := 0; i < len(p)-1; i++ {
+		if p[i] != q[i] {
+			return false
+		}
+	}
+	last := len(p) - 1
+	return p[last].Name != q[last].Name
+}
+
 func toOps(cv, dir string, raw []yamlOp) ([]transform.Op, error) {
 	ops := make([]transform.Op, 0, len(raw))
 	for _, o := range raw {
@@ -275,25 +294,48 @@ func toOps(cv, dir string, raw []yamlOp) ([]transform.Op, error) {
 			if o.Rename.From == "" || o.Rename.To == "" || o.Rename.From == o.Rename.To {
 				return nil, &ValidationError{Contract: cv, Field: dir + ".rename", Reason: "from/to must be non-empty and distinct"}
 			}
-			op = transform.Op{Kind: transform.KindRename, From: o.Rename.From, To: o.Rename.To}
+			fromPath, ferr := transform.ParsePath(o.Rename.From)
+			if ferr != nil {
+				return nil, &ValidationError{Contract: cv, Field: dir + ".rename.from", Reason: ferr.Error()}
+			}
+			toPath, perr := transform.ParsePath(o.Rename.To)
+			if perr != nil {
+				return nil, &ValidationError{Contract: cv, Field: dir + ".rename.to", Reason: perr.Error()}
+			}
+			// Rename is leaf-only: from and to must share every non-final segment
+			// (same parent) AND differ at the final leaf. The runtime apply()
+			// ASSUMES this invariant — it writes the new leaf into the from-leaf's
+			// parent map. Cross-parent rename would silently corrupt data.
+			if !sameParentDifferentLeaf(fromPath, toPath) {
+				return nil, &ValidationError{Contract: cv, Field: dir + ".rename", Reason: "from/to must share every non-final segment AND differ at the leaf (leaf-only rename)"}
+			}
+			op = transform.Op{Kind: transform.KindRename, From: fromPath, To: toPath}
 		}
 		if o.Default != nil {
 			set++
 			if o.Default.Field == "" {
 				return nil, &ValidationError{Contract: cv, Field: dir + ".default", Reason: "field must be non-empty"}
 			}
+			fieldPath, ferr := transform.ParsePath(o.Default.Field)
+			if ferr != nil {
+				return nil, &ValidationError{Contract: cv, Field: dir + ".default.field", Reason: ferr.Error()}
+			}
 			dv, derr := transform.NewDefaultValue(o.Default.Value)
 			if derr != nil {
 				return nil, &ValidationError{Contract: cv, Field: dir + ".default.value", Reason: derr.Error()}
 			}
-			op = transform.Op{Kind: transform.KindDefault, Field: o.Default.Field, Value: dv}
+			op = transform.Op{Kind: transform.KindDefault, Field: fieldPath, Value: dv}
 		}
 		if o.Optionalize != nil {
 			set++
 			if o.Optionalize.Field == "" {
 				return nil, &ValidationError{Contract: cv, Field: dir + ".optionalize", Reason: "field must be non-empty"}
 			}
-			op = transform.Op{Kind: transform.KindOptionalize, Field: o.Optionalize.Field}
+			fieldPath, ferr := transform.ParsePath(o.Optionalize.Field)
+			if ferr != nil {
+				return nil, &ValidationError{Contract: cv, Field: dir + ".optionalize.field", Reason: ferr.Error()}
+			}
+			op = transform.Op{Kind: transform.KindOptionalize, Field: fieldPath}
 		}
 		if o.Coerce != nil {
 			set++
@@ -303,7 +345,11 @@ func toOps(cv, dir string, raw []yamlOp) ([]transform.Op, error) {
 			if o.Coerce.To != "string" && o.Coerce.To != "number" && o.Coerce.To != "bool" {
 				return nil, &ValidationError{Contract: cv, Field: dir + ".coerce.to", Reason: "must be string|number|bool"}
 			}
-			op = transform.Op{Kind: transform.KindCoerce, Field: o.Coerce.Field, CoerceTo: o.Coerce.To}
+			fieldPath, ferr := transform.ParsePath(o.Coerce.Field)
+			if ferr != nil {
+				return nil, &ValidationError{Contract: cv, Field: dir + ".coerce.field", Reason: ferr.Error()}
+			}
+			op = transform.Op{Kind: transform.KindCoerce, Field: fieldPath, CoerceTo: o.Coerce.To}
 		}
 		if set != 1 {
 			return nil, &ValidationError{Contract: cv, Field: dir, Reason: "each transform op must set exactly one verb"}

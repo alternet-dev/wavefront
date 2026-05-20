@@ -50,13 +50,13 @@ func NewDefaultValue(v any) (DefaultValue, error) {
 func (d DefaultValue) JSON() any { return d.v }
 
 // Op is one parsed, statically-validated transform stanza. Exactly one verb
-// is represented by Kind; bundle.Load validates shape before constructing it,
-// so the runtime only ever meets data-dependent failures.
+// is represented by Kind; bundle.Load validates shape before constructing
+// it, so the runtime only ever meets data-dependent failures.
 type Op struct {
 	Kind     Kind         // the verb
-	From     string       // rename
-	To       string       // rename
-	Field    string       // default | optionalize | coerce
+	From     Path         // rename
+	To       Path         // rename
+	Field    Path         // default | optionalize | coerce
 	Value    DefaultValue // default: the scalar to inject
 	CoerceTo string       // coerce: string | number | bool
 }
@@ -85,41 +85,57 @@ func apply(ops []Op, body []byte, request bool) ([]byte, *wireerror.Error) {
 	if err := json.Unmarshal(body, &obj); err != nil || obj == nil {
 		return nil, fail("transform target is not a JSON object")
 	}
-	optional := map[string]bool{}
+	opts := newOptionalizedSet()
 	for _, op := range ops {
 		switch op.Kind {
 		case KindOptionalize:
-			optional[op.Field] = true
+			opts.add(op.Field)
 		case KindRename:
-			v, ok := obj[op.From]
-			if !ok {
-				if optional[op.From] {
-					continue
+			toLeaf := op.To[len(op.To)-1].Name
+			if werr := walkLeaves(obj, op.From, opts, fail, func(parent map[string]any, fromLeaf string) *wireerror.Error {
+				v, ok := parent[fromLeaf]
+				if !ok {
+					if opts.coversByName(op.From) {
+						return nil
+					}
+					return fail("rename source field " + op.From.String() + " is absent")
 				}
-				return nil, fail("rename source field " + op.From + " is absent")
+				if _, exists := parent[toLeaf]; exists {
+					return fail("rename target field " + op.To.String() + " already present")
+				}
+				delete(parent, fromLeaf)
+				parent[toLeaf] = v
+				return nil
+			}); werr != nil {
+				return nil, werr
 			}
-			if _, exists := obj[op.To]; exists {
-				return nil, fail("rename target field " + op.To + " already present")
-			}
-			delete(obj, op.From)
-			obj[op.To] = v
 		case KindDefault:
-			if cur, ok := obj[op.Field]; !ok || cur == nil {
-				obj[op.Field] = op.Value.JSON()
+			if werr := walkLeavesEnsureObjects(obj, op.Field, fail, func(parent map[string]any, leaf string) *wireerror.Error {
+				if cur, ok := parent[leaf]; !ok || cur == nil {
+					parent[leaf] = op.Value.JSON()
+				}
+				return nil
+			}); werr != nil {
+				return nil, werr
 			}
 		case KindCoerce:
-			v, ok := obj[op.Field]
-			if !ok {
-				if optional[op.Field] {
-					continue
+			if werr := walkLeaves(obj, op.Field, opts, fail, func(parent map[string]any, leaf string) *wireerror.Error {
+				v, ok := parent[leaf]
+				if !ok {
+					if opts.coversByName(op.Field) {
+						return nil
+					}
+					return fail("coerce field " + op.Field.String() + " is absent")
 				}
-				return nil, fail("coerce field " + op.Field + " is absent")
+				cv, cerr := coerce(v, op.CoerceTo)
+				if cerr != nil {
+					return fail("coerce field " + op.Field.String() + ": " + cerr.Error())
+				}
+				parent[leaf] = cv
+				return nil
+			}); werr != nil {
+				return nil, werr
 			}
-			cv, cerr := coerce(v, op.CoerceTo)
-			if cerr != nil {
-				return nil, fail("coerce field " + op.Field + ": " + cerr.Error())
-			}
-			obj[op.Field] = cv
 		}
 	}
 	out, err := json.Marshal(obj)
