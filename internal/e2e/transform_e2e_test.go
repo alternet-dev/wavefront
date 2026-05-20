@@ -236,3 +236,90 @@ contracts:
 		t.Errorf("X-Wavefront-Error=%q want transform_failed", resp.Header.Get("X-Wavefront-Error"))
 	}
 }
+
+const nestedArrayBundle = `version: 1
+contracts:
+  - contract_version: "2024-12"
+    route: /v3/echo
+    method: POST
+    request_message: acme.v1.PingV2
+    response_message: acme.v1.Pong
+    request:
+      - rename: { from: "items[].text", to: "items[].label" }
+      - coerce: { field: "items[].id", to: string }
+      - default: { field: meta.locale, value: en-US }
+`
+
+func TestNestedArrayE2E(t *testing.T) {
+	b, err := bundle.Load(bundletest.Dir(t, nestedArrayBundle))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+
+	md, err := b.Message("acme.v1.PingV2")
+	if err != nil {
+		t.Fatalf("PingV2: %v", err)
+	}
+	m := dynamicpb.NewMessage(md)
+	itemsField := md.Fields().ByName("items")
+	itemMD := itemsField.Message()
+	list := m.Mutable(itemsField).List()
+	for _, v := range []struct {
+		id   int32
+		text string
+	}{{1, "alpha"}, {2, "beta"}} {
+		el := dynamicpb.NewMessage(itemMD)
+		el.Set(itemMD.Fields().ByName("id"), protoreflect.ValueOfInt32(v.id))
+		el.Set(itemMD.Fields().ByName("text"), protoreflect.ValueOfString(v.text))
+		list.Append(protoreflect.ValueOfMessage(el))
+	}
+	raw, err := proto.Marshal(m)
+	if err != nil {
+		t.Fatalf("marshal PingV2: %v", err)
+	}
+
+	var mu sync.Mutex
+	var saw string
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		saw = string(body)
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"text":"server-ok"}`)
+	}))
+	defer up.Close()
+
+	fs := front(t, b, cfg(up.URL))
+	req, _ := http.NewRequest(http.MethodPost, fs.URL, bytes.NewReader(raw))
+	req.Header.Set("X-Api-Contract-Version", "2024-12")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("do: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("status %d", resp.StatusCode)
+	}
+
+	mu.Lock()
+	got := saw
+	mu.Unlock()
+	upstreamJSONEquals(t, got, map[string]any{
+		"items": []any{
+			map[string]any{"id": "1", "label": "alpha"},
+			map[string]any{"id": "2", "label": "beta"},
+		},
+		"meta": map[string]any{"locale": "en-US"},
+	})
+
+	pongMD, _ := b.Message("acme.v1.Pong")
+	out := dynamicpb.NewMessage(pongMD)
+	rawResp, _ := io.ReadAll(resp.Body)
+	if err := proto.Unmarshal(rawResp, out); err != nil {
+		t.Fatalf("client body not Pong: %v", err)
+	}
+	if g := out.Get(pongMD.Fields().ByName("text")).String(); g != "server-ok" {
+		t.Errorf("client got text=%q", g)
+	}
+}
