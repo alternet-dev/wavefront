@@ -197,3 +197,103 @@ contracts:
 		t.Fatalf("same-parent rename must load, got %v", err)
 	}
 }
+
+// The bundletest FDS has acme.v1.Ping{text string=1, n int32=2}.
+// Reference an absent field — must fail at load.
+func TestDescriptorCrossCheckRejectsAbsentField(t *testing.T) {
+	bad := `version: 1
+contracts:
+  - contract_version: "2024-11"
+    route: /v3/echo
+    method: POST
+    request_message: acme.v1.Ping
+    response_message: acme.v1.Pong
+    request:
+      - rename: { from: nonexistent, to: x }
+`
+	_, err := Load(bundletest.Dir(t, bad))
+	var ve *ValidationError
+	if !errors.As(err, &ve) {
+		t.Fatalf("path naming an absent field must be ValidationError, got %v", err)
+	}
+}
+
+// Ping.text is a scalar string; using it with [] should fail (not repeated).
+func TestDescriptorCrossCheckRejectsScalarUsedAsArray(t *testing.T) {
+	bad := `version: 1
+contracts:
+  - contract_version: "2024-11"
+    route: /v3/echo
+    method: POST
+    request_message: acme.v1.Ping
+    response_message: acme.v1.Pong
+    request:
+      - rename:
+          from: "text[].sub"
+          to: "text[].alt"
+`
+	_, err := Load(bundletest.Dir(t, bad))
+	var ve *ValidationError
+	if !errors.As(err, &ve) {
+		t.Fatalf("scalar treated as array must be ValidationError, got %v", err)
+	}
+}
+
+// Ping.text is a scalar; using a nested path through it (`text.x`) should fail
+// because intermediate must be TYPE_MESSAGE.
+func TestDescriptorCrossCheckRejectsScalarAsObjectIntermediate(t *testing.T) {
+	bad := `version: 1
+contracts:
+  - contract_version: "2024-11"
+    route: /v3/echo
+    method: POST
+    request_message: acme.v1.Ping
+    response_message: acme.v1.Pong
+    request:
+      - rename: { from: text.x, to: text.y }
+`
+	_, err := Load(bundletest.Dir(t, bad))
+	var ve *ValidationError
+	if !errors.As(err, &ve) {
+		t.Fatalf("scalar used as object intermediate must be ValidationError, got %v", err)
+	}
+}
+
+// Internal-targeting paths (rename.to / default.field on request stanzas;
+// rename.from / coerce.field / optionalize.field on response stanzas) get
+// only grammar validation — they reference the internal shape, which we
+// don't have descriptors for. So a bundle with a typo on the internal side
+// LOADS fine here; the runtime upstream catches the mismatch.
+func TestInternalSidePathsNotCrossChecked(t *testing.T) {
+	good := `version: 1
+contracts:
+  - contract_version: "2024-11"
+    route: /v3/echo
+    method: POST
+    request_message: acme.v1.Ping
+    response_message: acme.v1.Pong
+    request:
+      - rename: { from: text, to: any_internal_name_we_dont_validate }
+`
+	if _, err := Load(bundletest.Dir(t, good)); err != nil {
+		t.Fatalf("internal-side path must not be cross-checked at load; got %v", err)
+	}
+}
+
+// Valid bundle: rename.from references a real field (text); rename.to is
+// internal (not validated). Must load cleanly.
+func TestValidExternalPathLoadsCleanly(t *testing.T) {
+	good := `version: 1
+contracts:
+  - contract_version: "2024-11"
+    route: /v3/echo
+    method: POST
+    request_message: acme.v1.Ping
+    response_message: acme.v1.Pong
+    request:
+      - coerce: { field: n, to: string }
+`
+	if _, err := Load(bundletest.Dir(t, good)); err != nil {
+		t.Fatalf("valid external path must load; got %v", err)
+	}
+}
