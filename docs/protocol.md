@@ -55,7 +55,7 @@ Mechanical only — no expressions, no code. Unknown verbs are refused at load
 Anything not expressible mechanically is out of scope (see non-goals); it does
 not belong in `wavefront`.
 
-`route` is realized by the per-contract `route:` binding; the transform-runtime slice adds no separate route mechanism. Its verb engine covers rename/default/optionalize/coerce over top-level body fields.
+`route` is realized by the per-contract `route:` binding; the transform-runtime slice adds no separate route mechanism. Its verb engine covers rename/default/optionalize/coerce over body fields addressed by the path grammar below.
 
 ### Path syntax
 
