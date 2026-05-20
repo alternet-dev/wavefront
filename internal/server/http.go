@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/alternet-dev/wavefront/internal/negotiate"
+	"github.com/alternet-dev/wavefront/internal/transform"
 	"github.com/alternet-dev/wavefront/internal/wireerror"
 )
 
@@ -99,6 +100,12 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	call.Body, werr = transform.ApplyRequest(c.RequestOps(), call.Body)
+	if werr != nil {
+		s.writeError(w, werr, c.ContractVersion())
+		return
+	}
+
 	ctx, cancel := context.WithTimeout(r.Context(), s.cfg.RequestTimeout)
 	defer cancel()
 
@@ -132,6 +139,12 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request) {
 	}
 	if uresp.StatusCode < 200 || uresp.StatusCode >= 300 {
 		s.writeError(w, wireerror.UpstreamError("upstream returned status "+strconv.Itoa(uresp.StatusCode)), c.ContractVersion())
+		return
+	}
+
+	upBody, werr = transform.ApplyResponse(c.ResponseOps(), upBody)
+	if werr != nil {
+		s.writeError(w, werr, c.ContractVersion())
 		return
 	}
 
