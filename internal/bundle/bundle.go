@@ -198,20 +198,26 @@ func Load(dir string) (*Bundle, error) {
 		if _, dup := contracts[c.contractVersion]; dup {
 			return nil, &ValidationError{Contract: c.contractVersion, Field: "contract_version", Reason: "duplicate"}
 		}
-		for _, msg := range []string{c.requestMessage, c.responseMessage} {
-			d, ferr := files.FindDescriptorByName(protoreflect.FullName(msg))
+		var reqMsg, respMsg protoreflect.MessageDescriptor
+		for _, pair := range []struct {
+			name string
+			out  *protoreflect.MessageDescriptor
+		}{{c.requestMessage, &reqMsg}, {c.responseMessage, &respMsg}} {
+			d, ferr := files.FindDescriptorByName(protoreflect.FullName(pair.name))
 			if ferr != nil {
-				return nil, &MessageNotFoundError{Contract: c.contractVersion, Message: msg}
+				return nil, &MessageNotFoundError{Contract: c.contractVersion, Message: pair.name}
 			}
-			if _, ok := d.(protoreflect.MessageDescriptor); !ok {
-				return nil, &MessageNotFoundError{Contract: c.contractVersion, Message: msg}
+			md, ok := d.(protoreflect.MessageDescriptor)
+			if !ok {
+				return nil, &MessageNotFoundError{Contract: c.contractVersion, Message: pair.name}
 			}
+			*pair.out = md
 		}
-		reqOps, oerr := toOps(c.contractVersion, "request", yc.Request)
+		reqOps, oerr := toOps(c.contractVersion, "request", yc.Request, reqMsg, respMsg)
 		if oerr != nil {
 			return nil, oerr
 		}
-		respOps, oerr := toOps(c.contractVersion, "response", yc.Response)
+		respOps, oerr := toOps(c.contractVersion, "response", yc.Response, reqMsg, respMsg)
 		if oerr != nil {
 			return nil, oerr
 		}
@@ -284,7 +290,34 @@ func sameParentDifferentLeaf(p, q transform.Path) bool {
 	return p[last].Name != q[last].Name
 }
 
-func toOps(cv, dir string, raw []yamlOp) ([]transform.Op, error) {
+// toOps parses raw verb stanzas into a slice of transform.Op, statically
+// validating grammar, leaf-only-rename, and (for external-targeting paths)
+// the proto descriptor cross-check.
+//
+// reqMsg / respMsg are the request/response message descriptors for this
+// contract (resolved by Load against the FileDescriptorSet). They are used
+// for the descriptor cross-check on external-targeting paths per the
+// spec's validation table; internal-targeting paths get only the grammar
+// + structural checks (the live upstream is the gate).
+func toOps(cv, dir string, raw []yamlOp, reqMsg, respMsg protoreflect.MessageDescriptor) ([]transform.Op, error) {
+	// external returns the descriptor a given stanza-role's path targets,
+	// or nil if it targets the internal (upstream) shape.
+	external := func(role string) protoreflect.MessageDescriptor {
+		switch dir {
+		case "request":
+			switch role {
+			case "rename.from", "coerce.field", "optionalize.field":
+				return reqMsg
+			}
+		case "response":
+			switch role {
+			case "rename.to", "default.field":
+				return respMsg
+			}
+		}
+		return nil
+	}
+
 	ops := make([]transform.Op, 0, len(raw))
 	for _, o := range raw {
 		set := 0
@@ -309,6 +342,16 @@ func toOps(cv, dir string, raw []yamlOp) ([]transform.Op, error) {
 			if !sameParentDifferentLeaf(fromPath, toPath) {
 				return nil, &ValidationError{Contract: cv, Field: dir + ".rename", Reason: "from/to must share every non-final segment AND differ at the leaf (leaf-only rename)"}
 			}
+			if md := external("rename.from"); md != nil {
+				if err := validatePathAgainstMessage(fromPath, md, dir+".rename.from"); err != nil {
+					return nil, &ValidationError{Contract: cv, Field: dir + ".rename.from", Reason: err.Error()}
+				}
+			}
+			if md := external("rename.to"); md != nil {
+				if err := validatePathAgainstMessage(toPath, md, dir+".rename.to"); err != nil {
+					return nil, &ValidationError{Contract: cv, Field: dir + ".rename.to", Reason: err.Error()}
+				}
+			}
 			op = transform.Op{Kind: transform.KindRename, From: fromPath, To: toPath}
 		}
 		if o.Default != nil {
@@ -324,6 +367,11 @@ func toOps(cv, dir string, raw []yamlOp) ([]transform.Op, error) {
 			if derr != nil {
 				return nil, &ValidationError{Contract: cv, Field: dir + ".default.value", Reason: derr.Error()}
 			}
+			if md := external("default.field"); md != nil {
+				if err := validatePathAgainstMessage(fieldPath, md, dir+".default.field"); err != nil {
+					return nil, &ValidationError{Contract: cv, Field: dir + ".default.field", Reason: err.Error()}
+				}
+			}
 			op = transform.Op{Kind: transform.KindDefault, Field: fieldPath, Value: dv}
 		}
 		if o.Optionalize != nil {
@@ -334,6 +382,11 @@ func toOps(cv, dir string, raw []yamlOp) ([]transform.Op, error) {
 			fieldPath, ferr := transform.ParsePath(o.Optionalize.Field)
 			if ferr != nil {
 				return nil, &ValidationError{Contract: cv, Field: dir + ".optionalize.field", Reason: ferr.Error()}
+			}
+			if md := external("optionalize.field"); md != nil {
+				if err := validatePathAgainstMessage(fieldPath, md, dir+".optionalize.field"); err != nil {
+					return nil, &ValidationError{Contract: cv, Field: dir + ".optionalize.field", Reason: err.Error()}
+				}
 			}
 			op = transform.Op{Kind: transform.KindOptionalize, Field: fieldPath}
 		}
@@ -348,6 +401,11 @@ func toOps(cv, dir string, raw []yamlOp) ([]transform.Op, error) {
 			fieldPath, ferr := transform.ParsePath(o.Coerce.Field)
 			if ferr != nil {
 				return nil, &ValidationError{Contract: cv, Field: dir + ".coerce.field", Reason: ferr.Error()}
+			}
+			if md := external("coerce.field"); md != nil {
+				if err := validatePathAgainstMessage(fieldPath, md, dir+".coerce.field"); err != nil {
+					return nil, &ValidationError{Contract: cv, Field: dir + ".coerce.field", Reason: err.Error()}
+				}
 			}
 			op = transform.Op{Kind: transform.KindCoerce, Field: fieldPath, CoerceTo: o.Coerce.To}
 		}

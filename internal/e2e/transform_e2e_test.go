@@ -145,7 +145,10 @@ func TestNoStanzasPassthrough(t *testing.T) {
 }
 
 func TestRequestTransformFailureIs422E2E(t *testing.T) {
-	noText := `version: 1
+	// Coerce text (a non-numeric string) to number: passes descriptor
+	// cross-check at load (text exists in acme.v1.Ping), but fails at
+	// runtime because "hi" cannot be parsed as a number → 422.
+	bad := `version: 1
 contracts:
   - contract_version: "2024-11"
     route: /v3/echo
@@ -153,9 +156,9 @@ contracts:
     request_message: acme.v1.Ping
     response_message: acme.v1.Pong
     request:
-      - rename: { from: missing, to: x }
+      - coerce: { field: text, to: number }
 `
-	b, err := bundle.Load(bundletest.Dir(t, noText))
+	b, err := bundle.Load(bundletest.Dir(t, bad))
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
