@@ -55,7 +55,41 @@ Mechanical only — no expressions, no code. Unknown verbs are refused at load
 Anything not expressible mechanically is out of scope (see non-goals); it does
 not belong in `wavefront`.
 
-`route` is realized by the per-contract `route:` binding; the transform-runtime slice adds no separate route mechanism. Its verb engine covers rename/default/optionalize/coerce over top-level body fields.
+`route` is realized by the per-contract `route:` binding; the transform-runtime slice adds no separate route mechanism. Its verb engine covers rename/default/optionalize/coerce over body fields addressed by the path grammar below.
+
+### Path syntax
+
+Each verb's `from` / `to` / `field` is a **path** into the request/response
+JSON object. Grammar:
+
+```
+path    = segment ( "." segment )*
+segment = name | name "[]"
+name    = one or more UTF-8 bytes excluding "." and "["
+```
+
+Paths must end on a Name leaf (no trailing `[]`). Examples:
+
+- `text` — top-level key (the slice-1 case; behaves identically).
+- `data.user.email` — nested keys.
+- `data[].createdAt` — per-element on an array.
+- `groups[].members[].id` — nested arrays.
+
+Per-leaf semantics: `rename` is leaf-only (the new name applies within the
+same parent; cross-parent moves aren't supported). `default` auto-creates a
+missing-or-null **object** intermediate along the path; an intermediate
+that exists as a non-object or non-null is a contract violation and fails
+the request. `optionalize {field: P}` covers every path whose first
+segments equal P **by name** (the `[]` flag doesn't change coverage) — so
+`optionalize {data}` covers `data.x`, `data[].y`, and `data.user.email`.
+Missing array intermediates can't be auto-created; an empty array iterates
+zero times (silent no-op).
+
+At bundle load, paths are validated against the proto descriptors for the
+**external-targeting** stanza fields — `rename.from`, `coerce.field`,
+`optionalize.field` on request stanzas; `rename.to`, `default.field` on
+response stanzas. Internal-targeting paths get only grammar validation;
+the live upstream is the gate.
 
 ## Version negotiation
 
@@ -103,8 +137,7 @@ consumer's own choice. Finer upstream/domain-error typing remains additive futur
 ## Deferred
 
 Named here so they are not silently dropped: **param-space** transforms
-(query-string field mapping, same verbs); nested / array-element path
-syntax (e.g. `data[].createdAt`);
+(query-string field mapping, same verbs);
 opaque-cursor rename (pagination *wire-format* only — strategy-changing
 pagination is a permanent non-goal, see roadmap); proto-package-version
 defense-in-depth; richer upstream/domain-error typing and status mapping.
