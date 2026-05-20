@@ -23,10 +23,10 @@ Versioned plan. Pre-implementation; this is the intended sequence.
   (rename/default/optionalize/coerce) over top-level body fields;
   `transform_failed` (422 request / 502 response). `route` is the v0.1
   binding.
-- **Transform follow-ups, ordered:** **slice 2** — nested/array-element path
-  syntax (`data[].field`), pure addressing; **slice 3** — param-space
-  (query-string) transforms (same verbs over query params). Both depend on
-  slice 1.
+- Transform follow-ups: **slice 2 (shipped)** — nested/array-element path
+  syntax (`data[].field`), pure addressing extension to the verb engine.
+  **slice 3** — param-space (query-string) transforms (same verbs over
+  query params). Depends on slice 1.
 - Contract-version negotiation + the typed error model.
 - **Multi-contract generator.** Accumulates every still-pinned external
   contract version into the one committed bundle: multi-entry `versions.yaml`
