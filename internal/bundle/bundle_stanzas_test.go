@@ -35,14 +35,14 @@ func TestStanzasParseIntoOps(t *testing.T) {
 	if len(r) != 2 {
 		t.Fatalf("request ops: got %d want 2 (%+v)", len(r), r)
 	}
-	if r[0].Kind != transform.KindRename || r[0].From != "text" || r[0].To != "message" {
+	if r[0].Kind != transform.KindRename || r[0].From.String() != "text" || r[0].To.String() != "message" {
 		t.Errorf("rename op wrong: %+v", r[0])
 	}
-	if r[1].Kind != transform.KindCoerce || r[1].Field != "n" || r[1].CoerceTo != "string" {
+	if r[1].Kind != transform.KindCoerce || r[1].Field.String() != "n" || r[1].CoerceTo != "string" {
 		t.Errorf("coerce op wrong: %+v", r[1])
 	}
 	resp := c.ResponseOps()
-	if len(resp) != 1 || resp[0].Kind != transform.KindOptionalize || resp[0].Field != "at" {
+	if len(resp) != 1 || resp[0].Kind != transform.KindOptionalize || resp[0].Field.String() != "at" {
 		t.Errorf("response ops wrong: %+v", resp)
 	}
 }
