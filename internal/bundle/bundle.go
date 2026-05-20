@@ -2,8 +2,9 @@
 // (descriptors.binpb + openapi.json + versions.yaml) at boot, fail-fast. The
 // route → message binding is read verbatim (zero inference); every binding is
 // resolved against the FileDescriptorSet here so the runtime never has to.
-// v0.2 bundles (schema version 2) add request/response transform stanzas;
-// unknown keys are refused by strict decode. SIGHUP hot-reload is v0.3.
+// Bundles may carry optional request/response transform stanzas (additive
+// fields parsed into per-contract `[]transform.Op`). Unknown keys are
+// refused by strict decode.
 package bundle
 
 import (
