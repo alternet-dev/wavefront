@@ -13,7 +13,7 @@ func TestWalkLeavesTopLevel(t *testing.T) {
 	obj := map[string]any{"text": "hi"}
 	p, _ := ParsePath("text")
 	var seen []string
-	werr := walkLeaves(obj, p, nil, failReq, func(parent map[string]any, leaf string) *wireerror.Error {
+	werr := walkLeaves(obj, p, nil, failReq, func(_ map[string]any, leaf string) *wireerror.Error {
 		seen = append(seen, leaf)
 		return nil
 	})
