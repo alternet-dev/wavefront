@@ -1,10 +1,9 @@
-// Package bundlegen is the OpenAPI → bundle generator. v0.1 is deliberately a
+// Package bundlegen is the OpenAPI → bundle generator. It is deliberately a
 // constrained, fail-loud subset: exactly one operation (single-version
 // passthrough), request/response must be $ref'd component object schemas,
 // scalars + arrays + $ref + nullable→proto3-optional are supported, and any
 // unsupported construct (allOf/oneOf/anyOf/additionalProperties/untyped/
-// inline) is a hard error rather than a lossy bundle. Transform-stanza
-// emission rolls to v0.2 in lockstep with runtime transform support. Output is
+// inline) is a hard error rather than a lossy bundle. Output is
 // byte-reproducible (sorted, deterministic marshal) for the consumer's
 // buf-breaking story.
 package bundlegen

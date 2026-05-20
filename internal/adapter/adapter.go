@@ -2,8 +2,8 @@
 // core passes a Binding (never positional proto names) and the adapter never
 // sees the inbound transport — DecodeRequest's product is the upstream intent.
 // A future GraphQL adapter (single endpoint, request-defined response shape)
-// implements the same interface without touching server/negotiate. v0.1 ships
-// only the protobuf↔JSON adapter.
+// would implement the same interface without touching server/negotiate. The
+// current codec is protobuf↔JSON.
 package adapter
 
 import (

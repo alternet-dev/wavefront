@@ -1,4 +1,4 @@
-// Package transform is the v0.2 mechanical transform runtime. It is a pure,
+// Package transform is the mechanical transform runtime. It is a pure,
 // codec-agnostic unit: a closed set of four hardcoded verbs over the
 // top-level fields of a JSON object, applied in listed order, strict. It
 // imports only wireerror + encoding/json (never bundle/adapter — the server

@@ -1,4 +1,4 @@
-// Package wireerror is the v0.1 error contract: the typed, wavefront-originated
+// Package wireerror is the error contract: the typed, wavefront-originated
 // failures returned to a client as a proper HTTP status + standard headers +
 // the `X-Wavefront-Error` code + a fixed `wavefront.v1.Error` protobuf body.
 // Established in v0.1 and stable through v1.0 (iterated additively). The code/

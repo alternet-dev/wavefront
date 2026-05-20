@@ -1,8 +1,7 @@
-// Package negotiate resolves the contract the client declared. v0.1 matches
+// Package negotiate resolves the contract the client declared. It matches
 // the contract-version header value verbatim against the loaded bundle;
 // missing, blank, or unknown ⇒ a typed unsupported_contract_version error,
-// never a silent best-guess. Keying off the proto package version for
-// defense-in-depth is v0.2.
+// never a silent best-guess.
 package negotiate
 
 import (

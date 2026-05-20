@@ -1,7 +1,7 @@
 // Package server is the proxy core: a data-plane listener that runs the
 // negotiate → decode → one upstream call → encode pipeline, and an ops
 // listener for /metrics, /health, /ready. The bundle is held behind an
-// atomic.Pointer (set once at boot in v0.1; the v0.3 SIGHUP-swap hook point).
+// atomic.Pointer (set once at boot; reserved for future hot-swap).
 package server
 
 import (
@@ -52,8 +52,7 @@ func New(cfg *config.Config) *Server {
 	return s
 }
 
-// SetBundle installs the bundle and marks the proxy ready. v0.1 calls this
-// once at boot; the atomic pointer is the v0.3 hot-swap hook point.
+// SetBundle installs the bundle and marks the proxy ready.
 func (s *Server) SetBundle(b *bundle.Bundle) {
 	s.bundle.Store(b)
 }
