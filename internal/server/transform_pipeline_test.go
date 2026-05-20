@@ -144,7 +144,7 @@ func TestPipelineRequestTransformFailureIs422(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
-	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	up := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
 		t.Error("upstream must not be called when the request transform fails")
 	}))
 	defer up.Close()
