@@ -136,8 +136,7 @@ consumer's own choice. Finer upstream/domain-error typing remains additive futur
 
 ## Deferred
 
-Named here so they are not silently dropped: **param-space** transforms
-(query-string field mapping, same verbs);
+Named here so they are not silently dropped:
 opaque-cursor rename (pagination *wire-format* only — strategy-changing
 pagination is a permanent non-goal, see roadmap); proto-package-version
 defense-in-depth; richer upstream/domain-error typing and status mapping.
