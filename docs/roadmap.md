@@ -13,7 +13,7 @@ Versioned plan. Pre-implementation; this is the intended sequence.
   against a stub backend.
 - **Error contract established** (`wavefront.v1.Error` + `X-Wavefront-*`
   headers + the HTTP-status table) — stable through v1.0, iterated additively.
-- OpenAPI → bundle **generator** (`cmd/wavefront-bundlegen`): emits
+- OpenAPI → bundle **generator** (`cmd/wavefront-bundle`): emits
   `descriptors.binpb` + the binding-only `versions.yaml` (transform-stanza
   emission rolls to v0.2 with runtime transform support).
 
