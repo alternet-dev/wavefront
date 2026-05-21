@@ -195,6 +195,63 @@ func TestAddHardErrors(t *testing.T) {
 	}
 }
 
+// addLayer writes a minimal valid layer <bundleDir>/<version>/ by hand —
+// Remove only inspects the directory layout, not the layer contents.
+func addLayer(t *testing.T, bundleDir, version string) {
+	t.Helper()
+	ld := filepath.Join(bundleDir, version)
+	if err := os.MkdirAll(ld, 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", ld, err)
+	}
+	if err := os.WriteFile(filepath.Join(ld, "versions.yaml"), []byte("version: 1\n"), 0o600); err != nil {
+		t.Fatalf("write versions.yaml: %v", err)
+	}
+}
+
+func TestRemoveDeletesTheOldestLayer(t *testing.T) {
+	bundleDir := t.TempDir()
+	addLayer(t, bundleDir, "2024-11")
+	addLayer(t, bundleDir, "2026-05")
+	if err := bundlegen.Remove(bundleDir, "2024-11"); err != nil {
+		t.Fatalf("Remove oldest: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(bundleDir, "2024-11")); !os.IsNotExist(err) {
+		t.Fatal("layer 2024-11 still present after Remove")
+	}
+	if _, err := os.Stat(filepath.Join(bundleDir, "2026-05")); err != nil {
+		t.Fatalf("layer 2026-05 should remain: %v", err)
+	}
+}
+
+func TestRemoveRefusesANonOldestLayer(t *testing.T) {
+	bundleDir := t.TempDir()
+	addLayer(t, bundleDir, "2024-11")
+	addLayer(t, bundleDir, "2026-05")
+	if err := bundlegen.Remove(bundleDir, "2026-05"); err == nil {
+		t.Fatal("Remove of a non-oldest layer: expected a hard error, got nil")
+	}
+	if _, err := os.Stat(filepath.Join(bundleDir, "2026-05")); err != nil {
+		t.Fatalf("layer 2026-05 must remain after a refused Remove: %v", err)
+	}
+}
+
+func TestRemoveRefusesTheOnlyLayer(t *testing.T) {
+	bundleDir := t.TempDir()
+	addLayer(t, bundleDir, "2024-11")
+	if err := bundlegen.Remove(bundleDir, "2024-11"); err == nil {
+		t.Fatal("Remove of the only/current layer: expected a hard error, got nil")
+	}
+}
+
+func TestRemoveRefusesAnUnknownVersion(t *testing.T) {
+	bundleDir := t.TempDir()
+	addLayer(t, bundleDir, "2024-11")
+	addLayer(t, bundleDir, "2026-05")
+	if err := bundlegen.Remove(bundleDir, "2030-01"); err == nil {
+		t.Fatal("Remove of an absent version: expected a hard error, got nil")
+	}
+}
+
 func TestAddRefusesToOverwriteAnExistingVersion(t *testing.T) {
 	in := writeOpenAPI(t, sampleOpenAPI)
 	bundleDir := t.TempDir()

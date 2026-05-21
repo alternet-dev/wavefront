@@ -194,6 +194,32 @@ contracts:
 	return os.WriteFile(filepath.Join(layerDir, "versions.yaml"), []byte(versions), 0o644)
 }
 
+// Remove hard-deletes a version's layer from bundleDir. It is oldest-only:
+// version must be the lexically-oldest layer present, and at least one other
+// layer must remain — the bundle is never emptied and the current version is
+// never removed. Any other request is a hard error.
+func Remove(bundleDir, version string) error {
+	entries, err := os.ReadDir(bundleDir)
+	if err != nil {
+		return fmt.Errorf("read bundle dir: %w", err)
+	}
+	var layers []string
+	for _, e := range entries {
+		if e.IsDir() {
+			layers = append(layers, e.Name())
+		}
+	}
+	// os.ReadDir returns entries sorted by name, so layers is already in
+	// lexical order: layers[0] is the oldest.
+	if len(layers) < 2 {
+		return fmt.Errorf("refusing to remove %q: a bundle must keep at least one layer", version)
+	}
+	if version != layers[0] {
+		return fmt.Errorf("refusing to remove %q: only the oldest layer (%q) may be removed", version, layers[0])
+	}
+	return os.RemoveAll(filepath.Join(bundleDir, version))
+}
+
 // safeLayerName reports whether name is usable as a single path segment: a
 // non-empty string, not "." or "..", with no path separator and no control
 // bytes.

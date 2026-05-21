@@ -6,6 +6,7 @@
 // Usage:
 //
 //	wavefront-bundle add --openapi <file|url> --bundle <dir>
+//	wavefront-bundle remove --version <id> --bundle <dir>
 package main
 
 import (
@@ -26,12 +27,14 @@ func main() {
 // to errOut. It is the testable entry point — main is a thin os.Exit wrapper.
 func run(args []string, errOut io.Writer) int {
 	if len(args) == 0 {
-		fmt.Fprintln(errOut, "usage: wavefront-bundle <add> [flags]")
+		fmt.Fprintln(errOut, "usage: wavefront-bundle <add|remove> [flags]")
 		return 2
 	}
 	switch args[0] {
 	case "add":
 		return runAdd(args[1:], errOut)
+	case "remove":
+		return runRemove(args[1:], errOut)
 	default:
 		fmt.Fprintf(errOut, "wavefront-bundle: unknown subcommand %q\n", args[0])
 		return 2
@@ -55,6 +58,28 @@ func runAdd(args []string, errOut io.Writer) int {
 	}
 	if err := bundlegen.Add(*openapi, *bundleDir); err != nil {
 		fmt.Fprintln(errOut, "wavefront-bundle add:", err)
+		return 1
+	}
+	return 0
+}
+
+func runRemove(args []string, errOut io.Writer) int {
+	fs := flag.NewFlagSet("remove", flag.ContinueOnError)
+	fs.SetOutput(errOut)
+	version := fs.String("version", "", "the contract version (layer) to remove")
+	bundleDir := fs.String("bundle", "", "bundle directory to remove the layer from")
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 2
+	}
+	if *version == "" || *bundleDir == "" {
+		fmt.Fprintln(errOut, "usage: wavefront-bundle remove --version <id> --bundle <dir>")
+		return 2
+	}
+	if err := bundlegen.Remove(*bundleDir, *version); err != nil {
+		fmt.Fprintln(errOut, "wavefront-bundle remove:", err)
 		return 1
 	}
 	return 0
