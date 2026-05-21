@@ -77,8 +77,8 @@ const (
 
 // readOpenAPI loads the OpenAPI document from a local file path, or fetches
 // it when src is an http(s):// URL (GET, bounded timeout, 2xx required). A
-// URL fetch is still frozen at build time: Generate passes these bytes
-// through into the committed bundle, so the point-in-time guarantee holds.
+// URL fetch is still frozen at build time: Add passes these bytes through into
+// the committed bundle, so the point-in-time guarantee holds.
 func readOpenAPI(src string) ([]byte, error) {
 	if strings.HasPrefix(src, "http://") || strings.HasPrefix(src, "https://") {
 		client := &http.Client{Timeout: openapiFetchTimeout}
@@ -95,11 +95,13 @@ func readOpenAPI(src string) ([]byte, error) {
 	return os.ReadFile(src)
 }
 
-// Generate reads the OpenAPI doc from openapiSrc — a local file path or an
+// Add reads the OpenAPI doc from openapiSrc — a local file path or an
 // http(s):// URL (fetched at build time; the bytes are passed through into
-// the committed bundle, so a URL fetch stays point-in-time) — and writes
-// descriptors.binpb, openapi.json, and versions.yaml into outDir.
-func Generate(openapiSrc, outDir string) error {
+// the committed bundle, so a URL fetch stays point-in-time) — and emits a new
+// immutable layer into bundleDir/<version>/, where <version> is the doc's
+// info.version. It refuses to overwrite an existing layer: a frozen version
+// is never rewritten.
+func Add(openapiSrc, bundleDir string) error {
 	raw, err := readOpenAPI(openapiSrc)
 	if err != nil {
 		return fmt.Errorf("read openapi: %w", err)
@@ -108,8 +110,12 @@ func Generate(openapiSrc, outDir string) error {
 	if err := json.Unmarshal(raw, &doc); err != nil {
 		return fmt.Errorf("parse openapi: %w", err)
 	}
-	if strings.TrimSpace(doc.Info.Version) == "" {
+	version := strings.TrimSpace(doc.Info.Version)
+	if version == "" {
 		return fmt.Errorf("openapi info.version is required (it is the contract version)")
+	}
+	if !safeLayerName(version) {
+		return fmt.Errorf("contract version %q is not a usable directory name", version)
 	}
 
 	route, method, op, err := singleOperation(doc)
@@ -125,7 +131,7 @@ func Generate(openapiSrc, outDir string) error {
 		return err
 	}
 
-	pkg := "wavefront.gen.v" + sanitize(doc.Info.Version)
+	pkg := "wavefront.gen.v" + sanitize(version)
 	needed, err := collectSchemas(doc, []string{reqName, respName})
 	if err != nil {
 		return err
@@ -147,7 +153,7 @@ func Generate(openapiSrc, outDir string) error {
 	}
 
 	fdp := &descriptorpb.FileDescriptorProto{
-		Name:        proto.String("wavefront/gen/" + sanitize(doc.Info.Version) + ".proto"),
+		Name:        proto.String("wavefront/gen/" + sanitize(version) + ".proto"),
 		Package:     proto.String(pkg),
 		Syntax:      proto.String("proto3"),
 		MessageType: msgs,
@@ -168,11 +174,16 @@ contracts:
     method: %s
     request_message: %s.%s
     response_message: %s.%s
-`, doc.Info.Version, route, strings.ToUpper(method), pkg, reqName, pkg, respName)
+`, version, route, strings.ToUpper(method), pkg, reqName, pkg, respName)
 
-	layerDir := filepath.Join(outDir, doc.Info.Version)
+	layerDir := filepath.Join(bundleDir, version)
+	if _, err := os.Stat(layerDir); err == nil {
+		return fmt.Errorf("version %q already exists in the bundle; frozen versions are immutable", version)
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("stat %s: %w", layerDir, err)
+	}
 	if err := os.MkdirAll(layerDir, 0o755); err != nil {
-		return fmt.Errorf("mkdir out: %w", err)
+		return fmt.Errorf("mkdir layer: %w", err)
 	}
 	if err := os.WriteFile(filepath.Join(layerDir, "descriptors.binpb"), descBytes, 0o644); err != nil {
 		return err
@@ -181,6 +192,24 @@ contracts:
 		return err
 	}
 	return os.WriteFile(filepath.Join(layerDir, "versions.yaml"), []byte(versions), 0o644)
+}
+
+// safeLayerName reports whether name is usable as a single path segment: a
+// non-empty string, not "." or "..", with no path separator and no control
+// bytes.
+func safeLayerName(name string) bool {
+	if name == "" || name == "." || name == ".." {
+		return false
+	}
+	if strings.ContainsAny(name, `/\`) {
+		return false
+	}
+	for _, r := range name {
+		if r < 0x20 {
+			return false
+		}
+	}
+	return true
 }
 
 func singleOperation(doc openAPI) (route, method string, op operation, err error) {

@@ -49,8 +49,8 @@ func generatedBundle(t *testing.T) (*bundle.Bundle, *bundle.Contract) {
 		t.Fatal(err)
 	}
 	out := t.TempDir()
-	if err := bundlegen.Generate(in, out); err != nil {
-		t.Fatalf("Generate: %v", err)
+	if err := bundlegen.Add(in, out); err != nil {
+		t.Fatalf("Add: %v", err)
 	}
 	b, err := bundle.Load(out)
 	if err != nil {

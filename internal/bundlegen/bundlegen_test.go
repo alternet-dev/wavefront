@@ -50,15 +50,15 @@ func writeOpenAPI(t *testing.T, body string) string {
 	return p
 }
 
-func TestGenerateFromURL(t *testing.T) {
+func TestAddFromURL(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(sampleOpenAPI))
 	}))
 	defer srv.Close()
 
 	out := t.TempDir()
-	if err := bundlegen.Generate(srv.URL+"/openapi.json", out); err != nil {
-		t.Fatalf("Generate from URL: %v", err)
+	if err := bundlegen.Add(srv.URL+"/openapi.json", out); err != nil {
+		t.Fatalf("Add from URL: %v", err)
 	}
 	b, err := bundle.Load(out)
 	if err != nil {
@@ -69,21 +69,21 @@ func TestGenerateFromURL(t *testing.T) {
 	}
 }
 
-func TestGenerateFromURLNon200(t *testing.T) {
+func TestAddFromURLNon200(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 	}))
 	defer srv.Close()
-	if err := bundlegen.Generate(srv.URL, t.TempDir()); err == nil {
+	if err := bundlegen.Add(srv.URL, t.TempDir()); err == nil {
 		t.Fatal("expected a hard error on non-200 OpenAPI fetch, got nil")
 	}
 }
 
-func TestGenerateProducesLoadableBundle(t *testing.T) {
+func TestAddProducesLoadableLayer(t *testing.T) {
 	in := writeOpenAPI(t, sampleOpenAPI)
 	out := t.TempDir()
-	if err := bundlegen.Generate(in, out); err != nil {
-		t.Fatalf("Generate: %v", err)
+	if err := bundlegen.Add(in, out); err != nil {
+		t.Fatalf("Add: %v", err)
 	}
 	layerDir := filepath.Join(out, "2026-05-17")
 	for _, f := range []string{"descriptors.binpb", "openapi.json", "versions.yaml"} {
@@ -139,14 +139,14 @@ func TestGenerateProducesLoadableBundle(t *testing.T) {
 	}
 }
 
-func TestGenerateIsDeterministic(t *testing.T) {
+func TestAddIsDeterministic(t *testing.T) {
 	in := writeOpenAPI(t, sampleOpenAPI)
 	o1, o2 := t.TempDir(), t.TempDir()
-	if err := bundlegen.Generate(in, o1); err != nil {
-		t.Fatalf("gen1: %v", err)
+	if err := bundlegen.Add(in, o1); err != nil {
+		t.Fatalf("add1: %v", err)
 	}
-	if err := bundlegen.Generate(in, o2); err != nil {
-		t.Fatalf("gen2: %v", err)
+	if err := bundlegen.Add(in, o2); err != nil {
+		t.Fatalf("add2: %v", err)
 	}
 	a, _ := os.ReadFile(filepath.Join(o1, "2026-05-17", "descriptors.binpb"))
 	b, _ := os.ReadFile(filepath.Join(o2, "2026-05-17", "descriptors.binpb"))
@@ -155,7 +155,7 @@ func TestGenerateIsDeterministic(t *testing.T) {
 	}
 }
 
-func TestGenerateHardErrors(t *testing.T) {
+func TestAddHardErrors(t *testing.T) {
 	cases := map[string]string{
 		"oneOf": `{"openapi":"3.0.0","info":{"version":"1"},"paths":{"/x":{"post":{
 			"requestBody":{"content":{"application/json":{"schema":{"$ref":"#/components/schemas/A"}}}},
@@ -188,9 +188,20 @@ func TestGenerateHardErrors(t *testing.T) {
 	for name, body := range cases {
 		t.Run(name, func(t *testing.T) {
 			in := writeOpenAPI(t, body)
-			if err := bundlegen.Generate(in, t.TempDir()); err == nil {
+			if err := bundlegen.Add(in, t.TempDir()); err == nil {
 				t.Fatalf("%s: expected a hard error, got nil", name)
 			}
 		})
+	}
+}
+
+func TestAddRefusesToOverwriteAnExistingVersion(t *testing.T) {
+	in := writeOpenAPI(t, sampleOpenAPI)
+	bundleDir := t.TempDir()
+	if err := bundlegen.Add(in, bundleDir); err != nil {
+		t.Fatalf("first Add: %v", err)
+	}
+	if err := bundlegen.Add(in, bundleDir); err == nil {
+		t.Fatal("second Add of the same version: expected a hard error, got nil")
 	}
 }
