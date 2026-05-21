@@ -3,6 +3,18 @@
 // InvalidError (both name the offending var). Load uses the functional-options
 // pattern: production calls config.Load(); tests inject a fixed environment
 // with config.Load(config.WithLookup(fake)).
+//
+// Recognised environment variables:
+//
+//	WAVEFRONT_BUNDLE_PATH             — path to the bundle directory (required)
+//	WAVEFRONT_UPSTREAM_BASE_URL       — default backend base URL (required)
+//	WAVEFRONT_TARGETS                 — named backend targets, comma-separated name=url pairs
+//	WAVEFRONT_LISTEN_ADDR             — data-plane listen address (default 0.0.0.0:8080)
+//	WAVEFRONT_METRICS_ADDR            — ops/metrics listen address (default 0.0.0.0:9090)
+//	WAVEFRONT_CONTRACT_VERSION_HEADER — header carrying the contract version (default X-Api-Contract-Version)
+//	WAVEFRONT_REQUEST_TIMEOUT_MS      — per-request upstream timeout in ms (default 15000)
+//	WAVEFRONT_MAX_BODY_BYTES          — maximum request body size in bytes (default 1048576)
+//	WAVEFRONT_LOG_LEVEL               — log level: debug|info|warn|error (default info)
 package config
 
 import (
@@ -20,6 +32,7 @@ import (
 type Config struct {
 	BundlePath            string
 	UpstreamBaseURL       string
+	Targets               map[string]string
 	ListenAddr            string
 	MetricsAddr           string
 	ContractVersionHeader string
@@ -114,6 +127,24 @@ func Load(opts ...Option) (*Config, error) {
 		return nil, &InvalidError{Var: "WAVEFRONT_UPSTREAM_BASE_URL", Value: cfg.UpstreamBaseURL, Err: e}
 	}
 
+	cfg.Targets = map[string]string{}
+	if raw, ok := nonBlank("WAVEFRONT_TARGETS"); ok {
+		for _, pair := range strings.Split(raw, ",") {
+			name, urlStr, found := strings.Cut(strings.TrimSpace(pair), "=")
+			name, urlStr = strings.TrimSpace(name), strings.TrimSpace(urlStr)
+			if !found || name == "" || urlStr == "" {
+				return nil, &InvalidError{Var: "WAVEFRONT_TARGETS", Value: raw, Err: errors.New("each target must be name=url")}
+			}
+			if _, dup := cfg.Targets[name]; dup {
+				return nil, &InvalidError{Var: "WAVEFRONT_TARGETS", Value: raw, Err: fmt.Errorf("duplicate target %q", name)}
+			}
+			if e := validateBaseURL(urlStr); e != nil {
+				return nil, &InvalidError{Var: "WAVEFRONT_TARGETS", Value: urlStr, Err: e}
+			}
+			cfg.Targets[name] = urlStr
+		}
+	}
+
 	cfg.ListenAddr = withDefault("WAVEFRONT_LISTEN_ADDR", defListenAddr)
 	if e := validateHostPort(cfg.ListenAddr); e != nil {
 		return nil, &InvalidError{Var: "WAVEFRONT_LISTEN_ADDR", Value: cfg.ListenAddr, Err: e}
@@ -151,6 +182,17 @@ func Load(opts ...Option) (*Config, error) {
 	cfg.LogLevel = lvl
 
 	return cfg, nil
+}
+
+// TargetURL returns the base URL for a named backend target. The empty name
+// resolves to the default target (UpstreamBaseURL). An unknown name returns
+// ("", false).
+func (c *Config) TargetURL(name string) (string, bool) {
+	if name == "" {
+		return c.UpstreamBaseURL, true
+	}
+	u, ok := c.Targets[name]
+	return u, ok
 }
 
 func parseIntVar(nonBlank func(string) (string, bool), key string, def int) (int, error) {
