@@ -6,8 +6,6 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"reflect"
 	"sync"
 	"testing"
@@ -21,14 +19,6 @@ import (
 	"github.com/alternet-dev/wavefront/internal/bundletest"
 	"github.com/alternet-dev/wavefront/internal/config"
 )
-
-// writeResolutionServer writes a resolution.yaml at the bundle root dir.
-func writeResolutionServer(t *testing.T, dir, content string) {
-	t.Helper()
-	if err := os.WriteFile(filepath.Join(dir, "resolution.yaml"), []byte(content), 0o600); err != nil {
-		t.Fatalf("write resolution.yaml: %v", err)
-	}
-}
 
 func testCfg(up string) *config.Config {
 	return &config.Config{
@@ -56,7 +46,7 @@ func transformPing(t *testing.T, b *bundle.Bundle) []byte {
 
 func TestPipelineAppliesTransformBothDirections(t *testing.T) {
 	dir := bundletest.Dir(t, "")
-	writeResolutionServer(t, dir, `version: 1
+	bundletest.WriteResolution(t, dir, `version: 1
 overrides:
   - contract_version: "2024-11"
     transform:
@@ -122,7 +112,7 @@ overrides:
 
 func TestPipelineResponseDriftIs502(t *testing.T) {
 	dir := bundletest.Dir(t, "")
-	writeResolutionServer(t, dir, `version: 1
+	bundletest.WriteResolution(t, dir, `version: 1
 overrides:
   - contract_version: "2024-11"
     transform:
@@ -166,7 +156,7 @@ overrides:
 
 func TestPipelineRequestTransformFailureIs422(t *testing.T) {
 	dir := bundletest.Dir(t, "")
-	writeResolutionServer(t, dir, `version: 1
+	bundletest.WriteResolution(t, dir, `version: 1
 overrides:
   - contract_version: "2024-11"
     transform:

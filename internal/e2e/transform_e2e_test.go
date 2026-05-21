@@ -6,8 +6,6 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"reflect"
 	"sync"
 	"testing"
@@ -31,14 +29,6 @@ func upstreamJSONEquals(t *testing.T, got string, want map[string]any) {
 	}
 	if !reflect.DeepEqual(have, want) {
 		t.Errorf("upstream body wrong: got=%v want=%v", have, want)
-	}
-}
-
-// writeResolutionE2E writes a resolution.yaml at the bundle root dir.
-func writeResolutionE2E(t *testing.T, dir, content string) {
-	t.Helper()
-	if err := os.WriteFile(filepath.Join(dir, "resolution.yaml"), []byte(content), 0o600); err != nil {
-		t.Fatalf("write resolution.yaml: %v", err)
 	}
 }
 
@@ -76,7 +66,7 @@ func e2ePingTextOnly(t *testing.T, b *bundle.Bundle) []byte {
 
 func TestTransformE2EBothDirections(t *testing.T) {
 	dir := bundletest.Dir(t, "")
-	writeResolutionE2E(t, dir, `version: 1
+	bundletest.WriteResolution(t, dir, `version: 1
 overrides:
   - contract_version: "2024-11"
     transform:
@@ -172,7 +162,7 @@ func TestRequestTransformFailureIs422E2E(t *testing.T) {
 	// cross-check at load (text exists in acme.v1.Ping), but fails at
 	// runtime because "hi" cannot be parsed as a number → 422.
 	dir := bundletest.Dir(t, "")
-	writeResolutionE2E(t, dir, `version: 1
+	bundletest.WriteResolution(t, dir, `version: 1
 overrides:
   - contract_version: "2024-11"
     transform:
@@ -209,7 +199,7 @@ func TestRenameSourceAbsentRequestIs422E2E(t *testing.T) {
 	// zero-value omitted by protojson), so runtime rename source is absent
 	// -> 422 transform_failed.
 	dir := bundletest.Dir(t, "")
-	writeResolutionE2E(t, dir, `version: 1
+	bundletest.WriteResolution(t, dir, `version: 1
 overrides:
   - contract_version: "2024-11"
     transform:
@@ -251,7 +241,7 @@ contracts:
 
 func TestNestedArrayE2E(t *testing.T) {
 	dir := bundletest.Dir(t, nestedArrayVersions)
-	writeResolutionE2E(t, dir, `version: 1
+	bundletest.WriteResolution(t, dir, `version: 1
 overrides:
   - contract_version: "2024-12"
     transform:

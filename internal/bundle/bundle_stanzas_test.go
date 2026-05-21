@@ -2,25 +2,15 @@ package bundle
 
 import (
 	"errors"
-	"os"
-	"path/filepath"
 	"testing"
 
 	"github.com/alternet-dev/wavefront/internal/bundletest"
 	"github.com/alternet-dev/wavefront/internal/transform"
 )
 
-// writeResolution writes a resolution.yaml file at the bundle root dir.
-func writeResolution(t *testing.T, dir, content string) {
-	t.Helper()
-	if err := os.WriteFile(filepath.Join(dir, fileResolution), []byte(content), 0o600); err != nil {
-		t.Fatalf("write resolution.yaml: %v", err)
-	}
-}
-
 func TestStanzasParseIntoOps(t *testing.T) {
 	dir := bundletest.Dir(t, "")
-	writeResolution(t, dir, `version: 1
+	bundletest.WriteResolution(t, dir, `version: 1
 overrides:
   - contract_version: "2024-11"
     transform:
@@ -56,7 +46,7 @@ overrides:
 
 func TestUnknownVerbRejected(t *testing.T) {
 	dir := bundletest.Dir(t, "")
-	writeResolution(t, dir, `version: 1
+	bundletest.WriteResolution(t, dir, `version: 1
 overrides:
   - contract_version: "2024-11"
     transform:
@@ -72,7 +62,7 @@ overrides:
 
 func TestRenameFromEqualsToRejected(t *testing.T) {
 	dir := bundletest.Dir(t, "")
-	writeResolution(t, dir, `version: 1
+	bundletest.WriteResolution(t, dir, `version: 1
 overrides:
   - contract_version: "2024-11"
     transform:
@@ -86,7 +76,7 @@ overrides:
 
 func TestCoerceToInvalidRejected(t *testing.T) {
 	dir := bundletest.Dir(t, "")
-	writeResolution(t, dir, `version: 1
+	bundletest.WriteResolution(t, dir, `version: 1
 overrides:
   - contract_version: "2024-11"
     transform:
@@ -100,7 +90,7 @@ overrides:
 
 func TestTwoVerbOpRejected(t *testing.T) {
 	dir := bundletest.Dir(t, "")
-	writeResolution(t, dir, `version: 1
+	bundletest.WriteResolution(t, dir, `version: 1
 overrides:
   - contract_version: "2024-11"
     transform:
@@ -117,7 +107,7 @@ overrides:
 
 func TestEmptyOpRejected(t *testing.T) {
 	dir := bundletest.Dir(t, "")
-	writeResolution(t, dir, `version: 1
+	bundletest.WriteResolution(t, dir, `version: 1
 overrides:
   - contract_version: "2024-11"
     transform:
@@ -133,7 +123,7 @@ overrides:
 
 func TestNonScalarDefaultRejected(t *testing.T) {
 	dir := bundletest.Dir(t, "")
-	writeResolution(t, dir, `version: 1
+	bundletest.WriteResolution(t, dir, `version: 1
 overrides:
   - contract_version: "2024-11"
     transform:
@@ -160,7 +150,7 @@ func TestBundleWithoutStanzasHasNoOps(t *testing.T) {
 
 func TestCrossParentRenameRejected(t *testing.T) {
 	dir := bundletest.Dir(t, "")
-	writeResolution(t, dir, `version: 1
+	bundletest.WriteResolution(t, dir, `version: 1
 overrides:
   - contract_version: "2024-11"
     transform:
@@ -177,7 +167,7 @@ overrides:
 func TestSameParentDifferentLeafRenameAccepted(t *testing.T) {
 	// Single-segment paths (slice-1 case) — different leaves at same (empty) parent.
 	dir := bundletest.Dir(t, "")
-	writeResolution(t, dir, `version: 1
+	bundletest.WriteResolution(t, dir, `version: 1
 overrides:
   - contract_version: "2024-11"
     transform:
@@ -193,7 +183,7 @@ overrides:
 // Reference an absent field — must fail at load.
 func TestDescriptorCrossCheckRejectsAbsentField(t *testing.T) {
 	dir := bundletest.Dir(t, "")
-	writeResolution(t, dir, `version: 1
+	bundletest.WriteResolution(t, dir, `version: 1
 overrides:
   - contract_version: "2024-11"
     transform:
@@ -210,7 +200,7 @@ overrides:
 // Ping.text is a scalar string; using it with [] should fail (not repeated).
 func TestDescriptorCrossCheckRejectsScalarUsedAsArray(t *testing.T) {
 	dir := bundletest.Dir(t, "")
-	writeResolution(t, dir, `version: 1
+	bundletest.WriteResolution(t, dir, `version: 1
 overrides:
   - contract_version: "2024-11"
     transform:
@@ -230,7 +220,7 @@ overrides:
 // because intermediate must be TYPE_MESSAGE.
 func TestDescriptorCrossCheckRejectsScalarAsObjectIntermediate(t *testing.T) {
 	dir := bundletest.Dir(t, "")
-	writeResolution(t, dir, `version: 1
+	bundletest.WriteResolution(t, dir, `version: 1
 overrides:
   - contract_version: "2024-11"
     transform:
@@ -251,7 +241,7 @@ overrides:
 // LOADS fine here; the runtime upstream catches the mismatch.
 func TestInternalSidePathsNotCrossChecked(t *testing.T) {
 	dir := bundletest.Dir(t, "")
-	writeResolution(t, dir, `version: 1
+	bundletest.WriteResolution(t, dir, `version: 1
 overrides:
   - contract_version: "2024-11"
     transform:
@@ -267,7 +257,7 @@ overrides:
 // internal (not validated). Must load cleanly.
 func TestValidExternalPathLoadsCleanly(t *testing.T) {
 	dir := bundletest.Dir(t, "")
-	writeResolution(t, dir, `version: 1
+	bundletest.WriteResolution(t, dir, `version: 1
 overrides:
   - contract_version: "2024-11"
     transform:

@@ -184,8 +184,8 @@ var allowedMethods = map[string]bool{
 }
 
 // loadResolution reads the optional operator-owned resolution.yaml at the
-// bundle root. An absent file yields an empty map (every version keeps its
-// default route). Strict decode; the schema version must be 1.
+// bundle root. An absent file yields an empty map — no version has a transform
+// override. Strict decode; the schema version must be 1.
 func loadResolution(dir string) (map[string]yamlTransform, error) {
 	raw, err := os.ReadFile(filepath.Join(dir, fileResolution))
 	if errors.Is(err, fs.ErrNotExist) {

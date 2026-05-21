@@ -392,8 +392,12 @@ overrides:
 
 func TestLoadResolutionUnknownVersionRejected(t *testing.T) {
 	dir := writeBundle(t, fdsBytes(t), validOpenAPI, validVersions)
-	mustWrite(t, filepath.Join(dir, "resolution.yaml"),
-		[]byte("version: 1\noverrides:\n  - contract_version: \"nope\"\n    transform:\n      request: []\n"))
+	mustWrite(t, filepath.Join(dir, "resolution.yaml"), []byte(`version: 1
+overrides:
+  - contract_version: "nope"
+    transform:
+      request: []
+`))
 	_, err := Load(dir)
 	var ve *ValidationError
 	if !errors.As(err, &ve) {
@@ -412,6 +416,35 @@ func TestLoadLayerMissingFileIsReadError(t *testing.T) {
 	var re *ReadError
 	if !errors.As(err, &re) || re.File != fileDescriptors {
 		t.Fatalf("want ReadError(%s), got %v", fileDescriptors, err)
+	}
+}
+
+func TestLoadResolutionUnsupportedVersion(t *testing.T) {
+	dir := writeBundle(t, fdsBytes(t), validOpenAPI, validVersions)
+	mustWrite(t, filepath.Join(dir, "resolution.yaml"), []byte("version: 2\noverrides: []\n"))
+	_, err := Load(dir)
+	var ue *UnsupportedVersionError
+	if !errors.As(err, &ue) {
+		t.Fatalf("want UnsupportedVersionError for resolution.yaml version 2, got %v", err)
+	}
+}
+
+func TestLoadResolutionDuplicateOverrideRejected(t *testing.T) {
+	dir := writeBundle(t, fdsBytes(t), validOpenAPI, validVersions)
+	resolution := `version: 1
+overrides:
+  - contract_version: "2024-11"
+    transform:
+      request: []
+  - contract_version: "2024-11"
+    transform:
+      response: []
+`
+	mustWrite(t, filepath.Join(dir, "resolution.yaml"), []byte(resolution))
+	_, err := Load(dir)
+	var ve *ValidationError
+	if !errors.As(err, &ve) {
+		t.Fatalf("want ValidationError for a duplicate resolution override, got %v", err)
 	}
 }
 
