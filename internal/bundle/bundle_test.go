@@ -52,17 +52,29 @@ contracts:
     response_message: acme.v1.Pong
 `
 
+func mustMkdir(t *testing.T, dir string) {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", dir, err)
+	}
+}
+
+// writeBundle writes a single-layer bundle and returns the bundle path. The
+// lone layer goes under the subdirectory "layer"; nil/empty inputs are
+// skipped so the missing/malformed-file tests still exercise their cases.
 func writeBundle(t *testing.T, descriptors []byte, openapi, versions string) string {
 	t.Helper()
 	dir := t.TempDir()
+	layer := filepath.Join(dir, "layer")
+	mustMkdir(t, layer)
 	if descriptors != nil {
-		mustWrite(t, filepath.Join(dir, fileDescriptors), descriptors)
+		mustWrite(t, filepath.Join(layer, fileDescriptors), descriptors)
 	}
 	if openapi != "" {
-		mustWrite(t, filepath.Join(dir, fileOpenAPI), []byte(openapi))
+		mustWrite(t, filepath.Join(layer, fileOpenAPI), []byte(openapi))
 	}
 	if versions != "" {
-		mustWrite(t, filepath.Join(dir, fileVersions), []byte(versions))
+		mustWrite(t, filepath.Join(layer, fileVersions), []byte(versions))
 	}
 	return dir
 }
@@ -228,5 +240,174 @@ contracts:
 	var me *MessageNotFoundError
 	if !errors.As(err, &me) || me.Message != "acme.v1.Nope" {
 		t.Fatalf("want MessageNotFoundError(acme.v1.Nope), got %v", err)
+	}
+}
+
+func TestCrossLayerDuplicateContractVersionRejected(t *testing.T) {
+	// Both layers declare the same contract_version; Load must reject it.
+	mk := func(cv, route string) string {
+		return "version: 1\ncontracts:\n  - contract_version: \"" + cv + "\"\n" +
+			"    route: " + route + "\n    method: GET\n" +
+			"    request_message: acme.v1.Ping\n    response_message: acme.v1.Pong\n"
+	}
+	dir := t.TempDir()
+	for _, l := range []struct{ name, cv, route string }{
+		{"2024-11", "2024-11", "/a"},
+		{"2026-05", "2024-11", "/b"}, // same contract_version as the first layer
+	} {
+		ld := filepath.Join(dir, l.name)
+		mustMkdir(t, ld)
+		mustWrite(t, filepath.Join(ld, fileDescriptors), fdsBytes(t))
+		mustWrite(t, filepath.Join(ld, fileOpenAPI), []byte(validOpenAPI))
+		mustWrite(t, filepath.Join(ld, fileVersions), []byte(mk(l.cv, l.route)))
+	}
+	_, err := Load(dir)
+	var ve *ValidationError
+	if !errors.As(err, &ve) {
+		t.Fatalf("want ValidationError(duplicate across layers), got %v", err)
+	}
+}
+
+// fdsWithSharedDep builds a FileDescriptorSet wire bytes containing a shared
+// file "shared/dep.proto" (package shared, message Dep with a single string
+// field named depField) plus one layer-specific file. Varying depField makes
+// the shared file's bytes differ between layers.
+func fdsWithSharedDep(t *testing.T, layerFile, layerPkg, msg, depField string) []byte {
+	t.Helper()
+	strField := func(name string, num int32) *descriptorpb.FieldDescriptorProto {
+		return &descriptorpb.FieldDescriptorProto{
+			Name: proto.String(name), Number: proto.Int32(num),
+			Label:    descriptorpb.FieldDescriptorProto_LABEL_OPTIONAL.Enum(),
+			Type:     descriptorpb.FieldDescriptorProto_TYPE_STRING.Enum(),
+			JsonName: proto.String(name),
+		}
+	}
+	shared := &descriptorpb.FileDescriptorProto{
+		Name: proto.String("shared/dep.proto"), Package: proto.String("shared"),
+		Syntax: proto.String("proto3"),
+		MessageType: []*descriptorpb.DescriptorProto{
+			{Name: proto.String("Dep"), Field: []*descriptorpb.FieldDescriptorProto{strField(depField, 1)}},
+		},
+	}
+	layer := &descriptorpb.FileDescriptorProto{
+		Name: proto.String(layerFile), Package: proto.String(layerPkg),
+		Syntax: proto.String("proto3"),
+		MessageType: []*descriptorpb.DescriptorProto{
+			{Name: proto.String(msg), Field: []*descriptorpb.FieldDescriptorProto{strField("text", 1)}},
+		},
+	}
+	b, err := proto.Marshal(&descriptorpb.FileDescriptorSet{
+		File: []*descriptorpb.FileDescriptorProto{shared, layer},
+	})
+	if err != nil {
+		t.Fatalf("marshal fds: %v", err)
+	}
+	return b
+}
+
+func TestLoadDeduplicatesSharedDependency(t *testing.T) {
+	mk := func(cv, msg string) string {
+		return "version: 1\ncontracts:\n  - contract_version: \"" + cv + "\"\n" +
+			"    route: /x\n    method: GET\n" +
+			"    request_message: a." + msg + "\n    response_message: a." + msg + "\n"
+	}
+	dir := t.TempDir()
+	for _, l := range []struct{ name, cv, file, msg string }{
+		{"2024-11", "2024-11", "a/one.proto", "One"},
+		{"2026-05", "2026-05", "a/two.proto", "Two"},
+	} {
+		ld := filepath.Join(dir, l.name)
+		mustMkdir(t, ld)
+		mustWrite(t, filepath.Join(ld, fileDescriptors), fdsWithSharedDep(t, l.file, "a", l.msg, "v"))
+		mustWrite(t, filepath.Join(ld, fileOpenAPI), []byte(validOpenAPI))
+		mustWrite(t, filepath.Join(ld, fileVersions), []byte(mk(l.cv, l.msg)))
+	}
+	if _, err := Load(dir); err != nil {
+		t.Fatalf("Load with an identical shared dependency across layers: %v", err)
+	}
+}
+
+func TestLoadRejectsConflictingDescriptors(t *testing.T) {
+	mk := func(cv, msg string) string {
+		return "version: 1\ncontracts:\n  - contract_version: \"" + cv + "\"\n" +
+			"    route: /x\n    method: GET\n" +
+			"    request_message: a." + msg + "\n    response_message: a." + msg + "\n"
+	}
+	dir := t.TempDir()
+	// Both layers carry shared/dep.proto, but with a different field name —
+	// the same file name with conflicting bytes. Load must reject it.
+	for _, l := range []struct{ name, cv, file, msg, depField string }{
+		{"2024-11", "2024-11", "a/one.proto", "One", "v"},
+		{"2026-05", "2026-05", "a/two.proto", "Two", "different"},
+	} {
+		ld := filepath.Join(dir, l.name)
+		mustMkdir(t, ld)
+		mustWrite(t, filepath.Join(ld, fileDescriptors), fdsWithSharedDep(t, l.file, "a", l.msg, l.depField))
+		mustWrite(t, filepath.Join(ld, fileOpenAPI), []byte(validOpenAPI))
+		mustWrite(t, filepath.Join(ld, fileVersions), []byte(mk(l.cv, l.msg)))
+	}
+	if _, err := Load(dir); err == nil {
+		t.Fatal("Load with conflicting definitions of shared/dep.proto: expected an error, got nil")
+	}
+}
+
+func TestLoadEmptyBundleDirRejected(t *testing.T) {
+	_, err := Load(t.TempDir())
+	var ve *ValidationError
+	if !errors.As(err, &ve) {
+		t.Fatalf("want ValidationError for an empty bundle directory, got %v", err)
+	}
+}
+
+func TestLoadMissingBundleDirIsReadError(t *testing.T) {
+	_, err := Load(filepath.Join(t.TempDir(), "does-not-exist"))
+	var re *ReadError
+	if !errors.As(err, &re) {
+		t.Fatalf("want ReadError for a missing bundle directory, got %v", err)
+	}
+}
+
+func TestLoadLayerMissingFileIsReadError(t *testing.T) {
+	dir := t.TempDir()
+	ld := filepath.Join(dir, "2024-11")
+	mustMkdir(t, ld)
+	// descriptors.binpb deliberately omitted.
+	mustWrite(t, filepath.Join(ld, fileOpenAPI), []byte(validOpenAPI))
+	mustWrite(t, filepath.Join(ld, fileVersions), []byte(validVersions))
+	_, err := Load(dir)
+	var re *ReadError
+	if !errors.As(err, &re) || re.File != fileDescriptors {
+		t.Fatalf("want ReadError(%s), got %v", fileDescriptors, err)
+	}
+}
+
+func TestLoadMultipleLayers(t *testing.T) {
+	mk := func(cv, route string) string {
+		return "version: 1\ncontracts:\n  - contract_version: \"" + cv + "\"\n" +
+			"    route: " + route + "\n    method: GET\n" +
+			"    request_message: acme.v1.Ping\n    response_message: acme.v1.Pong\n"
+	}
+	dir := t.TempDir()
+	for _, l := range []struct{ name, cv, route string }{
+		{"2024-11", "2024-11", "/a"},
+		{"2026-05", "2026-05", "/b"},
+	} {
+		ld := filepath.Join(dir, l.name)
+		mustMkdir(t, ld)
+		mustWrite(t, filepath.Join(ld, fileDescriptors), fdsBytes(t))
+		mustWrite(t, filepath.Join(ld, fileOpenAPI), []byte(validOpenAPI))
+		mustWrite(t, filepath.Join(ld, fileVersions), []byte(mk(l.cv, l.route)))
+	}
+	b, err := Load(dir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	for _, cv := range []string{"2024-11", "2026-05"} {
+		if _, ok := b.Contract(cv); !ok {
+			t.Errorf("Contract(%q) not found in merged bundle", cv)
+		}
+	}
+	if _, err := b.Message("acme.v1.Ping"); err != nil {
+		t.Errorf("resolve acme.v1.Ping against merged registry: %v", err)
 	}
 }

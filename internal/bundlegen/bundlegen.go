@@ -170,16 +170,17 @@ contracts:
     response_message: %s.%s
 `, doc.Info.Version, route, strings.ToUpper(method), pkg, reqName, pkg, respName)
 
-	if err := os.MkdirAll(outDir, 0o755); err != nil {
+	layerDir := filepath.Join(outDir, doc.Info.Version)
+	if err := os.MkdirAll(layerDir, 0o755); err != nil {
 		return fmt.Errorf("mkdir out: %w", err)
 	}
-	if err := os.WriteFile(filepath.Join(outDir, "descriptors.binpb"), descBytes, 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(layerDir, "descriptors.binpb"), descBytes, 0o644); err != nil {
 		return err
 	}
-	if err := os.WriteFile(filepath.Join(outDir, "openapi.json"), raw, 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(layerDir, "openapi.json"), raw, 0o644); err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(outDir, "versions.yaml"), []byte(versions), 0o644)
+	return os.WriteFile(filepath.Join(layerDir, "versions.yaml"), []byte(versions), 0o644)
 }
 
 func singleOperation(doc openAPI) (route, method string, op operation, err error) {

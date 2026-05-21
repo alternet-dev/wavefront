@@ -112,21 +112,56 @@ func FDSBytes(t testing.TB) []byte {
 	return b
 }
 
-// Dir writes a bundle into a fresh temp dir and returns its path. If versions
-// is empty, ValidVersions is used.
+// writeLayer writes the three bundle files into dir (which must already exist).
+func writeLayer(t testing.TB, dir string, descriptors []byte, openapi, versions string) {
+	t.Helper()
+	for name, b := range map[string][]byte{
+		"descriptors.binpb": descriptors,
+		"openapi.json":      []byte(openapi),
+		"versions.yaml":     []byte(versions),
+	} {
+		if err := os.WriteFile(filepath.Join(dir, name), b, 0o600); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+}
+
+// Dir writes a single-layer bundle into a fresh temp dir and returns the
+// bundle path. If versions is empty, ValidVersions is used. The lone layer
+// is written under the subdirectory "2024-11" (matching ValidVersions).
 func Dir(t testing.TB, versions string) string {
 	t.Helper()
 	if versions == "" {
 		versions = ValidVersions
 	}
 	dir := t.TempDir()
-	write := func(name string, b []byte) {
-		if err := os.WriteFile(filepath.Join(dir, name), b, 0o600); err != nil {
-			t.Fatalf("write %s: %v", name, err)
-		}
+	layer := filepath.Join(dir, "2024-11")
+	if err := os.MkdirAll(layer, 0o755); err != nil {
+		t.Fatalf("mkdir layer: %v", err)
 	}
-	write("descriptors.binpb", FDSBytes(t))
-	write("openapi.json", []byte(ValidOpenAPI))
-	write("versions.yaml", []byte(versions))
+	writeLayer(t, layer, FDSBytes(t), ValidOpenAPI, versions)
+	return dir
+}
+
+// Layer is one layer's content for MultiDir.
+type Layer struct {
+	Name        string // the subdirectory name
+	Descriptors []byte
+	OpenAPI     string
+	Versions    string
+}
+
+// MultiDir writes a multi-layer bundle into a fresh temp dir and returns the
+// bundle path.
+func MultiDir(t testing.TB, layers ...Layer) string {
+	t.Helper()
+	dir := t.TempDir()
+	for _, l := range layers {
+		ld := filepath.Join(dir, l.Name)
+		if err := os.MkdirAll(ld, 0o755); err != nil {
+			t.Fatalf("mkdir layer %s: %v", l.Name, err)
+		}
+		writeLayer(t, ld, l.Descriptors, l.OpenAPI, l.Versions)
+	}
 	return dir
 }
