@@ -268,6 +268,89 @@ func TestCrossLayerDuplicateContractVersionRejected(t *testing.T) {
 	}
 }
 
+// fdsWithSharedDep builds a FileDescriptorSet wire bytes containing a shared
+// file "shared/dep.proto" (package shared, message Dep with a single string
+// field named depField) plus one layer-specific file. Varying depField makes
+// the shared file's bytes differ between layers.
+func fdsWithSharedDep(t *testing.T, layerFile, layerPkg, msg, depField string) []byte {
+	t.Helper()
+	strField := func(name string, num int32) *descriptorpb.FieldDescriptorProto {
+		return &descriptorpb.FieldDescriptorProto{
+			Name: proto.String(name), Number: proto.Int32(num),
+			Label:    descriptorpb.FieldDescriptorProto_LABEL_OPTIONAL.Enum(),
+			Type:     descriptorpb.FieldDescriptorProto_TYPE_STRING.Enum(),
+			JsonName: proto.String(name),
+		}
+	}
+	shared := &descriptorpb.FileDescriptorProto{
+		Name: proto.String("shared/dep.proto"), Package: proto.String("shared"),
+		Syntax: proto.String("proto3"),
+		MessageType: []*descriptorpb.DescriptorProto{
+			{Name: proto.String("Dep"), Field: []*descriptorpb.FieldDescriptorProto{strField(depField, 1)}},
+		},
+	}
+	layer := &descriptorpb.FileDescriptorProto{
+		Name: proto.String(layerFile), Package: proto.String(layerPkg),
+		Syntax: proto.String("proto3"),
+		MessageType: []*descriptorpb.DescriptorProto{
+			{Name: proto.String(msg), Field: []*descriptorpb.FieldDescriptorProto{strField("text", 1)}},
+		},
+	}
+	b, err := proto.Marshal(&descriptorpb.FileDescriptorSet{
+		File: []*descriptorpb.FileDescriptorProto{shared, layer},
+	})
+	if err != nil {
+		t.Fatalf("marshal fds: %v", err)
+	}
+	return b
+}
+
+func TestLoadDeduplicatesSharedDependency(t *testing.T) {
+	mk := func(cv, msg string) string {
+		return "version: 1\ncontracts:\n  - contract_version: \"" + cv + "\"\n" +
+			"    route: /x\n    method: GET\n" +
+			"    request_message: a." + msg + "\n    response_message: a." + msg + "\n"
+	}
+	dir := t.TempDir()
+	for _, l := range []struct{ name, cv, file, msg string }{
+		{"2024-11", "2024-11", "a/one.proto", "One"},
+		{"2026-05", "2026-05", "a/two.proto", "Two"},
+	} {
+		ld := filepath.Join(dir, l.name)
+		mustMkdir(t, ld)
+		mustWrite(t, filepath.Join(ld, fileDescriptors), fdsWithSharedDep(t, l.file, "a", l.msg, "v"))
+		mustWrite(t, filepath.Join(ld, fileOpenAPI), []byte(validOpenAPI))
+		mustWrite(t, filepath.Join(ld, fileVersions), []byte(mk(l.cv, l.msg)))
+	}
+	if _, err := Load(dir); err != nil {
+		t.Fatalf("Load with an identical shared dependency across layers: %v", err)
+	}
+}
+
+func TestLoadRejectsConflictingDescriptors(t *testing.T) {
+	mk := func(cv, msg string) string {
+		return "version: 1\ncontracts:\n  - contract_version: \"" + cv + "\"\n" +
+			"    route: /x\n    method: GET\n" +
+			"    request_message: a." + msg + "\n    response_message: a." + msg + "\n"
+	}
+	dir := t.TempDir()
+	// Both layers carry shared/dep.proto, but with a different field name —
+	// the same file name with conflicting bytes. Load must reject it.
+	for _, l := range []struct{ name, cv, file, msg, depField string }{
+		{"2024-11", "2024-11", "a/one.proto", "One", "v"},
+		{"2026-05", "2026-05", "a/two.proto", "Two", "different"},
+	} {
+		ld := filepath.Join(dir, l.name)
+		mustMkdir(t, ld)
+		mustWrite(t, filepath.Join(ld, fileDescriptors), fdsWithSharedDep(t, l.file, "a", l.msg, l.depField))
+		mustWrite(t, filepath.Join(ld, fileOpenAPI), []byte(validOpenAPI))
+		mustWrite(t, filepath.Join(ld, fileVersions), []byte(mk(l.cv, l.msg)))
+	}
+	if _, err := Load(dir); err == nil {
+		t.Fatal("Load with conflicting definitions of shared/dep.proto: expected an error, got nil")
+	}
+}
+
 func TestLoadMultipleLayers(t *testing.T) {
 	mk := func(cv, route string) string {
 		return "version: 1\ncontracts:\n  - contract_version: \"" + cv + "\"\n" +

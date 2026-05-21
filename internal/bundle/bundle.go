@@ -292,18 +292,27 @@ func loadLayerDescriptors(path string) ([]*descriptorpb.FileDescriptorProto, err
 }
 
 // mergeDescriptors combines every layer's FileDescriptorProtos into one
-// registry. A file name seen in more than one layer is registered once
-// (Task 3 adds the byte-equality cross-check).
+// registry. A file name that appears in more than one layer is registered
+// once; if two layers define the same file name with differing bytes that
+// is a hard error (the bundle is internally inconsistent).
 func mergeDescriptors(perLayer [][]*descriptorpb.FileDescriptorProto) (*protoregistry.Files, error) {
-	seen := make(map[string]bool)
+	seen := map[string][]byte{}
 	merged := &descriptorpb.FileDescriptorSet{}
 	for _, fdps := range perLayer {
-		for _, fdp := range fdps {
-			if seen[fdp.GetName()] {
+		for _, f := range fdps {
+			name := f.GetName()
+			b, err := proto.MarshalOptions{Deterministic: true}.Marshal(f)
+			if err != nil {
+				return nil, &ParseError{File: fileDescriptors, Err: err}
+			}
+			if prev, dup := seen[name]; dup {
+				if !bytes.Equal(prev, b) {
+					return nil, &ParseError{File: fileDescriptors, Err: fmt.Errorf("conflicting definitions of %q across layers", name)}
+				}
 				continue
 			}
-			seen[fdp.GetName()] = true
-			merged.File = append(merged.File, fdp)
+			seen[name] = b
+			merged.File = append(merged.File, f)
 		}
 	}
 	files, err := protodesc.NewFiles(merged)
