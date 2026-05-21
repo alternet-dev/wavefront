@@ -243,6 +243,31 @@ contracts:
 	}
 }
 
+func TestCrossLayerDuplicateContractVersionRejected(t *testing.T) {
+	// Both layers declare the same contract_version; Load must reject it.
+	mk := func(cv, route string) string {
+		return "version: 1\ncontracts:\n  - contract_version: \"" + cv + "\"\n" +
+			"    route: " + route + "\n    method: GET\n" +
+			"    request_message: acme.v1.Ping\n    response_message: acme.v1.Pong\n"
+	}
+	dir := t.TempDir()
+	for _, l := range []struct{ name, cv, route string }{
+		{"2024-11", "2024-11", "/a"},
+		{"2026-05", "2024-11", "/b"}, // same contract_version as the first layer
+	} {
+		ld := filepath.Join(dir, l.name)
+		mustMkdir(t, ld)
+		mustWrite(t, filepath.Join(ld, fileDescriptors), fdsBytes(t))
+		mustWrite(t, filepath.Join(ld, fileOpenAPI), []byte(validOpenAPI))
+		mustWrite(t, filepath.Join(ld, fileVersions), []byte(mk(l.cv, l.route)))
+	}
+	_, err := Load(dir)
+	var ve *ValidationError
+	if !errors.As(err, &ve) {
+		t.Fatalf("want ValidationError(duplicate across layers), got %v", err)
+	}
+}
+
 func TestLoadMultipleLayers(t *testing.T) {
 	mk := func(cv, route string) string {
 		return "version: 1\ncontracts:\n  - contract_version: \"" + cv + "\"\n" +

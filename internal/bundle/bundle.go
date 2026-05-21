@@ -14,7 +14,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 
 	"google.golang.org/protobuf/proto"
@@ -183,7 +182,6 @@ func Load(dir string) (*Bundle, error) {
 		yb   *yamlBundle
 	}
 	loaded := make([]layer, 0, len(layerNames))
-	perLayerFDPs := make([][]*descriptorpb.FileDescriptorProto, 0, len(layerNames))
 
 	for _, name := range layerNames {
 		lp := filepath.Join(dir, name)
@@ -202,10 +200,13 @@ func Load(dir string) (*Bundle, error) {
 			return nil, &UnsupportedVersionError{Version: yb.Version}
 		}
 		loaded = append(loaded, layer{fdps: fdps, yb: yb})
-		perLayerFDPs = append(perLayerFDPs, fdps)
 	}
 
-	files, merr := mergeDescriptors(perLayerFDPs)
+	allFDPs := make([][]*descriptorpb.FileDescriptorProto, len(loaded))
+	for i, l := range loaded {
+		allFDPs[i] = l.fdps
+	}
+	files, merr := mergeDescriptors(allFDPs)
 	if merr != nil {
 		return nil, merr
 	}
@@ -269,7 +270,6 @@ func layerDirs(dir string) ([]string, error) {
 			names = append(names, e.Name())
 		}
 	}
-	sort.Strings(names)
 	if len(names) == 0 {
 		return nil, &ValidationError{Reason: "bundle directory contains no layers"}
 	}
