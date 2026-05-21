@@ -52,17 +52,29 @@ contracts:
     response_message: acme.v1.Pong
 `
 
+func mustMkdir(t *testing.T, dir string) {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", dir, err)
+	}
+}
+
+// writeBundle writes a single-layer bundle and returns the bundle path. The
+// lone layer goes under the subdirectory "layer"; nil/empty inputs are
+// skipped so the missing/malformed-file tests still exercise their cases.
 func writeBundle(t *testing.T, descriptors []byte, openapi, versions string) string {
 	t.Helper()
 	dir := t.TempDir()
+	layer := filepath.Join(dir, "layer")
+	mustMkdir(t, layer)
 	if descriptors != nil {
-		mustWrite(t, filepath.Join(dir, fileDescriptors), descriptors)
+		mustWrite(t, filepath.Join(layer, fileDescriptors), descriptors)
 	}
 	if openapi != "" {
-		mustWrite(t, filepath.Join(dir, fileOpenAPI), []byte(openapi))
+		mustWrite(t, filepath.Join(layer, fileOpenAPI), []byte(openapi))
 	}
 	if versions != "" {
-		mustWrite(t, filepath.Join(dir, fileVersions), []byte(versions))
+		mustWrite(t, filepath.Join(layer, fileVersions), []byte(versions))
 	}
 	return dir
 }
@@ -228,5 +240,36 @@ contracts:
 	var me *MessageNotFoundError
 	if !errors.As(err, &me) || me.Message != "acme.v1.Nope" {
 		t.Fatalf("want MessageNotFoundError(acme.v1.Nope), got %v", err)
+	}
+}
+
+func TestLoadMultipleLayers(t *testing.T) {
+	mk := func(cv, route string) string {
+		return "version: 1\ncontracts:\n  - contract_version: \"" + cv + "\"\n" +
+			"    route: " + route + "\n    method: GET\n" +
+			"    request_message: acme.v1.Ping\n    response_message: acme.v1.Pong\n"
+	}
+	dir := t.TempDir()
+	for _, l := range []struct{ name, cv, route string }{
+		{"2024-11", "2024-11", "/a"},
+		{"2026-05", "2026-05", "/b"},
+	} {
+		ld := filepath.Join(dir, l.name)
+		mustMkdir(t, ld)
+		mustWrite(t, filepath.Join(ld, fileDescriptors), fdsBytes(t))
+		mustWrite(t, filepath.Join(ld, fileOpenAPI), []byte(validOpenAPI))
+		mustWrite(t, filepath.Join(ld, fileVersions), []byte(mk(l.cv, l.route)))
+	}
+	b, err := Load(dir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	for _, cv := range []string{"2024-11", "2026-05"} {
+		if _, ok := b.Contract(cv); !ok {
+			t.Errorf("Contract(%q) not found in merged bundle", cv)
+		}
+	}
+	if _, err := b.Message("acme.v1.Ping"); err != nil {
+		t.Errorf("resolve acme.v1.Ping against merged registry: %v", err)
 	}
 }

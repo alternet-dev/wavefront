@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"google.golang.org/protobuf/proto"
@@ -167,69 +168,118 @@ var allowedMethods = map[string]bool{
 	http.MethodOptions: true,
 }
 
-// Load reads, parses, validates, and resolves the bundle in dir. Any failure
-// is fatal (returned as a typed error); the caller refuses to start.
+// Load reads, parses, validates, and resolves the bundle in dir. The bundle
+// is a directory of layer subdirectories, each holding descriptors.binpb,
+// openapi.json, and versions.yaml. Any failure is fatal (a typed error); the
+// caller refuses to start.
 func Load(dir string) (*Bundle, error) {
-	files, err := loadDescriptors(filepath.Join(dir, fileDescriptors))
-	if err != nil {
-		return nil, err
-	}
-	if err := validateOpenAPI(filepath.Join(dir, fileOpenAPI)); err != nil {
-		return nil, err
-	}
-	yb, err := loadVersions(filepath.Join(dir, fileVersions))
+	layerNames, err := layerDirs(dir)
 	if err != nil {
 		return nil, err
 	}
 
-	if yb.Version != 1 {
-		return nil, &UnsupportedVersionError{Version: yb.Version}
+	type layer struct {
+		fdps []*descriptorpb.FileDescriptorProto
+		yb   *yamlBundle
 	}
-	if len(yb.Contracts) == 0 {
-		return nil, &ValidationError{Reason: "no contracts"}
-	}
+	loaded := make([]layer, 0, len(layerNames))
+	perLayerFDPs := make([][]*descriptorpb.FileDescriptorProto, 0, len(layerNames))
 
-	contracts := make(map[string]*Contract, len(yb.Contracts))
-	for _, yc := range yb.Contracts {
-		c, verr := validateContract(yc)
-		if verr != nil {
+	for _, name := range layerNames {
+		lp := filepath.Join(dir, name)
+		fdps, derr := loadLayerDescriptors(filepath.Join(lp, fileDescriptors))
+		if derr != nil {
+			return nil, derr
+		}
+		if verr := validateOpenAPI(filepath.Join(lp, fileOpenAPI)); verr != nil {
 			return nil, verr
 		}
-		if _, dup := contracts[c.contractVersion]; dup {
-			return nil, &ValidationError{Contract: c.contractVersion, Field: "contract_version", Reason: "duplicate"}
+		yb, lerr := loadVersions(filepath.Join(lp, fileVersions))
+		if lerr != nil {
+			return nil, lerr
 		}
-		var reqMsg, respMsg protoreflect.MessageDescriptor
-		for _, pair := range []struct {
-			name string
-			out  *protoreflect.MessageDescriptor
-		}{{c.requestMessage, &reqMsg}, {c.responseMessage, &respMsg}} {
-			d, ferr := files.FindDescriptorByName(protoreflect.FullName(pair.name))
-			if ferr != nil {
-				return nil, &MessageNotFoundError{Contract: c.contractVersion, Message: pair.name}
+		if yb.Version != 1 {
+			return nil, &UnsupportedVersionError{Version: yb.Version}
+		}
+		loaded = append(loaded, layer{fdps: fdps, yb: yb})
+		perLayerFDPs = append(perLayerFDPs, fdps)
+	}
+
+	files, merr := mergeDescriptors(perLayerFDPs)
+	if merr != nil {
+		return nil, merr
+	}
+
+	contracts := make(map[string]*Contract)
+	for _, l := range loaded {
+		if len(l.yb.Contracts) == 0 {
+			return nil, &ValidationError{Reason: "layer has no contracts"}
+		}
+		for _, yc := range l.yb.Contracts {
+			c, verr := validateContract(yc)
+			if verr != nil {
+				return nil, verr
 			}
-			md, ok := d.(protoreflect.MessageDescriptor)
-			if !ok {
-				return nil, &MessageNotFoundError{Contract: c.contractVersion, Message: pair.name}
+			if _, dup := contracts[c.contractVersion]; dup {
+				return nil, &ValidationError{Contract: c.contractVersion, Field: "contract_version", Reason: "duplicate across layers"}
 			}
-			*pair.out = md
+			var reqMsg, respMsg protoreflect.MessageDescriptor
+			for _, pair := range []struct {
+				name string
+				out  *protoreflect.MessageDescriptor
+			}{{c.requestMessage, &reqMsg}, {c.responseMessage, &respMsg}} {
+				d, ferr := files.FindDescriptorByName(protoreflect.FullName(pair.name))
+				if ferr != nil {
+					return nil, &MessageNotFoundError{Contract: c.contractVersion, Message: pair.name}
+				}
+				md, ok := d.(protoreflect.MessageDescriptor)
+				if !ok {
+					return nil, &MessageNotFoundError{Contract: c.contractVersion, Message: pair.name}
+				}
+				*pair.out = md
+			}
+			reqOps, oerr := toOps(c.contractVersion, "request", yc.Request, reqMsg, respMsg)
+			if oerr != nil {
+				return nil, oerr
+			}
+			respOps, oerr := toOps(c.contractVersion, "response", yc.Response, reqMsg, respMsg)
+			if oerr != nil {
+				return nil, oerr
+			}
+			c.requestOps = reqOps
+			c.responseOps = respOps
+			contracts[c.contractVersion] = c
 		}
-		reqOps, oerr := toOps(c.contractVersion, "request", yc.Request, reqMsg, respMsg)
-		if oerr != nil {
-			return nil, oerr
-		}
-		respOps, oerr := toOps(c.contractVersion, "response", yc.Response, reqMsg, respMsg)
-		if oerr != nil {
-			return nil, oerr
-		}
-		c.requestOps = reqOps
-		c.responseOps = respOps
-		contracts[c.contractVersion] = c
 	}
 
 	return &Bundle{contracts: contracts, files: files}, nil
 }
 
-func loadDescriptors(path string) (*protoregistry.Files, error) {
+// layerDirs returns the sorted names of the immediate subdirectories of dir,
+// each a bundle layer. An unreadable directory, or one with no subdirectory,
+// is a hard error.
+func layerDirs(dir string) ([]string, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, &ReadError{File: dir, Err: err}
+	}
+	var names []string
+	for _, e := range entries {
+		if e.IsDir() {
+			names = append(names, e.Name())
+		}
+	}
+	sort.Strings(names)
+	if len(names) == 0 {
+		return nil, &ValidationError{Reason: "bundle directory contains no layers"}
+	}
+	return names, nil
+}
+
+// loadLayerDescriptors reads one layer's descriptors.binpb and returns its
+// FileDescriptorProtos. They are merged across layers (and only then built
+// into a registry) by mergeDescriptors.
+func loadLayerDescriptors(path string) ([]*descriptorpb.FileDescriptorProto, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return nil, &ReadError{File: fileDescriptors, Err: err}
@@ -238,7 +288,25 @@ func loadDescriptors(path string) (*protoregistry.Files, error) {
 	if err := proto.Unmarshal(raw, &fds); err != nil {
 		return nil, &ParseError{File: fileDescriptors, Err: err}
 	}
-	files, err := protodesc.NewFiles(&fds)
+	return fds.File, nil
+}
+
+// mergeDescriptors combines every layer's FileDescriptorProtos into one
+// registry. A file name seen in more than one layer is registered once
+// (Task 3 adds the byte-equality cross-check).
+func mergeDescriptors(perLayer [][]*descriptorpb.FileDescriptorProto) (*protoregistry.Files, error) {
+	seen := make(map[string]bool)
+	merged := &descriptorpb.FileDescriptorSet{}
+	for _, fdps := range perLayer {
+		for _, fdp := range fdps {
+			if seen[fdp.GetName()] {
+				continue
+			}
+			seen[fdp.GetName()] = true
+			merged.File = append(merged.File, fdp)
+		}
+	}
+	files, err := protodesc.NewFiles(merged)
 	if err != nil {
 		return nil, &ParseError{File: fileDescriptors, Err: err}
 	}

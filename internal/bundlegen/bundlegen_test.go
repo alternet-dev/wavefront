@@ -85,9 +85,10 @@ func TestGenerateProducesLoadableBundle(t *testing.T) {
 	if err := bundlegen.Generate(in, out); err != nil {
 		t.Fatalf("Generate: %v", err)
 	}
+	layerDir := filepath.Join(out, "2026-05-17")
 	for _, f := range []string{"descriptors.binpb", "openapi.json", "versions.yaml"} {
-		if _, err := os.Stat(filepath.Join(out, f)); err != nil {
-			t.Fatalf("missing %s: %v", f, err)
+		if _, err := os.Stat(filepath.Join(layerDir, f)); err != nil {
+			t.Fatalf("missing %s in layer dir: %v", f, err)
 		}
 	}
 
@@ -147,8 +148,8 @@ func TestGenerateIsDeterministic(t *testing.T) {
 	if err := bundlegen.Generate(in, o2); err != nil {
 		t.Fatalf("gen2: %v", err)
 	}
-	a, _ := os.ReadFile(filepath.Join(o1, "descriptors.binpb"))
-	b, _ := os.ReadFile(filepath.Join(o2, "descriptors.binpb"))
+	a, _ := os.ReadFile(filepath.Join(o1, "2026-05-17", "descriptors.binpb"))
+	b, _ := os.ReadFile(filepath.Join(o2, "2026-05-17", "descriptors.binpb"))
 	if string(a) != string(b) {
 		t.Error("descriptors.binpb is not byte-reproducible across runs")
 	}
