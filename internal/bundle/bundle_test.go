@@ -367,6 +367,40 @@ func TestLoadMissingBundleDirIsReadError(t *testing.T) {
 	}
 }
 
+func TestLoadResolutionTransformOverride(t *testing.T) {
+	dir := writeBundle(t, fdsBytes(t), validOpenAPI, validVersions)
+	resolution := `version: 1
+overrides:
+  - contract_version: "2024-11"
+    transform:
+      request:
+        - rename: { from: text, to: text2 }
+`
+	mustWrite(t, filepath.Join(dir, "resolution.yaml"), []byte(resolution))
+	b, err := Load(dir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	c, ok := b.Contract("2024-11")
+	if !ok {
+		t.Fatal(`Contract("2024-11") not found`)
+	}
+	if len(c.RequestOps()) != 1 {
+		t.Fatalf("want 1 request op from resolution.yaml, got %d", len(c.RequestOps()))
+	}
+}
+
+func TestLoadResolutionUnknownVersionRejected(t *testing.T) {
+	dir := writeBundle(t, fdsBytes(t), validOpenAPI, validVersions)
+	mustWrite(t, filepath.Join(dir, "resolution.yaml"),
+		[]byte("version: 1\noverrides:\n  - contract_version: \"nope\"\n    transform:\n      request: []\n"))
+	_, err := Load(dir)
+	var ve *ValidationError
+	if !errors.As(err, &ve) {
+		t.Fatalf("want ValidationError for an override on an unknown version, got %v", err)
+	}
+}
+
 func TestLoadLayerMissingFileIsReadError(t *testing.T) {
 	dir := t.TempDir()
 	ld := filepath.Join(dir, "2024-11")

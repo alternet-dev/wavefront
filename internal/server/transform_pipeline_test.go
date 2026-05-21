@@ -6,6 +6,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"reflect"
 	"sync"
 	"testing"
@@ -20,18 +22,13 @@ import (
 	"github.com/alternet-dev/wavefront/internal/config"
 )
 
-const stanzaBundle = `version: 1
-contracts:
-  - contract_version: "2024-11"
-    route: /v3/echo
-    method: POST
-    request_message: acme.v1.Ping
-    response_message: acme.v1.Pong
-    request:
-      - rename: { from: text, to: message }
-    response:
-      - rename: { from: msg, to: text }
-`
+// writeResolutionServer writes a resolution.yaml at the bundle root dir.
+func writeResolutionServer(t *testing.T, dir, content string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, "resolution.yaml"), []byte(content), 0o600); err != nil {
+		t.Fatalf("write resolution.yaml: %v", err)
+	}
+}
 
 func testCfg(up string) *config.Config {
 	return &config.Config{
@@ -58,7 +55,17 @@ func transformPing(t *testing.T, b *bundle.Bundle) []byte {
 }
 
 func TestPipelineAppliesTransformBothDirections(t *testing.T) {
-	b, err := bundle.Load(bundletest.Dir(t, stanzaBundle))
+	dir := bundletest.Dir(t, "")
+	writeResolutionServer(t, dir, `version: 1
+overrides:
+  - contract_version: "2024-11"
+    transform:
+      request:
+        - rename: { from: text, to: message }
+      response:
+        - rename: { from: msg, to: text }
+`)
+	b, err := bundle.Load(dir)
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
@@ -114,7 +121,17 @@ func TestPipelineAppliesTransformBothDirections(t *testing.T) {
 }
 
 func TestPipelineResponseDriftIs502(t *testing.T) {
-	b, err := bundle.Load(bundletest.Dir(t, stanzaBundle))
+	dir := bundletest.Dir(t, "")
+	writeResolutionServer(t, dir, `version: 1
+overrides:
+  - contract_version: "2024-11"
+    transform:
+      request:
+        - rename: { from: text, to: message }
+      response:
+        - rename: { from: msg, to: text }
+`)
+	b, err := bundle.Load(dir)
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
@@ -148,7 +165,17 @@ func TestPipelineResponseDriftIs502(t *testing.T) {
 }
 
 func TestPipelineRequestTransformFailureIs422(t *testing.T) {
-	b, err := bundle.Load(bundletest.Dir(t, stanzaBundle))
+	dir := bundletest.Dir(t, "")
+	writeResolutionServer(t, dir, `version: 1
+overrides:
+  - contract_version: "2024-11"
+    transform:
+      request:
+        - rename: { from: text, to: message }
+      response:
+        - rename: { from: msg, to: text }
+`)
+	b, err := bundle.Load(dir)
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}

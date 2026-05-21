@@ -2,28 +2,35 @@ package bundle
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/alternet-dev/wavefront/internal/bundletest"
 	"github.com/alternet-dev/wavefront/internal/transform"
 )
 
-const stanzaBundle = `version: 1
-contracts:
-  - contract_version: "2024-11"
-    route: /v3/echo
-    method: POST
-    request_message: acme.v1.Ping
-    response_message: acme.v1.Pong
-    request:
-      - rename: { from: text, to: message }
-      - coerce: { field: n, to: string }
-    response:
-      - optionalize: { field: at }
-`
+// writeResolution writes a resolution.yaml file at the bundle root dir.
+func writeResolution(t *testing.T, dir, content string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, fileResolution), []byte(content), 0o600); err != nil {
+		t.Fatalf("write resolution.yaml: %v", err)
+	}
+}
 
 func TestStanzasParseIntoOps(t *testing.T) {
-	b, err := Load(bundletest.Dir(t, stanzaBundle))
+	dir := bundletest.Dir(t, "")
+	writeResolution(t, dir, `version: 1
+overrides:
+  - contract_version: "2024-11"
+    transform:
+      request:
+        - rename: { from: text, to: message }
+        - coerce: { field: n, to: string }
+      response:
+        - optionalize: { field: at }
+`)
+	b, err := Load(dir)
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
@@ -48,17 +55,15 @@ func TestStanzasParseIntoOps(t *testing.T) {
 }
 
 func TestUnknownVerbRejected(t *testing.T) {
-	bad := `version: 1
-contracts:
+	dir := bundletest.Dir(t, "")
+	writeResolution(t, dir, `version: 1
+overrides:
   - contract_version: "2024-11"
-    route: /v3/echo
-    method: POST
-    request_message: acme.v1.Ping
-    response_message: acme.v1.Pong
-    request:
-      - frobnicate: { x: 1 }
-`
-	_, err := Load(bundletest.Dir(t, bad))
+    transform:
+      request:
+        - frobnicate: { x: 1 }
+`)
+	_, err := Load(dir)
 	var pe *ParseError
 	if !errors.As(err, &pe) {
 		t.Fatalf("unknown verb must be ParseError, got %v", err)
@@ -66,50 +71,44 @@ contracts:
 }
 
 func TestRenameFromEqualsToRejected(t *testing.T) {
-	bad := `version: 1
-contracts:
+	dir := bundletest.Dir(t, "")
+	writeResolution(t, dir, `version: 1
+overrides:
   - contract_version: "2024-11"
-    route: /v3/echo
-    method: POST
-    request_message: acme.v1.Ping
-    response_message: acme.v1.Pong
-    request:
-      - rename: { from: text, to: text }
-`
-	if _, err := Load(bundletest.Dir(t, bad)); err == nil {
+    transform:
+      request:
+        - rename: { from: text, to: text }
+`)
+	if _, err := Load(dir); err == nil {
 		t.Fatal("from==to must be rejected at load")
 	}
 }
 
 func TestCoerceToInvalidRejected(t *testing.T) {
-	bad := `version: 1
-contracts:
+	dir := bundletest.Dir(t, "")
+	writeResolution(t, dir, `version: 1
+overrides:
   - contract_version: "2024-11"
-    route: /v3/echo
-    method: POST
-    request_message: acme.v1.Ping
-    response_message: acme.v1.Pong
-    request:
-      - coerce: { field: n, to: int }
-`
-	if _, err := Load(bundletest.Dir(t, bad)); err == nil {
+    transform:
+      request:
+        - coerce: { field: n, to: int }
+`)
+	if _, err := Load(dir); err == nil {
 		t.Fatal("coerce.to=int must be rejected at load")
 	}
 }
 
 func TestTwoVerbOpRejected(t *testing.T) {
-	bad := `version: 1
-contracts:
+	dir := bundletest.Dir(t, "")
+	writeResolution(t, dir, `version: 1
+overrides:
   - contract_version: "2024-11"
-    route: /v3/echo
-    method: POST
-    request_message: acme.v1.Ping
-    response_message: acme.v1.Pong
-    request:
-      - rename: { from: a, to: b }
-        default: { field: c, value: 1 }
-`
-	_, err := Load(bundletest.Dir(t, bad))
+    transform:
+      request:
+        - rename: { from: a, to: b }
+          default: { field: c, value: 1 }
+`)
+	_, err := Load(dir)
 	var ve *ValidationError
 	if !errors.As(err, &ve) {
 		t.Fatalf("two-verb op must be ValidationError, got %v", err)
@@ -117,17 +116,15 @@ contracts:
 }
 
 func TestEmptyOpRejected(t *testing.T) {
-	bad := `version: 1
-contracts:
+	dir := bundletest.Dir(t, "")
+	writeResolution(t, dir, `version: 1
+overrides:
   - contract_version: "2024-11"
-    route: /v3/echo
-    method: POST
-    request_message: acme.v1.Ping
-    response_message: acme.v1.Pong
-    request:
-      - {}
-`
-	_, err := Load(bundletest.Dir(t, bad))
+    transform:
+      request:
+        - {}
+`)
+	_, err := Load(dir)
 	var ve *ValidationError
 	if !errors.As(err, &ve) {
 		t.Fatalf("empty op must be ValidationError, got %v", err)
@@ -135,17 +132,15 @@ contracts:
 }
 
 func TestNonScalarDefaultRejected(t *testing.T) {
-	bad := `version: 1
-contracts:
+	dir := bundletest.Dir(t, "")
+	writeResolution(t, dir, `version: 1
+overrides:
   - contract_version: "2024-11"
-    route: /v3/echo
-    method: POST
-    request_message: acme.v1.Ping
-    response_message: acme.v1.Pong
-    request:
-      - default: { field: meta, value: { nested: 1 } }
-`
-	_, err := Load(bundletest.Dir(t, bad))
+    transform:
+      request:
+        - default: { field: meta, value: { nested: 1 } }
+`)
+	_, err := Load(dir)
 	var ve *ValidationError
 	if !errors.As(err, &ve) {
 		t.Fatalf("non-scalar default value must be a ValidationError at load, got %v", err)
@@ -153,7 +148,7 @@ contracts:
 }
 
 func TestBundleWithoutStanzasHasNoOps(t *testing.T) {
-	b, err := Load(bundletest.Dir(t, "")) // default ValidVersions: no stanzas
+	b, err := Load(bundletest.Dir(t, "")) // default ValidVersions: no resolution.yaml
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
@@ -164,17 +159,15 @@ func TestBundleWithoutStanzasHasNoOps(t *testing.T) {
 }
 
 func TestCrossParentRenameRejected(t *testing.T) {
-	bad := `version: 1
-contracts:
+	dir := bundletest.Dir(t, "")
+	writeResolution(t, dir, `version: 1
+overrides:
   - contract_version: "2024-11"
-    route: /v3/echo
-    method: POST
-    request_message: acme.v1.Ping
-    response_message: acme.v1.Pong
-    request:
-      - rename: { from: a.b, to: x.y }
-`
-	_, err := Load(bundletest.Dir(t, bad))
+    transform:
+      request:
+        - rename: { from: a.b, to: x.y }
+`)
+	_, err := Load(dir)
 	var ve *ValidationError
 	if !errors.As(err, &ve) {
 		t.Fatalf("cross-parent rename must be ValidationError, got %v", err)
@@ -183,17 +176,15 @@ contracts:
 
 func TestSameParentDifferentLeafRenameAccepted(t *testing.T) {
 	// Single-segment paths (slice-1 case) — different leaves at same (empty) parent.
-	good := `version: 1
-contracts:
+	dir := bundletest.Dir(t, "")
+	writeResolution(t, dir, `version: 1
+overrides:
   - contract_version: "2024-11"
-    route: /v3/echo
-    method: POST
-    request_message: acme.v1.Ping
-    response_message: acme.v1.Pong
-    request:
-      - rename: { from: text, to: message }
-`
-	if _, err := Load(bundletest.Dir(t, good)); err != nil {
+    transform:
+      request:
+        - rename: { from: text, to: message }
+`)
+	if _, err := Load(dir); err != nil {
 		t.Fatalf("same-parent rename must load, got %v", err)
 	}
 }
@@ -201,17 +192,15 @@ contracts:
 // The bundletest FDS has acme.v1.Ping{text string=1, n int32=2}.
 // Reference an absent field — must fail at load.
 func TestDescriptorCrossCheckRejectsAbsentField(t *testing.T) {
-	bad := `version: 1
-contracts:
+	dir := bundletest.Dir(t, "")
+	writeResolution(t, dir, `version: 1
+overrides:
   - contract_version: "2024-11"
-    route: /v3/echo
-    method: POST
-    request_message: acme.v1.Ping
-    response_message: acme.v1.Pong
-    request:
-      - rename: { from: nonexistent, to: x }
-`
-	_, err := Load(bundletest.Dir(t, bad))
+    transform:
+      request:
+        - rename: { from: nonexistent, to: x }
+`)
+	_, err := Load(dir)
 	var ve *ValidationError
 	if !errors.As(err, &ve) {
 		t.Fatalf("path naming an absent field must be ValidationError, got %v", err)
@@ -220,19 +209,17 @@ contracts:
 
 // Ping.text is a scalar string; using it with [] should fail (not repeated).
 func TestDescriptorCrossCheckRejectsScalarUsedAsArray(t *testing.T) {
-	bad := `version: 1
-contracts:
+	dir := bundletest.Dir(t, "")
+	writeResolution(t, dir, `version: 1
+overrides:
   - contract_version: "2024-11"
-    route: /v3/echo
-    method: POST
-    request_message: acme.v1.Ping
-    response_message: acme.v1.Pong
-    request:
-      - rename:
-          from: "text[].sub"
-          to: "text[].alt"
-`
-	_, err := Load(bundletest.Dir(t, bad))
+    transform:
+      request:
+        - rename:
+            from: "text[].sub"
+            to: "text[].alt"
+`)
+	_, err := Load(dir)
 	var ve *ValidationError
 	if !errors.As(err, &ve) {
 		t.Fatalf("scalar treated as array must be ValidationError, got %v", err)
@@ -242,17 +229,15 @@ contracts:
 // Ping.text is a scalar; using a nested path through it (`text.x`) should fail
 // because intermediate must be TYPE_MESSAGE.
 func TestDescriptorCrossCheckRejectsScalarAsObjectIntermediate(t *testing.T) {
-	bad := `version: 1
-contracts:
+	dir := bundletest.Dir(t, "")
+	writeResolution(t, dir, `version: 1
+overrides:
   - contract_version: "2024-11"
-    route: /v3/echo
-    method: POST
-    request_message: acme.v1.Ping
-    response_message: acme.v1.Pong
-    request:
-      - rename: { from: text.x, to: text.y }
-`
-	_, err := Load(bundletest.Dir(t, bad))
+    transform:
+      request:
+        - rename: { from: text.x, to: text.y }
+`)
+	_, err := Load(dir)
 	var ve *ValidationError
 	if !errors.As(err, &ve) {
 		t.Fatalf("scalar used as object intermediate must be ValidationError, got %v", err)
@@ -265,17 +250,15 @@ contracts:
 // don't have descriptors for. So a bundle with a typo on the internal side
 // LOADS fine here; the runtime upstream catches the mismatch.
 func TestInternalSidePathsNotCrossChecked(t *testing.T) {
-	good := `version: 1
-contracts:
+	dir := bundletest.Dir(t, "")
+	writeResolution(t, dir, `version: 1
+overrides:
   - contract_version: "2024-11"
-    route: /v3/echo
-    method: POST
-    request_message: acme.v1.Ping
-    response_message: acme.v1.Pong
-    request:
-      - rename: { from: text, to: any_internal_name_we_dont_validate }
-`
-	if _, err := Load(bundletest.Dir(t, good)); err != nil {
+    transform:
+      request:
+        - rename: { from: text, to: any_internal_name_we_dont_validate }
+`)
+	if _, err := Load(dir); err != nil {
 		t.Fatalf("internal-side path must not be cross-checked at load; got %v", err)
 	}
 }
@@ -283,17 +266,15 @@ contracts:
 // Valid bundle: rename.from references a real field (text); rename.to is
 // internal (not validated). Must load cleanly.
 func TestValidExternalPathLoadsCleanly(t *testing.T) {
-	good := `version: 1
-contracts:
+	dir := bundletest.Dir(t, "")
+	writeResolution(t, dir, `version: 1
+overrides:
   - contract_version: "2024-11"
-    route: /v3/echo
-    method: POST
-    request_message: acme.v1.Ping
-    response_message: acme.v1.Pong
-    request:
-      - coerce: { field: n, to: string }
-`
-	if _, err := Load(bundletest.Dir(t, good)); err != nil {
+    transform:
+      request:
+        - coerce: { field: n, to: string }
+`)
+	if _, err := Load(dir); err != nil {
 		t.Fatalf("valid external path must load; got %v", err)
 	}
 }

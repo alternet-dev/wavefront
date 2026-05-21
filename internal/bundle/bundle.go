@@ -2,15 +2,17 @@
 // (descriptors.binpb + openapi.json + versions.yaml) at boot, fail-fast. The
 // route → message binding is read verbatim (zero inference); every binding is
 // resolved against the FileDescriptorSet here so the runtime never has to.
-// Bundles may carry optional request/response transform stanzas (additive
-// fields parsed into per-contract `[]transform.Op`). Unknown keys are
+// Transform stanzas live in the operator-owned resolution.yaml at the bundle
+// root; the per-version layer manifests are binding-only. Unknown keys are
 // refused by strict decode.
 package bundle
 
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -30,6 +32,7 @@ const (
 	fileDescriptors = "descriptors.binpb"
 	fileOpenAPI     = "openapi.json"
 	fileVersions    = "versions.yaml"
+	fileResolution  = "resolution.yaml"
 )
 
 // --- typed errors (one per failure step; mirrors the sibling taxonomy) ---
@@ -125,13 +128,11 @@ func (b *Bundle) Message(fullName string) (protoreflect.MessageDescriptor, error
 // --- on-disk shape (strict-decoded) ---
 
 type yamlContract struct {
-	ContractVersion string   `yaml:"contract_version"`
-	Route           string   `yaml:"route"`
-	Method          string   `yaml:"method"`
-	RequestMessage  string   `yaml:"request_message"`
-	ResponseMessage string   `yaml:"response_message"`
-	Request         []yamlOp `yaml:"request"`
-	Response        []yamlOp `yaml:"response"`
+	ContractVersion string `yaml:"contract_version"`
+	Route           string `yaml:"route"`
+	Method          string `yaml:"method"`
+	RequestMessage  string `yaml:"request_message"`
+	ResponseMessage string `yaml:"response_message"`
 }
 
 type yamlRename struct {
@@ -161,10 +162,62 @@ type yamlBundle struct {
 	Contracts []yamlContract `yaml:"contracts"`
 }
 
+type yamlResolutionFile struct {
+	Version   int              `yaml:"version"`
+	Overrides []yamlResolution `yaml:"overrides"`
+}
+
+type yamlResolution struct {
+	ContractVersion string         `yaml:"contract_version"`
+	Transform       *yamlTransform `yaml:"transform"`
+}
+
+type yamlTransform struct {
+	Request  []yamlOp `yaml:"request"`
+	Response []yamlOp `yaml:"response"`
+}
+
 var allowedMethods = map[string]bool{
 	http.MethodGet: true, http.MethodPost: true, http.MethodPut: true,
 	http.MethodPatch: true, http.MethodDelete: true, http.MethodHead: true,
 	http.MethodOptions: true,
+}
+
+// loadResolution reads the optional operator-owned resolution.yaml at the
+// bundle root. An absent file yields an empty map (every version keeps its
+// default route). Strict decode; the schema version must be 1.
+func loadResolution(dir string) (map[string]yamlTransform, error) {
+	raw, err := os.ReadFile(filepath.Join(dir, fileResolution))
+	if errors.Is(err, fs.ErrNotExist) {
+		return map[string]yamlTransform{}, nil
+	}
+	if err != nil {
+		return nil, &ReadError{File: fileResolution, Err: err}
+	}
+	dec := yaml.NewDecoder(bytes.NewReader(raw))
+	dec.KnownFields(true)
+	var yr yamlResolutionFile
+	if err := dec.Decode(&yr); err != nil {
+		return nil, &ParseError{File: fileResolution, Err: err}
+	}
+	if yr.Version != 1 {
+		return nil, &UnsupportedVersionError{Version: yr.Version}
+	}
+	out := make(map[string]yamlTransform, len(yr.Overrides))
+	for _, ov := range yr.Overrides {
+		cv := strings.TrimSpace(ov.ContractVersion)
+		if cv == "" {
+			return nil, &ValidationError{Field: "contract_version", Reason: "resolution override must name a contract version"}
+		}
+		if _, dup := out[cv]; dup {
+			return nil, &ValidationError{Contract: cv, Field: "contract_version", Reason: "duplicate resolution override"}
+		}
+		if ov.Transform == nil {
+			return nil, &ValidationError{Contract: cv, Field: "transform", Reason: "resolution override must set a transform"}
+		}
+		out[cv] = *ov.Transform
+	}
+	return out, nil
 }
 
 // Load reads, parses, validates, and resolves the bundle in dir. The bundle
@@ -175,6 +228,11 @@ func Load(dir string) (*Bundle, error) {
 	layerNames, err := layerDirs(dir)
 	if err != nil {
 		return nil, err
+	}
+
+	resolutionMap, rerr := loadResolution(dir)
+	if rerr != nil {
+		return nil, rerr
 	}
 
 	type layer struct {
@@ -239,17 +297,25 @@ func Load(dir string) (*Bundle, error) {
 				}
 				*pair.out = md
 			}
-			reqOps, oerr := toOps(c.contractVersion, "request", yc.Request, reqMsg, respMsg)
+			override := resolutionMap[c.contractVersion]
+			reqOps, oerr := toOps(c.contractVersion, "request", override.Request, reqMsg, respMsg)
 			if oerr != nil {
 				return nil, oerr
 			}
-			respOps, oerr := toOps(c.contractVersion, "response", yc.Response, reqMsg, respMsg)
+			respOps, oerr := toOps(c.contractVersion, "response", override.Response, reqMsg, respMsg)
 			if oerr != nil {
 				return nil, oerr
 			}
 			c.requestOps = reqOps
 			c.responseOps = respOps
 			contracts[c.contractVersion] = c
+		}
+	}
+
+	// Validate that every resolution override names a known contract version.
+	for cv := range resolutionMap {
+		if _, known := contracts[cv]; !known {
+			return nil, &ValidationError{Contract: cv, Field: "contract_version", Reason: "resolution override names an unknown contract version"}
 		}
 	}
 
