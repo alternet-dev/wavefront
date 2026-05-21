@@ -351,6 +351,36 @@ func TestLoadRejectsConflictingDescriptors(t *testing.T) {
 	}
 }
 
+func TestLoadEmptyBundleDirRejected(t *testing.T) {
+	_, err := Load(t.TempDir())
+	var ve *ValidationError
+	if !errors.As(err, &ve) {
+		t.Fatalf("want ValidationError for an empty bundle directory, got %v", err)
+	}
+}
+
+func TestLoadMissingBundleDirIsReadError(t *testing.T) {
+	_, err := Load(filepath.Join(t.TempDir(), "does-not-exist"))
+	var re *ReadError
+	if !errors.As(err, &re) {
+		t.Fatalf("want ReadError for a missing bundle directory, got %v", err)
+	}
+}
+
+func TestLoadLayerMissingFileIsReadError(t *testing.T) {
+	dir := t.TempDir()
+	ld := filepath.Join(dir, "2024-11")
+	mustMkdir(t, ld)
+	// descriptors.binpb deliberately omitted.
+	mustWrite(t, filepath.Join(ld, fileOpenAPI), []byte(validOpenAPI))
+	mustWrite(t, filepath.Join(ld, fileVersions), []byte(validVersions))
+	_, err := Load(dir)
+	var re *ReadError
+	if !errors.As(err, &re) || re.File != fileDescriptors {
+		t.Fatalf("want ReadError(%s), got %v", fileDescriptors, err)
+	}
+}
+
 func TestLoadMultipleLayers(t *testing.T) {
 	mk := func(cv, route string) string {
 		return "version: 1\ncontracts:\n  - contract_version: \"" + cv + "\"\n" +
