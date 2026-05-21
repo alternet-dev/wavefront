@@ -32,20 +32,6 @@ func upstreamJSONEquals(t *testing.T, got string, want map[string]any) {
 	}
 }
 
-const stanzaVersions = `version: 1
-contracts:
-  - contract_version: "2024-11"
-    route: /v3/echo
-    method: POST
-    request_message: acme.v1.Ping
-    response_message: acme.v1.Pong
-    request:
-      - rename: { from: text, to: message }
-      - coerce: { field: n, to: string }
-    response:
-      - rename: { from: msg, to: text }
-`
-
 func e2ePing(t *testing.T, b *bundle.Bundle) []byte {
 	t.Helper()
 	md, err := b.Message("acme.v1.Ping")
@@ -79,7 +65,18 @@ func e2ePingTextOnly(t *testing.T, b *bundle.Bundle) []byte {
 }
 
 func TestTransformE2EBothDirections(t *testing.T) {
-	b, err := bundle.Load(bundletest.Dir(t, stanzaVersions))
+	dir := bundletest.Dir(t, "")
+	bundletest.WriteResolution(t, dir, `version: 1
+overrides:
+  - contract_version: "2024-11"
+    transform:
+      request:
+        - rename: { from: text, to: message }
+        - coerce: { field: n, to: string }
+      response:
+        - rename: { from: msg, to: text }
+`)
+	b, err := bundle.Load(dir)
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
@@ -164,17 +161,15 @@ func TestRequestTransformFailureIs422E2E(t *testing.T) {
 	// Coerce text (a non-numeric string) to number: passes descriptor
 	// cross-check at load (text exists in acme.v1.Ping), but fails at
 	// runtime because "hi" cannot be parsed as a number → 422.
-	bad := `version: 1
-contracts:
+	dir := bundletest.Dir(t, "")
+	bundletest.WriteResolution(t, dir, `version: 1
+overrides:
   - contract_version: "2024-11"
-    route: /v3/echo
-    method: POST
-    request_message: acme.v1.Ping
-    response_message: acme.v1.Pong
-    request:
-      - coerce: { field: text, to: number }
-`
-	b, err := bundle.Load(bundletest.Dir(t, bad))
+    transform:
+      request:
+        - coerce: { field: text, to: number }
+`)
+	b, err := bundle.Load(dir)
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
@@ -203,17 +198,15 @@ func TestRenameSourceAbsentRequestIs422E2E(t *testing.T) {
 	// (passes load-time cross-check) but the request has it unset (proto3
 	// zero-value omitted by protojson), so runtime rename source is absent
 	// -> 422 transform_failed.
-	bundleYAML := `version: 1
-contracts:
+	dir := bundletest.Dir(t, "")
+	bundletest.WriteResolution(t, dir, `version: 1
+overrides:
   - contract_version: "2024-11"
-    route: /v3/echo
-    method: POST
-    request_message: acme.v1.Ping
-    response_message: acme.v1.Pong
-    request:
-      - rename: { from: n, to: renamed_n }
-`
-	b, err := bundle.Load(bundletest.Dir(t, bundleYAML))
+    transform:
+      request:
+        - rename: { from: n, to: renamed_n }
+`)
+	b, err := bundle.Load(dir)
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
@@ -237,21 +230,27 @@ contracts:
 	}
 }
 
-const nestedArrayBundle = `version: 1
+const nestedArrayVersions = `version: 1
 contracts:
   - contract_version: "2024-12"
     route: /v3/echo
     method: POST
     request_message: acme.v1.PingV2
     response_message: acme.v1.Pong
-    request:
-      - rename: { from: "items[].text", to: "items[].label" }
-      - coerce: { field: "items[].id", to: string }
-      - default: { field: meta.locale, value: en-US }
 `
 
 func TestNestedArrayE2E(t *testing.T) {
-	b, err := bundle.Load(bundletest.Dir(t, nestedArrayBundle))
+	dir := bundletest.Dir(t, nestedArrayVersions)
+	bundletest.WriteResolution(t, dir, `version: 1
+overrides:
+  - contract_version: "2024-12"
+    transform:
+      request:
+        - rename: { from: "items[].text", to: "items[].label" }
+        - coerce: { field: "items[].id", to: string }
+        - default: { field: meta.locale, value: en-US }
+`)
+	b, err := bundle.Load(dir)
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}

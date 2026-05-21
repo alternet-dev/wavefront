@@ -151,6 +151,16 @@ type Layer struct {
 	Versions    string
 }
 
+// WriteResolution writes resolution.yaml content into bundleDir (the bundle
+// root). Tests use it to attach operator transform overrides to a bundle
+// built by Dir or MultiDir.
+func WriteResolution(t testing.TB, bundleDir, content string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(bundleDir, "resolution.yaml"), []byte(content), 0o600); err != nil {
+		t.Fatalf("write resolution.yaml: %v", err)
+	}
+}
+
 // MultiDir writes a multi-layer bundle into a fresh temp dir and returns the
 // bundle path.
 func MultiDir(t testing.TB, layers ...Layer) string {
