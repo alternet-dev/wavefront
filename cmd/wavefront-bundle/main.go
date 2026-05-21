@@ -9,6 +9,7 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -43,6 +44,9 @@ func runAdd(args []string, errOut io.Writer) int {
 	openapi := fs.String("openapi", "", "source OpenAPI JSON: a file path or an http(s):// URL")
 	bundleDir := fs.String("bundle", "", "bundle directory to add the layer into")
 	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
 		return 2
 	}
 	if *openapi == "" || *bundleDir == "" {

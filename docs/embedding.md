@@ -16,8 +16,8 @@ exported file or the live service's OpenAPI endpoint (so there is no manual
 export step):
 
 ```bash
-wavefront-bundlegen --openapi ./openapi.json            --out ./bundle
-wavefront-bundlegen --openapi https://api.internal/openapi.json --out ./bundle
+wavefront-bundle add --openapi ./openapi.json            --bundle ./bundle
+wavefront-bundle add --openapi https://api.internal/openapi.json --bundle ./bundle
 ```
 
 The generator passes the OpenAPI through into the committed bundle, so a

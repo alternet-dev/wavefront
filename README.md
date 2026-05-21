@@ -63,12 +63,12 @@ Generate the bundle from your OpenAPI — a file, or the live service's
 `/openapi.json` (no manual export step) — then run the proxy against it:
 
 ```bash
-go build -o wavefront-bundlegen ./cmd/wavefront-bundlegen
+go build -o wavefront-bundle ./cmd/wavefront-bundle
 
 # from a file…
-./wavefront-bundlegen --openapi ./openapi.json --out ./bundle
+./wavefront-bundle add --openapi ./openapi.json --bundle ./bundle
 # …or straight from a running service:
-./wavefront-bundlegen --openapi https://api.internal/openapi.json --out ./bundle
+./wavefront-bundle add --openapi https://api.internal/openapi.json --bundle ./bundle
 ```
 
 The bundle is committed in your repo (it is the contract source of truth) and

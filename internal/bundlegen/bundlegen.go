@@ -205,7 +205,7 @@ func safeLayerName(name string) bool {
 		return false
 	}
 	for _, r := range name {
-		if r < 0x20 {
+		if r < 0x20 || r == 0x7F {
 			return false
 		}
 	}
