@@ -107,7 +107,7 @@ jobs:
             $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
             $(printf "$REGISTRY_IMAGE@sha256:%s " *)
 
-  # Publish the wavefront-bundle CLI formula to the internal Homebrew tap.
+  # Publish the wavefront-bundle CLI formula to the alternet-dev Homebrew tap.
   # The formula is source-built (Homebrew compiles it from this tag), so only
   # the tag and its commit need updating — no binaries are uploaded here.
   update-tap:
@@ -116,7 +116,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Update homebrew-internal formula
+      - name: Update homebrew-tap formula
         env:
           HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
           TAG: ${{ github.ref_name }}
@@ -124,7 +124,7 @@ jobs:
         run: |
           set -euo pipefail
           git clone --depth 1 \
-            "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/alternet-dev/homebrew-internal.git" \
+            "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/alternet-dev/homebrew-tap.git" \
             tap
           cp packaging/homebrew-wavefront.rb tap/Formula/wavefront.rb
           cd tap
@@ -136,5 +136,5 @@ jobs:
           git commit -m "wavefront ${TAG}"
           BRANCH="$(git symbolic-ref --short HEAD)"
           git push \
-            "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/alternet-dev/homebrew-internal.git" \
+            "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/alternet-dev/homebrew-tap.git" \
             HEAD:"${BRANCH}"
