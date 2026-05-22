@@ -5,17 +5,12 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
-	"net/http/httptest"
 	"reflect"
-	"sync"
 	"testing"
 
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
 	"google.golang.org/protobuf/types/dynamicpb"
-
-	"github.com/alternet-dev/wavefront/internal/bundle"
-	"github.com/alternet-dev/wavefront/internal/bundletest"
 )
 
 // upstreamJSONEquals decodes `got` and compares against `want` semantically.
@@ -32,41 +27,11 @@ func upstreamJSONEquals(t *testing.T, got string, want map[string]any) {
 	}
 }
 
-func e2ePing(t *testing.T, b *bundle.Bundle) []byte {
-	t.Helper()
-	md, err := b.Message("acme.v1.Ping")
-	if err != nil {
-		t.Fatalf("Ping: %v", err)
-	}
-	m := dynamicpb.NewMessage(md)
-	m.Set(md.Fields().ByName("text"), protoreflect.ValueOfString("hi"))
-	m.Set(md.Fields().ByName("n"), protoreflect.ValueOfInt32(7))
-	raw, err := proto.Marshal(m)
-	if err != nil {
-		t.Fatalf("marshal: %v", err)
-	}
-	return raw
-}
-
-func e2ePingTextOnly(t *testing.T, b *bundle.Bundle) []byte {
-	t.Helper()
-	md, err := b.Message("acme.v1.Ping")
-	if err != nil {
-		t.Fatalf("Ping: %v", err)
-	}
-	m := dynamicpb.NewMessage(md)
-	m.Set(md.Fields().ByName("text"), protoreflect.ValueOfString("hi"))
-	// n deliberately unset — proto3 zero value will be omitted by protojson.
-	raw, err := proto.Marshal(m)
-	if err != nil {
-		t.Fatalf("marshal: %v", err)
-	}
-	return raw
-}
-
 func TestTransformE2EBothDirections(t *testing.T) {
-	dir := bundletest.Dir(t, "")
-	bundletest.WriteResolution(t, dir, `version: 1
+	// Claim: a transform override applies request stanzas before the upstream
+	// call and response stanzas after; both directions land end-to-end.
+	h := Spawn(t, SpawnOpts{
+		Resolution: `version: 1
 overrides:
   - contract_version: "2024-11"
     transform:
@@ -75,25 +40,14 @@ overrides:
         - coerce: { field: n, to: string }
       response:
         - rename: { from: msg, to: text }
-`)
-	b, err := bundle.Load(dir)
-	if err != nil {
-		t.Fatalf("load: %v", err)
-	}
-	var mu sync.Mutex
-	var saw string
-	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body, _ := io.ReadAll(r.Body)
-		mu.Lock()
-		saw = string(body)
-		mu.Unlock()
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, `{"msg":"hello-back"}`)
-	}))
-	defer up.Close()
+`,
+		BackendHandler: func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"msg":"hello-back"}`)
+		},
+	})
 
-	fs := front(t, b, cfg(up.URL))
-	req, _ := http.NewRequest(http.MethodPost, fs.URL, bytes.NewReader(e2ePing(t, b)))
+	req, _ := http.NewRequest(http.MethodPost, h.Proxy.URL, bytes.NewReader(PingBytes(t, h.Bundle, "hi", 7)))
 	req.Header.Set("X-Api-Contract-Version", "2024-11")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -104,12 +58,9 @@ overrides:
 	if resp.StatusCode != 200 {
 		t.Fatalf("status %d", resp.StatusCode)
 	}
-	mu.Lock()
-	got := saw
-	mu.Unlock()
-	// proto3 JSON renders int32 as a number; coerce n->string makes it "7"
-	upstreamJSONEquals(t, got, map[string]any{"message": "hi", "n": "7"})
-	md, merr := b.Message("acme.v1.Pong")
+	// proto3 JSON renders int32 as a number; coerce n→string makes it "7".
+	upstreamJSONEquals(t, string(h.Backend.Last().Body), map[string]any{"message": "hi", "n": "7"})
+	md, merr := h.Bundle.Message("acme.v1.Pong")
 	if merr != nil {
 		t.Fatalf("Pong: %v", merr)
 	}
@@ -124,61 +75,44 @@ overrides:
 }
 
 func TestNoStanzasPassthrough(t *testing.T) {
-	b, err := bundle.Load(bundletest.Dir(t, "")) // no stanzas
-	if err != nil {
-		t.Fatalf("load: %v", err)
-	}
-	var mu sync.Mutex
-	var saw string
-	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body, _ := io.ReadAll(r.Body)
-		mu.Lock()
-		saw = string(body)
-		mu.Unlock()
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, `{"text":"x"}`)
-	}))
-	defer up.Close()
+	// Claim: a contract version with no resolution override passes the body
+	// through untouched (modulo codec).
+	h := Spawn(t, SpawnOpts{
+		BackendHandler: func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"text":"x"}`)
+		},
+	})
 
-	fs := front(t, b, cfg(up.URL))
-	req, _ := http.NewRequest(http.MethodPost, fs.URL, bytes.NewReader(e2ePing(t, b)))
+	req, _ := http.NewRequest(http.MethodPost, h.Proxy.URL, bytes.NewReader(PingBytes(t, h.Bundle, "hi", 7)))
 	req.Header.Set("X-Api-Contract-Version", "2024-11")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("do: %v", err)
 	}
 	defer resp.Body.Close()
-	mu.Lock()
-	got := saw
-	mu.Unlock()
 	if resp.StatusCode != 200 {
 		t.Fatalf("passthrough: status=%d want 200", resp.StatusCode)
 	}
-	upstreamJSONEquals(t, got, map[string]any{"text": "hi", "n": float64(7)})
+	upstreamJSONEquals(t, string(h.Backend.Last().Body), map[string]any{"text": "hi", "n": float64(7)})
 }
 
 func TestRequestTransformFailureIs422E2E(t *testing.T) {
-	// Coerce text (a non-numeric string) to number: passes descriptor
-	// cross-check at load (text exists in acme.v1.Ping), but fails at
-	// runtime because "hi" cannot be parsed as a number → 422.
-	dir := bundletest.Dir(t, "")
-	bundletest.WriteResolution(t, dir, `version: 1
+	// Claim: a request transform verb that cannot apply at runtime returns
+	// transform_failed (HTTP 422) and does NOT call the upstream.
+	// Coerce text (a non-numeric string) to number: passes the descriptor
+	// cross-check at load, but fails at runtime because "hi" cannot be parsed
+	// as a number.
+	h := Spawn(t, SpawnOpts{
+		Resolution: `version: 1
 overrides:
   - contract_version: "2024-11"
     transform:
       request:
         - coerce: { field: text, to: number }
-`)
-	b, err := bundle.Load(dir)
-	if err != nil {
-		t.Fatalf("load: %v", err)
-	}
-	up := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
-		t.Error("upstream must not be called on request transform failure")
-	}))
-	defer up.Close()
-	fs := front(t, b, cfg(up.URL))
-	req, _ := http.NewRequest(http.MethodPost, fs.URL, bytes.NewReader(e2ePing(t, b)))
+`,
+	})
+	req, _ := http.NewRequest(http.MethodPost, h.Proxy.URL, bytes.NewReader(PingBytes(t, h.Bundle, "hi", 7)))
 	req.Header.Set("X-Api-Contract-Version", "2024-11")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -191,31 +125,27 @@ overrides:
 	if resp.Header.Get("X-Wavefront-Error") != "transform_failed" {
 		t.Errorf("X-Wavefront-Error=%q", resp.Header.Get("X-Wavefront-Error"))
 	}
+	if c := h.Backend.Count(); c != 0 {
+		t.Errorf("upstream must not be called on request transform failure, got %d requests", c)
+	}
 }
 
 func TestRenameSourceAbsentRequestIs422E2E(t *testing.T) {
-	// Bundle: rename `n` -> `renamed_n`. `n` exists on the descriptor
-	// (passes load-time cross-check) but the request has it unset (proto3
-	// zero-value omitted by protojson), so runtime rename source is absent
-	// -> 422 transform_failed.
-	dir := bundletest.Dir(t, "")
-	bundletest.WriteResolution(t, dir, `version: 1
+	// Claim: a rename whose source field is absent at runtime returns
+	// transform_failed (HTTP 422) and does NOT call the upstream.
+	// rename n → renamed_n: n exists on the descriptor (passes load-time
+	// cross-check), but the request has n unset (proto3 zero-value omitted by
+	// protojson), so runtime rename source is absent.
+	h := Spawn(t, SpawnOpts{
+		Resolution: `version: 1
 overrides:
   - contract_version: "2024-11"
     transform:
       request:
         - rename: { from: n, to: renamed_n }
-`)
-	b, err := bundle.Load(dir)
-	if err != nil {
-		t.Fatalf("load: %v", err)
-	}
-	up := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
-		t.Error("upstream must not be called on request transform failure")
-	}))
-	defer up.Close()
-	fs := front(t, b, cfg(up.URL))
-	req, _ := http.NewRequest(http.MethodPost, fs.URL, bytes.NewReader(e2ePingTextOnly(t, b)))
+`,
+	})
+	req, _ := http.NewRequest(http.MethodPost, h.Proxy.URL, bytes.NewReader(PingTextOnly(t, h.Bundle, "hi")))
 	req.Header.Set("X-Api-Contract-Version", "2024-11")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -227,6 +157,9 @@ overrides:
 	}
 	if resp.Header.Get("X-Wavefront-Error") != "transform_failed" {
 		t.Errorf("X-Wavefront-Error=%q want transform_failed", resp.Header.Get("X-Wavefront-Error"))
+	}
+	if c := h.Backend.Count(); c != 0 {
+		t.Errorf("upstream must not be called on request transform failure, got %d requests", c)
 	}
 }
 
@@ -240,8 +173,11 @@ contracts:
 `
 
 func TestNestedArrayE2E(t *testing.T) {
-	dir := bundletest.Dir(t, nestedArrayVersions)
-	bundletest.WriteResolution(t, dir, `version: 1
+	// Claim: transform stanzas addressed with array-element and nested-key
+	// paths apply correctly across the whole pipeline.
+	h := Spawn(t, SpawnOpts{
+		Versions: nestedArrayVersions,
+		Resolution: `version: 1
 overrides:
   - contract_version: "2024-12"
     transform:
@@ -249,13 +185,14 @@ overrides:
         - rename: { from: "items[].text", to: "items[].label" }
         - coerce: { field: "items[].id", to: string }
         - default: { field: meta.locale, value: en-US }
-`)
-	b, err := bundle.Load(dir)
-	if err != nil {
-		t.Fatalf("load: %v", err)
-	}
+`,
+		BackendHandler: func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"text":"server-ok"}`)
+		},
+	})
 
-	md, err := b.Message("acme.v1.PingV2")
+	md, err := h.Bundle.Message("acme.v1.PingV2")
 	if err != nil {
 		t.Fatalf("PingV2: %v", err)
 	}
@@ -277,20 +214,7 @@ overrides:
 		t.Fatalf("marshal PingV2: %v", err)
 	}
 
-	var mu sync.Mutex
-	var saw string
-	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body, _ := io.ReadAll(r.Body)
-		mu.Lock()
-		saw = string(body)
-		mu.Unlock()
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, `{"text":"server-ok"}`)
-	}))
-	defer up.Close()
-
-	fs := front(t, b, cfg(up.URL))
-	req, _ := http.NewRequest(http.MethodPost, fs.URL, bytes.NewReader(raw))
+	req, _ := http.NewRequest(http.MethodPost, h.Proxy.URL, bytes.NewReader(raw))
 	req.Header.Set("X-Api-Contract-Version", "2024-12")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -301,10 +225,7 @@ overrides:
 		t.Fatalf("status %d", resp.StatusCode)
 	}
 
-	mu.Lock()
-	got := saw
-	mu.Unlock()
-	upstreamJSONEquals(t, got, map[string]any{
+	upstreamJSONEquals(t, string(h.Backend.Last().Body), map[string]any{
 		"items": []any{
 			map[string]any{"id": "1", "label": "alpha"},
 			map[string]any{"id": "2", "label": "beta"},
@@ -312,7 +233,7 @@ overrides:
 		"meta": map[string]any{"locale": "en-US"},
 	})
 
-	pongMD, _ := b.Message("acme.v1.Pong")
+	pongMD, _ := h.Bundle.Message("acme.v1.Pong")
 	out := dynamicpb.NewMessage(pongMD)
 	rawResp, _ := io.ReadAll(resp.Body)
 	if err := proto.Unmarshal(rawResp, out); err != nil {
