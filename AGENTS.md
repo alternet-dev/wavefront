@@ -34,8 +34,10 @@ source of truth — verify a claim against it.
 - `wavefront` does NOT persist anything. The bundle is read-only input.
 - The bundle is data, not code. Backend- and version-specific behavior lives in
   the bundle, never in `src/`.
-- One configured upstream. No service discovery, no routing-by-host, no TLS
-  termination — the ingress owns those.
+- Upstreams are statically configured — a default
+  (`WAVEFRONT_UPSTREAM_BASE_URL`) plus optional named targets
+  (`WAVEFRONT_TARGETS`); a contract version routes to one. No service
+  discovery, no routing-by-host, no TLS termination — the ingress owns those.
 - A missing/invalid bundle at boot ⇒ refuse to start (fail fast). The bundle is
   loaded once at boot — there is no in-place reload.
 - Keep the dependency surface minimal: Go standard library plus a small set of

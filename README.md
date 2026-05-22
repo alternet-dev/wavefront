@@ -38,8 +38,9 @@ contract variance is absorbed so the internal API stays singular.
   add / rename / optionalize / default / coerce; route remap).
 - **Adapter** — a codec pair. `protobuf ↔ OpenAPI/JSON` is the reference
   adapter, not the identity.
-- **Selector** — the key a request is resolved by: version, codec,
-  client-profile, tenant, or migration cohort. Same engine, different key.
+- **Selector** — the key a request is resolved by. The contract **version**
+  today; the engine is designed to extend to other selectors (codec, profile,
+  tenant, cohort).
 
 For depth, see [docs/concepts.md](docs/concepts.md).
 

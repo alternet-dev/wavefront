@@ -14,16 +14,19 @@ declarative edge so the internal API stays singular and free to evolve.
 ## The selector axis
 
 Every request carries a **selector** that picks which transform profile
-applies. The engine is identical regardless of what the selector *is*:
+applies. Today `wavefront` resolves on one selector — the contract
+**version** — but the model is general: the same engine, bundle format, and
+transform vocabulary are designed to extend to other selectors.
 
-- **version** — the client's external contract version (the anchor case).
+- **version** — the client's external contract version. The selector shipped
+  today.
 - **codec** — content negotiation (protobuf / CBOR / JSON ⇄ internal JSON).
 - **profile** — client surface (mobile / web / TV) → BFF-shaped responses.
 - **tenant** — partner/tenant key → negotiated field names/units.
 - **cohort** — migration cohort → old contract over a rewritten backend.
 
-One engine, one bundle format, one transform vocabulary; the selector is the
-only thing that changes. This is why `wavefront` is not "a protobuf gateway."
+`codec`, `profile`, `tenant`, and `cohort` are designed-for, not yet built.
+This selector generality is why `wavefront` is not "a protobuf gateway."
 
 ## Vocabulary
 
@@ -50,7 +53,7 @@ call per inbound request. No batching, no fan-out, no streaming.
 ## Bundle lifecycle
 
 The one committed bundle must serve **every still-pinned external contract
-version at once**, all mapped onto *today's* internal backend. The bundle is
+version at once**, each resolved onto a live backend. The bundle is
 a directory of immutable per-version **layers**: cutting a new version is
 **pure addition** — `wavefront-bundle add` emits a fresh layer and never
 touches an existing one, so a frozen version's external shapes can never be
@@ -80,7 +83,7 @@ differences belong to the routing layer (each contract routes to its own
 internal version, whose OpenAPI owns that version's param names), so the
 proxy forwards `r.URL.RawQuery` verbatim and never translates it; message
 broker / database / persistence; TLS/cert/host routing; service discovery
-beyond one upstream; WebSocket/streaming.
+(upstreams are statically configured); WebSocket/streaming.
 
 ## What `wavefront` is, in one sentence
 

@@ -22,6 +22,12 @@ wavefront-bundle add --openapi https://api.internal/openapi.json --bundle ./bund
 The generator passes the OpenAPI through into the committed bundle, so a
 URL fetch is still frozen at build time — the bundle stays point-in-time.
 
+Over time the bundle is curated with the rest of the `wavefront-bundle` CLI:
+`remove` / `retire` take a retired version out of service, and `verify` gates
+the bundle's consistency — run it in CI. Per-version routing and transform
+shims live in the operator-owned `resolution.yaml` at the bundle root; see
+[protocol.md](protocol.md).
+
 ## 2. Pinning + deploying
 
 Pin `wavefront` by image tag/digest:
@@ -29,7 +35,9 @@ Pin `wavefront` by image tag/digest:
 - a Compose service block + Helm chart entry,
 - the bundle delivered via mount (ConfigMap / bind) or baked into an image
   layer the consumer builds on top of the base `wavefront` image,
-- `WAVEFRONT_UPSTREAM_BASE_URL` pointed at the now-internal-only backend.
+- `WAVEFRONT_UPSTREAM_BASE_URL` pointed at the internal-only backend, plus
+  `WAVEFRONT_TARGETS` (named `name=url` pairs) for any version a `route`
+  override sends to a different backend.
 
 ## 3. Routing the ingress
 
