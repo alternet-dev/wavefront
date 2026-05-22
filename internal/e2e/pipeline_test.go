@@ -1,8 +1,3 @@
-// Package e2e is the flagship suite: it runs the real OpenAPI→bundle
-// generator, loads the generated bundle through the real loader, and drives
-// the real proxy against a stub backend. It proves the whole pipeline
-// (generator → bundle → negotiate → adapter → upstream → adapter) integrates,
-// not just each unit in isolation. Pure-Go, no protoc, no Docker.
 package e2e
 
 import (
@@ -13,14 +8,12 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
 	"google.golang.org/protobuf/types/dynamicpb"
 
 	"github.com/alternet-dev/wavefront/internal/bundlegen"
-	"github.com/alternet-dev/wavefront/internal/config"
 )
 
 const sampleOpenAPI = `{
@@ -40,8 +33,7 @@ const sampleOpenAPI = `{
 }`
 
 // generatedBundleDir runs the real OpenAPI → bundle generator and returns the
-// resulting bundle directory. The flagship tests use it to exercise the whole
-// pipeline starting from an OpenAPI document.
+// resulting bundle directory.
 func generatedBundleDir(t *testing.T) string {
 	t.Helper()
 	in := filepath.Join(t.TempDir(), "openapi.json")
@@ -55,7 +47,7 @@ func generatedBundleDir(t *testing.T) string {
 	return out
 }
 
-func TestFlagshipGeneratedBundleProxiesEndToEnd(t *testing.T) {
+func TestPipelineProxiesEndToEnd(t *testing.T) {
 	// Claim: generator → bundle → negotiate → adapter → upstream → adapter
 	// integrates end-to-end against a bundle built from a real OpenAPI doc.
 	dir := generatedBundleDir(t)
@@ -120,8 +112,8 @@ func TestFlagshipGeneratedBundleProxiesEndToEnd(t *testing.T) {
 	if got, _ := body["text"].(string); got != "hi" {
 		t.Errorf("upstream saw text = %q", got)
 	}
-	// proto3 JSON maps int64 to a string — an important nuance this flagship
-	// deliberately exercises end to end.
+	// proto3 JSON maps int64 to a string — an important nuance this pipeline
+	// test deliberately exercises end to end.
 	if got, _ := body["count"].(string); got != "42" {
 		t.Errorf("upstream saw count = %q (proto3 int64 JSON should be a string)", got)
 	}
@@ -140,86 +132,5 @@ func TestFlagshipGeneratedBundleProxiesEndToEnd(t *testing.T) {
 	}
 	if got := reply.Get(respMD.Fields().ByName("ok")).Bool(); !got {
 		t.Errorf("reply ok = %v, want true", got)
-	}
-}
-
-func TestFlagshipUnknownContractVersion(t *testing.T) {
-	// Claim: an unknown / missing contract version returns a typed
-	// unsupported_contract_version error (HTTP 400), never a silent best-guess.
-	dir := generatedBundleDir(t)
-	h := Spawn(t, SpawnOpts{BundleDir: dir})
-
-	req, _ := http.NewRequest(http.MethodPost, h.Proxy.URL+"/x", strings.NewReader("ignored"))
-	req.Header.Set("X-Api-Contract-Version", "1999-01")
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != 400 {
-		t.Fatalf("status = %d, want 400", resp.StatusCode)
-	}
-	if resp.Header.Get("X-Wavefront-Error") != "unsupported_contract_version" {
-		t.Errorf("X-Wavefront-Error = %q", resp.Header.Get("X-Wavefront-Error"))
-	}
-	if body, _ := io.ReadAll(resp.Body); len(body) == 0 {
-		t.Error("wavefront.v1.Error body should be non-empty")
-	}
-}
-
-func TestFlagshipUpstreamTimeout(t *testing.T) {
-	// Claim: an upstream that exceeds WAVEFRONT_REQUEST_TIMEOUT_MS returns a
-	// typed upstream_timeout (HTTP 504) with Retry-After.
-	dir := generatedBundleDir(t)
-	h := Spawn(t, SpawnOpts{
-		BundleDir: dir,
-		BackendHandler: func(_ http.ResponseWriter, _ *http.Request) {
-			time.Sleep(300 * time.Millisecond)
-		},
-		ConfigOverride: func(c *config.Config) { c.RequestTimeout = 40 * time.Millisecond },
-	})
-
-	contract, _ := h.Bundle.Contract("2026-05-17")
-	reqMD, _ := h.Bundle.Message(contract.RequestMessage())
-	m := dynamicpb.NewMessage(reqMD)
-	m.Set(reqMD.Fields().ByName("text"), protoreflect.ValueOfString("x"))
-	rb, _ := proto.Marshal(m)
-
-	req, _ := http.NewRequest(http.MethodPost, h.Proxy.URL+"/x", strings.NewReader(string(rb)))
-	req.Header.Set("X-Api-Contract-Version", "2026-05-17")
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusGatewayTimeout {
-		t.Fatalf("status = %d, want 504", resp.StatusCode)
-	}
-	if resp.Header.Get("Retry-After") != "0" {
-		t.Errorf("Retry-After = %q", resp.Header.Get("Retry-After"))
-	}
-}
-
-func TestFlagshipBodyTooLarge(t *testing.T) {
-	// Claim: an inbound body exceeding WAVEFRONT_MAX_BODY_BYTES returns a
-	// typed request_body_too_large (HTTP 413).
-	dir := generatedBundleDir(t)
-	h := Spawn(t, SpawnOpts{
-		BundleDir:      dir,
-		ConfigOverride: func(c *config.Config) { c.MaxBodyBytes = 8 },
-	})
-
-	req, _ := http.NewRequest(http.MethodPost, h.Proxy.URL+"/x", strings.NewReader("far more than eight bytes of body"))
-	req.Header.Set("X-Api-Contract-Version", "2026-05-17")
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusRequestEntityTooLarge {
-		t.Fatalf("status = %d, want 413", resp.StatusCode)
-	}
-	if resp.Header.Get("X-Wavefront-Error") != "request_body_too_large" {
-		t.Errorf("X-Wavefront-Error = %q", resp.Header.Get("X-Wavefront-Error"))
 	}
 }

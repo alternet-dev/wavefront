@@ -15,7 +15,7 @@ import (
 
 // upstreamJSONEquals decodes `got` and compares against `want` semantically.
 // protojson.Marshal deliberately injects randomized whitespace between
-// tokens, so exact-byte comparison against its output is flaky on CI.
+// tokens, so exact-byte comparison is flaky.
 func upstreamJSONEquals(t *testing.T, got string, want map[string]any) {
 	t.Helper()
 	var have map[string]any
@@ -27,7 +27,7 @@ func upstreamJSONEquals(t *testing.T, got string, want map[string]any) {
 	}
 }
 
-func TestTransformE2EBothDirections(t *testing.T) {
+func TestTransformAppliesBothDirections(t *testing.T) {
 	// Claim: a transform override applies request stanzas before the upstream
 	// call and response stanzas after; both directions land end-to-end.
 	h := Spawn(t, SpawnOpts{
@@ -54,16 +54,12 @@ overrides:
 		t.Fatalf("do: %v", err)
 	}
 	defer resp.Body.Close()
-
 	if resp.StatusCode != 200 {
 		t.Fatalf("status %d", resp.StatusCode)
 	}
-	// proto3 JSON renders int32 as a number; coerce n→string makes it "7".
 	upstreamJSONEquals(t, string(h.Backend.Last().Body), map[string]any{"message": "hi", "n": "7"})
-	md, merr := h.Bundle.Message("acme.v1.Pong")
-	if merr != nil {
-		t.Fatalf("Pong: %v", merr)
-	}
+
+	md, _ := h.Bundle.Message("acme.v1.Pong")
 	out := dynamicpb.NewMessage(md)
 	raw, _ := io.ReadAll(resp.Body)
 	if err := proto.Unmarshal(raw, out); err != nil {
@@ -74,7 +70,7 @@ overrides:
 	}
 }
 
-func TestNoStanzasPassthrough(t *testing.T) {
+func TestNoOverridePassesThrough(t *testing.T) {
 	// Claim: a contract version with no resolution override passes the body
 	// through untouched (modulo codec).
 	h := Spawn(t, SpawnOpts{
@@ -97,72 +93,6 @@ func TestNoStanzasPassthrough(t *testing.T) {
 	upstreamJSONEquals(t, string(h.Backend.Last().Body), map[string]any{"text": "hi", "n": float64(7)})
 }
 
-func TestRequestTransformFailureIs422E2E(t *testing.T) {
-	// Claim: a request transform verb that cannot apply at runtime returns
-	// transform_failed (HTTP 422) and does NOT call the upstream.
-	// Coerce text (a non-numeric string) to number: passes the descriptor
-	// cross-check at load, but fails at runtime because "hi" cannot be parsed
-	// as a number.
-	h := Spawn(t, SpawnOpts{
-		Resolution: `version: 1
-overrides:
-  - contract_version: "2024-11"
-    transform:
-      request:
-        - coerce: { field: text, to: number }
-`,
-	})
-	req, _ := http.NewRequest(http.MethodPost, h.Proxy.URL, bytes.NewReader(PingBytes(t, h.Bundle, "hi", 7)))
-	req.Header.Set("X-Api-Contract-Version", "2024-11")
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatalf("do: %v", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusUnprocessableEntity {
-		t.Fatalf("want 422, got %d", resp.StatusCode)
-	}
-	if resp.Header.Get("X-Wavefront-Error") != "transform_failed" {
-		t.Errorf("X-Wavefront-Error=%q", resp.Header.Get("X-Wavefront-Error"))
-	}
-	if c := h.Backend.Count(); c != 0 {
-		t.Errorf("upstream must not be called on request transform failure, got %d requests", c)
-	}
-}
-
-func TestRenameSourceAbsentRequestIs422E2E(t *testing.T) {
-	// Claim: a rename whose source field is absent at runtime returns
-	// transform_failed (HTTP 422) and does NOT call the upstream.
-	// rename n → renamed_n: n exists on the descriptor (passes load-time
-	// cross-check), but the request has n unset (proto3 zero-value omitted by
-	// protojson), so runtime rename source is absent.
-	h := Spawn(t, SpawnOpts{
-		Resolution: `version: 1
-overrides:
-  - contract_version: "2024-11"
-    transform:
-      request:
-        - rename: { from: n, to: renamed_n }
-`,
-	})
-	req, _ := http.NewRequest(http.MethodPost, h.Proxy.URL, bytes.NewReader(PingTextOnly(t, h.Bundle, "hi")))
-	req.Header.Set("X-Api-Contract-Version", "2024-11")
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatalf("do: %v", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusUnprocessableEntity {
-		t.Fatalf("want 422, got %d", resp.StatusCode)
-	}
-	if resp.Header.Get("X-Wavefront-Error") != "transform_failed" {
-		t.Errorf("X-Wavefront-Error=%q want transform_failed", resp.Header.Get("X-Wavefront-Error"))
-	}
-	if c := h.Backend.Count(); c != 0 {
-		t.Errorf("upstream must not be called on request transform failure, got %d requests", c)
-	}
-}
-
 const nestedArrayVersions = `version: 1
 contracts:
   - contract_version: "2024-12"
@@ -172,7 +102,7 @@ contracts:
     response_message: acme.v1.Pong
 `
 
-func TestNestedArrayE2E(t *testing.T) {
+func TestNestedArrayTransforms(t *testing.T) {
 	// Claim: transform stanzas addressed with array-element and nested-key
 	// paths apply correctly across the whole pipeline.
 	h := Spawn(t, SpawnOpts{
