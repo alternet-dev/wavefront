@@ -92,6 +92,8 @@ type Contract struct {
 	requestOps      []transform.Op
 	responseOps     []transform.Op
 	target          string
+	transformTarget string
+	chain           []*Contract
 }
 
 func (c *Contract) ContractVersion() string     { return c.contractVersion }
@@ -102,6 +104,8 @@ func (c *Contract) ResponseMessage() string     { return c.responseMessage }
 func (c *Contract) RequestOps() []transform.Op  { return c.requestOps }
 func (c *Contract) ResponseOps() []transform.Op { return c.responseOps }
 func (c *Contract) Target() string              { return c.target }
+func (c *Contract) TransformTarget() string     { return c.transformTarget }
+func (c *Contract) Chain() []*Contract          { return c.chain }
 
 type Bundle struct {
 	contracts map[string]*Contract
@@ -178,6 +182,7 @@ type yamlResolution struct {
 type yamlTransform struct {
 	Request  []yamlOp `yaml:"request"`
 	Response []yamlOp `yaml:"response"`
+	Target   string   `yaml:"target"`
 }
 
 type yamlRoute struct {
@@ -322,6 +327,7 @@ func Load(dir string) (*Bundle, error) {
 					}
 					c.requestOps = reqOps
 					c.responseOps = respOps
+					c.transformTarget = strings.TrimSpace(ov.Transform.Target)
 				} else {
 					// Route override — named target, no transform ops.
 					c.target = strings.TrimSpace(ov.Route.Target)
@@ -338,7 +344,40 @@ func Load(dir string) (*Bundle, error) {
 		}
 	}
 
+	if cerr := resolveChains(contracts); cerr != nil {
+		return nil, cerr
+	}
+
 	return &Bundle{contracts: contracts, files: files}, nil
+}
+
+// resolveChains walks each contract's transform.target links into an ordered
+// chain ([the contract, its target, ...] ending at a terminal — a contract
+// with no transform.target). A target naming an unknown version, or a cycle,
+// is a hard error. The resolved chain is stored on each Contract.
+func resolveChains(contracts map[string]*Contract) error {
+	for _, c := range contracts {
+		var chain []*Contract
+		seen := map[string]bool{}
+		cur := c
+		for {
+			if seen[cur.contractVersion] {
+				return &ValidationError{Contract: cur.contractVersion, Field: "transform.target", Reason: "transform chain cycles"}
+			}
+			seen[cur.contractVersion] = true
+			chain = append(chain, cur)
+			if cur.transformTarget == "" {
+				break
+			}
+			next, ok := contracts[cur.transformTarget]
+			if !ok {
+				return &ValidationError{Contract: cur.contractVersion, Field: "transform.target", Reason: "transform target names an unknown version"}
+			}
+			cur = next
+		}
+		c.chain = chain
+	}
+	return nil
 }
 
 // layerDirs returns the sorted names of the immediate subdirectories of dir,

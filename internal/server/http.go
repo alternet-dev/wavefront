@@ -100,18 +100,22 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	call.Body, werr = transform.ApplyRequest(c.RequestOps(), call.Body)
-	if werr != nil {
-		s.writeError(w, werr, c.ContractVersion())
-		return
+	chain := c.Chain()
+	for _, link := range chain {
+		call.Body, werr = transform.ApplyRequest(link.RequestOps(), call.Body)
+		if werr != nil {
+			s.writeError(w, werr, c.ContractVersion())
+			return
+		}
 	}
 
 	ctx, cancel := context.WithTimeout(r.Context(), s.cfg.RequestTimeout)
 	defer cancel()
 
-	base, ok := s.cfg.TargetURL(c.Target())
+	terminal := chain[len(chain)-1]
+	base, ok := s.cfg.TargetURL(terminal.Target())
 	if !ok {
-		s.writeError(w, wireerror.UpstreamError("unknown backend target "+c.Target()), c.ContractVersion())
+		s.writeError(w, wireerror.UpstreamError("unknown backend target "+terminal.Target()), c.ContractVersion())
 		return
 	}
 	url := strings.TrimRight(base, "/") + call.Path
@@ -147,10 +151,12 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	upBody, werr = transform.ApplyResponse(c.ResponseOps(), upBody)
-	if werr != nil {
-		s.writeError(w, werr, c.ContractVersion())
-		return
+	for i := len(chain) - 1; i >= 0; i-- {
+		upBody, werr = transform.ApplyResponse(chain[i].ResponseOps(), upBody)
+		if werr != nil {
+			s.writeError(w, werr, c.ContractVersion())
+			return
+		}
 	}
 
 	out, ct, werr := s.adapter.EncodeResponse(c, upBody)
