@@ -131,6 +131,5 @@ func runVerify(args []string, errOut io.Writer) int {
 		fmt.Fprintln(errOut, "wavefront-bundle verify:", err)
 		return 1
 	}
-	fmt.Fprintf(errOut, "wavefront-bundle verify: %s ok\n", *bundleDir)
 	return 0
 }

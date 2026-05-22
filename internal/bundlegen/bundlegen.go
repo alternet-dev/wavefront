@@ -9,6 +9,7 @@
 package bundlegen
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -522,6 +523,7 @@ func Retire(bundleDir, version string) error {
 		if l == version {
 			found = true
 			idx = i
+			break
 		}
 	}
 	if !found {
@@ -541,7 +543,7 @@ func Retire(bundleDir, version string) error {
 	}
 	if err == nil {
 		// File exists — parse it.
-		dec := yaml.NewDecoder(strings.NewReader(string(raw)))
+		dec := yaml.NewDecoder(bytes.NewReader(raw))
 		if derr := dec.Decode(&rf); derr != nil {
 			return fmt.Errorf("parse resolution.yaml: %w", derr)
 		}
