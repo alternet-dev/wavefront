@@ -71,9 +71,10 @@ docker build -t wavefront .
 ```
 
 Integration tests under `internal/.../*_test.go` must run pure-Go against a
-stub backend — no Docker, no external services. The **version-skew suite** (pin an
-old bundle while the stub serves the new internal shape; assert the old
-contract still works) is the suite that justifies the project.
+stub backend — no Docker, no external services. The scenario that matters most
+is **version skew** — an old bundle against a stub serving the new internal
+shape, with the old contract asserted to still hold. That is what wavefront
+exists to handle, so it is the coverage to prioritize.
 
 ## Where to put new things
 

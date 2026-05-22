@@ -166,5 +166,6 @@ consumer's own choice.
 
 ## Forward compatibility
 
-Removing/renaming a schema field or a transform verb is a breaking change
-gated by `buf breaking` in CI.
+Removing or renaming a schema field or a transform verb is a breaking change.
+The bundle schema and the transform vocabulary are append-only — a break is a
+deliberate, reviewed decision, never a silent one.
