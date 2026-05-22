@@ -1,10 +1,10 @@
+// Package e2e is the claim-backed integration suite: it loads a real bundle,
+// drives the real proxy against a stub backend (both via httptest), and
+// asserts the operational claims wavefront makes. Each test reads as "given
+// this bundle and config, assert this operational claim." Pure-Go, no
+// protoc, no Docker. The shared harness lives in harness_test.go; tests are
+// organized into files by claim cluster.
 package e2e
-
-// Shared harness for the claim-backed integration suite: one Spawn call
-// stands up the real proxy in front of a stub upstream (both via httptest),
-// both released on test cleanup. Each test reads as "given this bundle and
-// config, assert this operational claim." Layered on internal/bundletest's
-// bundle fixtures; mirrors the sibling wss-mux's tests/integration/common.rs.
 
 import (
 	"bytes"
