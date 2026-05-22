@@ -6,7 +6,7 @@ Implementation shape — package layout and the request path.
 
 - **bundle** (`internal/bundle/`) — loads + validates the descriptor bundle: a
   directory of immutable per-version layers plus the operator-owned
-  `resolution.yaml`. Read-only; fail-fast on invalid; hot-swappable on `SIGHUP`.
+  `resolution.yaml`. Read-only; loaded once at boot; fail-fast on invalid.
 - **negotiate** (`internal/negotiate/`) — resolves the selector (contract
   version) from the request; maps to a transform profile or a typed error.
 - **adapter** (`internal/adapter/`) — codec pairs. Decode inbound external
@@ -27,8 +27,7 @@ error is encoded in the client's contract version.
 ## Concurrency model
 
 One goroutine per request, bounded. No shared mutable routing state beyond the
-loaded bundle, held behind an `atomic.Pointer`; `SIGHUP` swaps it without
-dropping in-flight requests.
+loaded bundle, held behind an `atomic.Pointer` and set once at boot.
 
 ## Memory bounds
 

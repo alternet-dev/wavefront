@@ -80,8 +80,7 @@ differences belong to the routing layer (each contract routes to its own
 internal version, whose OpenAPI owns that version's param names), so the
 proxy forwards `r.URL.RawQuery` verbatim and never translates it; message
 broker / database / persistence; TLS/cert/host routing; service discovery
-beyond one upstream; WebSocket/streaming (the `wss-mux` sibling owns WS
-fanout).
+beyond one upstream; WebSocket/streaming.
 
 ## What `wavefront` is, in one sentence
 
