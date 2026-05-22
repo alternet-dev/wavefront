@@ -26,8 +26,7 @@ language-level (`wss-mux` is Rust; that does not carry over).
 4. [docs/embedding.md](docs/embedding.md) — how a consumer integrates
 5. [docs/architecture.md](docs/architecture.md) — implementation shape
 6. [docs/operations.md](docs/operations.md) — running it
-7. [docs/roadmap.md](docs/roadmap.md) — versioned plan
-8. Source (once it exists): `cmd/wavefront/main.go` → `internal/server/` →
+7. Source: `cmd/wavefront/main.go` → `internal/server/` →
    `internal/bundle/` + `internal/transform/` → `internal/adapter/` (codec pairs)
 
 ## Key invariants
@@ -53,12 +52,11 @@ language-level (`wss-mux` is Rust; that does not carry over).
   belong in `docs/operations.md` / `docs/embedding.md`, not in `src/`.
 - **No silent contract changes.** Bundle-schema changes, transform-vocabulary
   additions, and the contract-version negotiation all go through
-  `docs/protocol.md` + a roadmap entry.
+  `docs/protocol.md`.
 - **No new external-infrastructure dependency.** No broker, database, or
   service the operator must run. This is the hard line.
 - **No scope creep into the non-goals** (auth/policy, business logic,
-  routing/TLS, WebSocket/streaming — `wss-mux` owns WS) without an explicit
-  version bump and roadmap entry.
+  routing/TLS, WebSocket/streaming — `wss-mux` owns WS).
 
 ## Build, test, lint
 

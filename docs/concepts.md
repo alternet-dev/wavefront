@@ -69,6 +69,20 @@ Auth-transparent. `wavefront` forwards `Authorization` (and tracing headers)
 untouched; the upstream validates exactly as it would for any other caller.
 `wavefront` never mints, validates, or inspects identity, and holds no policy.
 
+## Non-goals
+
+Auth/policy/PII redaction; business logic; non-mechanical/scripted transforms;
+**semantic transformation of any kind — `wavefront` only ever maps wire
+format, never content**, so **strategy-changing pagination** (offset↔cursor,
+page-number↔token) is permanently out (opaque-cursor *rename* is fine — that
+is wire-format); **query-param transforms** — cross-version param-shape
+differences belong to the routing layer (each contract routes to its own
+internal version, whose OpenAPI owns that version's param names), so the
+proxy forwards `r.URL.RawQuery` verbatim and never translates it; message
+broker / database / persistence; TLS/cert/host routing; service discovery
+beyond one upstream; WebSocket/streaming (the `wss-mux` sibling owns WS
+fanout).
+
 ## What `wavefront` is, in one sentence
 
 A descriptor-driven edge interpreter that bends a versioned external contract

@@ -143,14 +143,8 @@ The version-map schema and transform vocabulary are detailed in
 3. [docs/embedding.md](docs/embedding.md) — how a consumer integrates
 4. [docs/architecture.md](docs/architecture.md) — implementation shape
 5. [docs/operations.md](docs/operations.md) — running it
-6. [docs/roadmap.md](docs/roadmap.md) — what's in each version
 
 LLM agents: start with [AGENTS.md](AGENTS.md).
-
-## Status
-
-v0.x — pre-stable, pre-implementation. This repo currently holds only its
-kickoff documents. Contracts may break between minor versions until v1.0.
 
 ## License
 

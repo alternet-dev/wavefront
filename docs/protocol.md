@@ -1,7 +1,7 @@
 # Protocol
 
 The bundle schema and the wire contract. This is the part that must not change
-silently — changes here go through a roadmap entry.
+silently.
 
 `wavefront` performs **zero inference**: the route → message binding is
 materialized in the bundle by the generator and read verbatim.
@@ -30,7 +30,7 @@ version routes to the default backend with its body untouched.
 Each layer's `versions.yaml` is the **binding** — one contract, no transforms:
 
 ```yaml
-version: 1                              # bundle-schema version (bumped via roadmap)
+version: 1                              # bundle-schema version
 contracts:
   - contract_version: "2024-11"         # the contract a client speaks
     route: /v3/me/session               # internal path this maps to (path remap only)
@@ -82,8 +82,8 @@ Mechanical only — no expressions, no code. Unknown verbs are refused at load
   in its layer manifest, plus the named backend a `route` override in
   `resolution.yaml` selects.
 
-Anything not expressible mechanically is out of scope (see non-goals); it does
-not belong in `wavefront`.
+Anything not expressible mechanically is out of scope (see Non-goals in
+`concepts.md`); it does not belong in `wavefront`.
 
 The four mechanical verbs operate on request/response body fields addressed by
 the path grammar below.
@@ -131,9 +131,8 @@ error (see the error contract below), never a silent best-guess.
 
 ## Error contract
 
-Established in v0.1 and **stable through v1.0** — iterated additively, never
-broken between minor versions (that stability is the entire point of
-`wavefront`).
+The error contract is **stable** — iterated additively, never broken (that
+stability is the entire point of `wavefront`).
 
 **Success** is untouched passthrough: the reply is the protobuf shaped exactly
 per the contract's `response_message`. No envelope, no wrap.
@@ -163,16 +162,9 @@ from a backend domain error) return:
 
 No client library is shipped: a client checks the HTTP status; structured
 handling (reading the header or decoding `wavefront.v1.Error`) is the
-consumer's own choice. Finer upstream/domain-error typing remains additive future work.
-
-## Deferred
-
-Named here so they are not silently dropped:
-opaque-cursor rename (pagination *wire-format* only — strategy-changing
-pagination is a permanent non-goal, see roadmap); proto-package-version
-defense-in-depth; richer upstream/domain-error typing and status mapping.
+consumer's own choice.
 
 ## Forward compatibility
 
 Removing/renaming a schema field or a transform verb is a breaking change
-gated by `buf breaking` in CI and a roadmap entry.
+gated by `buf breaking` in CI.
