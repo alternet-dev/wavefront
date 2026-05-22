@@ -4,9 +4,9 @@ Implementation shape — package layout and the request path.
 
 ## Components
 
-- **bundle** (`internal/bundle/`) — loads + validates the descriptor bundle
-  (FileDescriptorSet, OpenAPI, version map). Read-only; fail-fast on invalid;
-  hot-swappable on `SIGHUP`.
+- **bundle** (`internal/bundle/`) — loads + validates the descriptor bundle: a
+  directory of immutable per-version layers plus the operator-owned
+  `resolution.yaml`. Read-only; fail-fast on invalid; hot-swappable on `SIGHUP`.
 - **negotiate** (`internal/negotiate/`) — resolves the selector (contract
   version) from the request; maps to a transform profile or a typed error.
 - **adapter** (`internal/adapter/`) — codec pairs. Decode inbound external
@@ -20,7 +20,7 @@ Implementation shape — package layout and the request path.
 ## Request path
 
 `server` accepts → `negotiate` resolves version → `adapter` decodes →
-`transform` maps request → `server` calls the single upstream → `transform`
+`transform` maps request → `server` calls the resolved upstream → `transform`
 maps response → `adapter` encodes → `server` responds. On any failure, a typed
 error is encoded in the client's contract version.
 
