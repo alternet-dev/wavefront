@@ -11,15 +11,9 @@ descriptor bundle — a directory of immutable per-version layers plus an
 operator-owned `resolution.yaml` — so a backend can migrate freely while
 clients frozen at older contract versions keep working. Codec-agnostic via
 adapters; `protobuf ↔ OpenAPI/JSON` is the reference adapter, not the identity.
-No broker, no database, no auth
-server, no external infrastructure required. It is the request/response sibling
-of the `wss-mux` edge-proxy family (`../wss-mux`); mirror only that family's
-**documentation structure and editorial tone** (README/AGENTS shape, the
-`docs/` set, dual license), never its WebSocket internals — and never assume a
-`wss-mux` runtime behavior is present here. wavefront's behavior is whatever
-its own code does; verify a claim against the code, not the sibling.
-**Language is Go** — the mirroring is structural, not language-level
-(`wss-mux` is Rust; that does not carry over).
+No broker, no database, no auth server, no external infrastructure required.
+**Language is Go.** Where these docs and the code disagree, the code is the
+source of truth — verify a claim against it.
 
 ## Reading order
 
@@ -59,7 +53,7 @@ its own code does; verify a claim against the code, not the sibling.
 - **No new external-infrastructure dependency.** No broker, database, or
   service the operator must run. This is the hard line.
 - **No scope creep into the non-goals** (auth/policy, business logic,
-  routing/TLS, WebSocket/streaming — `wss-mux` owns WS).
+  routing/TLS, WebSocket/streaming).
 
 ## Build, test, lint
 

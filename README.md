@@ -56,7 +56,7 @@ It IS NOT:
 - A policy/authz engine. No PII redaction, no business logic.
 - A message broker or database. No persistence, no replay.
 - A reverse proxy / TLS terminator / router. The ingress owns that.
-- A WebSocket/streaming tier. The `wss-mux` sibling owns WS fanout.
+- A WebSocket/streaming tier. wavefront is request/response only.
 
 ## Quick start
 
