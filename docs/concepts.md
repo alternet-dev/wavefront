@@ -28,14 +28,18 @@ only thing that changes. This is why `wavefront` is not "a protobuf gateway."
 ## Vocabulary
 
 - **Bundle** — the descriptor input the consumer generates and commits: a
-  proto `FileDescriptorSet`, the current internal OpenAPI doc, and a version
-  map. Read-only at runtime.
+  directory of immutable per-version **layers** (each a proto
+  `FileDescriptorSet`, the frozen OpenAPI doc, and the route binding) plus an
+  operator-owned `resolution.yaml`. Read-only at runtime.
+- **Layer** — one frozen external contract version's slice of the bundle.
 - **Contract version** — an external contract a client speaks.
 - **Transform** — the declarative request/response mapping for a selector
   value: field add / rename / optionalize / default / coerce; route remap.
 - **Adapter** — a codec pair (decode external, encode external). `protobuf ↔
   OpenAPI/JSON` is the reference adapter.
-- **Upstream** — the single configured internal HTTP/JSON backend.
+- **Target (upstream)** — an internal HTTP/JSON backend. A deployment
+  configures a default target plus, optionally, named targets; a contract
+  version routes to one.
 
 ## Delivery model
 
@@ -46,23 +50,38 @@ call per inbound request. No batching, no fan-out, no streaming.
 ## Bundle lifecycle
 
 The one committed bundle must serve **every still-pinned external contract
-version at once**, all mapped onto *today's* internal backend. So the
-generator **accumulates**: each build merges the current contract version in
-and copies every previously-frozen version through **verbatim** — a prior
-version's external shapes are immutable, and that immutability *is* the
-anti-corruption guarantee. Each version is its own proto package, so the
-merge is a well-defined, byte-reproducible union (a rebuild is a no-op diff).
-Retention is **consumer-side and explicit**: the consumer declares the
-still-supported versions and prunes a retired one as an auditable, CI-gated
-decision, never automatically. `wavefront` infers none of this — it reads the
-multi-entry binding verbatim; lifecycle is wholly a generation/consumer
-concern.
+version at once**, all mapped onto *today's* internal backend. The bundle is
+a directory of immutable per-version **layers**: cutting a new version is
+**pure addition** — `wavefront-bundle add` emits a fresh layer and never
+touches an existing one, so a frozen version's external shapes can never be
+corrupted. A layer routes to its backend unchanged by default; when the
+internal surface moves on, the operator re-points an older version with a
+`transform` shim in `resolution.yaml`, and shims **chain** across versions to
+reach the live backend. Retention is **consumer-side and explicit**: the
+consumer declares the still-supported versions by which layers it keeps,
+takes a retired one out with `wavefront-bundle remove` / `retire`, and gates
+the result with `wavefront-bundle verify` — never automatic. `wavefront`
+infers none of this; lifecycle is wholly a generation/consumer concern.
 
 ## Auth model
 
 Auth-transparent. `wavefront` forwards `Authorization` (and tracing headers)
 untouched; the upstream validates exactly as it would for any other caller.
 `wavefront` never mints, validates, or inspects identity, and holds no policy.
+
+## Non-goals
+
+Auth/policy/PII redaction; business logic; non-mechanical/scripted transforms;
+**semantic transformation of any kind — `wavefront` only ever maps wire
+format, never content**, so **strategy-changing pagination** (offset↔cursor,
+page-number↔token) is permanently out (opaque-cursor *rename* is fine — that
+is wire-format); **query-param transforms** — cross-version param-shape
+differences belong to the routing layer (each contract routes to its own
+internal version, whose OpenAPI owns that version's param names), so the
+proxy forwards `r.URL.RawQuery` verbatim and never translates it; message
+broker / database / persistence; TLS/cert/host routing; service discovery
+beyond one upstream; WebSocket/streaming (the `wss-mux` sibling owns WS
+fanout).
 
 ## What `wavefront` is, in one sentence
 

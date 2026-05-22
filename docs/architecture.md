@@ -1,7 +1,6 @@
 # Architecture
 
-Implementation shape. Pre-v0.1 — this is the intended structure, not a
-description of existing code.
+Implementation shape — package layout and the request path.
 
 ## Components
 

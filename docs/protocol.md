@@ -1,45 +1,73 @@
 # Protocol
 
 The bundle schema and the wire contract. This is the part that must not change
-silently — changes here go through a roadmap entry.
+silently.
 
 `wavefront` performs **zero inference**: the route → message binding is
 materialized in the bundle by the generator and read verbatim.
 
 ## The bundle
 
-A directory the consumer generates and commits. `wavefront` loads it read-only
-at boot and on `SIGHUP`.
+A directory the consumer generates and commits; `wavefront` loads it read-only
+at boot. It holds one immutable **layer** per contract version, plus the
+operator-owned `resolution.yaml` at the root:
 
-| File | Content |
-|---|---|
-| `descriptors.binpb` | proto `FileDescriptorSet` — external message shapes, one logical set per contract version |
-| `openapi.json` | the *current* internal REST surface (single, unversioned) |
-| `versions.yaml` | the declarative version map |
-
-## Version-map schema
-
-```yaml
-version: 1                              # bundle-schema version (bumped via roadmap)
-contracts:
-  - contract_version: "2024-11"         # selector value (the contract a client speaks)
-    route: /v3/me/session               # internal path this maps to (path remap only)
-    method: GET                         # internal HTTP method (required)
-    request_message:  acme.v2024_11.SessionRequest   # FQ proto: decode the body into this
-    response_message: acme.v2024_11.SessionResponse  # FQ proto: encode the reply from this
-
-    # --- mechanical transform stanzas (optional) ---
-    request:
-      - rename:  { from: displayName, to: display_name }
-      - default: { field: locale, value: en-US }
-    response:
-      - optionalize: { field: avatar_url }
-      - rename:      { from: created_at, to: createdAt }
+```
+bundle/
+  resolution.yaml            # operator-owned: per-version resolution overrides
+  <contract-version>/        # one immutable layer per version
+    descriptors.binpb        #   proto FileDescriptorSet — this version's message shapes
+    openapi.json             #   the frozen OpenAPI surface the version was cut from
+    versions.yaml            #   the route binding (a single contract)
 ```
 
-`route`, `method`, `request_message`, `response_message` are the **binding**.
+A layer is emitted once and never rewritten — that immutability is the
+anti-corruption guarantee. `resolution.yaml` is optional; absent, every
+version routes to the default backend with its body untouched.
+
+## Layer manifest and resolution
+
+Each layer's `versions.yaml` is the **binding** — one contract, no transforms:
+
+```yaml
+version: 1                              # bundle-schema version
+contracts:
+  - contract_version: "2024-11"         # the contract a client speaks
+    route: /v3/me/session               # internal path this maps to (path remap only)
+    method: GET                         # internal HTTP method
+    request_message:  acme.v2024_11.SessionRequest   # FQ proto: decode the body into this
+    response_message: acme.v2024_11.SessionResponse  # FQ proto: encode the reply from this
+```
+
+`route`, `method`, `request_message`, `response_message` are the binding.
 Cardinality is **1:1** — exactly one upstream call per inbound request;
 `route` is a path remap, never fan-out.
+
+The operator-owned `resolution.yaml` at the bundle root overrides how a
+version resolves — a `transform` shim, or a `route` to a named backend:
+
+```yaml
+version: 1
+overrides:
+  - contract_version: "2024-11"         # the version this override applies to
+    transform:                          # mechanical stanzas applied to the body
+      target: "2025-03"                 # optional: chain to another version's resolution
+      request:
+        - rename:  { from: displayName, to: display_name }
+        - default: { field: locale, value: en-US }
+      response:
+        - optionalize: { field: avatar_url }
+  - contract_version: "2023-05"
+    route:                              # ...or route this version to a named target
+      target: legacy-backend
+```
+
+An override sets **exactly one** of `transform` or `route`. A `transform`
+whose `target` names another version **chains** — the proxy applies each
+link's stanzas in turn, out to the version that terminates the chain at a
+backend. A `route.target` names a backend from the deployment's target table
+(`WAVEFRONT_TARGETS`); `WAVEFRONT_UPSTREAM_BASE_URL` is the default target a
+version uses with no override.
 
 ## Transform vocabulary
 
@@ -50,12 +78,15 @@ Mechanical only — no expressions, no code. Unknown verbs are refused at load
 - `default { field, value }` — fill when absent
 - `optionalize { field }` — tolerate absence
 - `coerce { field, to }` — primitive type/representation change
-- `route` — internal path remap (per contract)
+- `route` — structural, not a body verb: the internal path a version binds to
+  in its layer manifest, plus the named backend a `route` override in
+  `resolution.yaml` selects.
 
-Anything not expressible mechanically is out of scope (see non-goals); it does
-not belong in `wavefront`.
+Anything not expressible mechanically is out of scope (see Non-goals in
+`concepts.md`); it does not belong in `wavefront`.
 
-`route` is realized by the per-contract `route:` binding; the transform-runtime slice adds no separate route mechanism. Its verb engine covers rename/default/optionalize/coerce over body fields addressed by the path grammar below.
+The four mechanical verbs operate on request/response body fields addressed by
+the path grammar below.
 
 ### Path syntax
 
@@ -70,7 +101,7 @@ name    = one or more UTF-8 bytes excluding "." and "["
 
 Paths must end on a Name leaf (no trailing `[]`). Examples:
 
-- `text` — top-level key (the slice-1 case; behaves identically).
+- `text` — top-level key.
 - `data.user.email` — nested keys.
 - `data[].createdAt` — per-element on an array.
 - `groups[].members[].id` — nested arrays.
@@ -100,9 +131,8 @@ error (see the error contract below), never a silent best-guess.
 
 ## Error contract
 
-Established in v0.1 and **stable through v1.0** — iterated additively, never
-broken between minor versions (that stability is the entire point of
-`wavefront`).
+The error contract is **stable** — iterated additively, never broken (that
+stability is the entire point of `wavefront`).
 
 **Success** is untouched passthrough: the reply is the protobuf shaped exactly
 per the contract's `response_message`. No envelope, no wrap.
@@ -132,16 +162,9 @@ from a backend domain error) return:
 
 No client library is shipped: a client checks the HTTP status; structured
 handling (reading the header or decoding `wavefront.v1.Error`) is the
-consumer's own choice. Finer upstream/domain-error typing remains additive future work.
-
-## Deferred
-
-Named here so they are not silently dropped:
-opaque-cursor rename (pagination *wire-format* only — strategy-changing
-pagination is a permanent non-goal, see roadmap); proto-package-version
-defense-in-depth; richer upstream/domain-error typing and status mapping.
+consumer's own choice.
 
 ## Forward compatibility
 
 Removing/renaming a schema field or a transform verb is a breaking change
-gated by `buf breaking` in CI and a roadmap entry.
+gated by `buf breaking` in CI.
