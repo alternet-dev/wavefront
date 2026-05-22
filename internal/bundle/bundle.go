@@ -362,7 +362,7 @@ func resolveChains(contracts map[string]*Contract) error {
 		cur := c
 		for {
 			if seen[cur.contractVersion] {
-				return &ValidationError{Contract: c.contractVersion, Field: "transform.target", Reason: "transform chain cycles"}
+				return &ValidationError{Contract: cur.contractVersion, Field: "transform.target", Reason: "transform chain cycles"}
 			}
 			seen[cur.contractVersion] = true
 			chain = append(chain, cur)

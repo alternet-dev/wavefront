@@ -160,6 +160,9 @@ overrides:
 	if ve.Field != "transform.target" {
 		t.Errorf("ValidationError.Field = %q, want transform.target", ve.Field)
 	}
+	if ve.Contract != "2024-01" && ve.Contract != "2024-06" {
+		t.Errorf("cycle error names %q; want a version in the cycle (2024-01 or 2024-06)", ve.Contract)
+	}
 }
 
 func contractVersions(chain []*Contract) []string {
