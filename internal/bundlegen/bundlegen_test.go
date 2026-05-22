@@ -8,8 +8,11 @@ import (
 	"strings"
 	"testing"
 
+	"gopkg.in/yaml.v3"
+
 	"github.com/alternet-dev/wavefront/internal/bundle"
 	"github.com/alternet-dev/wavefront/internal/bundlegen"
+	"github.com/alternet-dev/wavefront/internal/bundletest"
 )
 
 const sampleOpenAPI = `{
@@ -260,5 +263,225 @@ func TestAddRefusesToOverwriteAnExistingVersion(t *testing.T) {
 	}
 	if err := bundlegen.Add(in, bundleDir); err == nil {
 		t.Fatal("second Add of the same version: expected a hard error, got nil")
+	}
+}
+
+// --- Retire tests ---
+
+// resolutionOverrideCount parses resolution.yaml in bundleDir and returns the
+// number of overrides present.
+func resolutionOverrideCount(t *testing.T, bundleDir string) int {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join(bundleDir, "resolution.yaml"))
+	if err != nil {
+		t.Fatalf("read resolution.yaml: %v", err)
+	}
+	var rf struct {
+		Overrides []struct {
+			ContractVersion string `yaml:"contract_version"`
+			Transform       *struct {
+				Target   string `yaml:"target"`
+				Request  any    `yaml:"request"`
+				Response any    `yaml:"response"`
+			} `yaml:"transform"`
+		} `yaml:"overrides"`
+	}
+	if err := yaml.Unmarshal(raw, &rf); err != nil {
+		t.Fatalf("parse resolution.yaml: %v", err)
+	}
+	return len(rf.Overrides)
+}
+
+// resolutionTransformFor returns the transform block for a given version in
+// resolution.yaml, or fails the test if none is found.
+func resolutionTransformFor(t *testing.T, bundleDir, version string) struct {
+	Target   string `yaml:"target"`
+	Request  any    `yaml:"request"`
+	Response any    `yaml:"response"`
+} {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join(bundleDir, "resolution.yaml"))
+	if err != nil {
+		t.Fatalf("read resolution.yaml: %v", err)
+	}
+	var rf struct {
+		Overrides []struct {
+			ContractVersion string `yaml:"contract_version"`
+			Transform       *struct {
+				Target   string `yaml:"target"`
+				Request  any    `yaml:"request"`
+				Response any    `yaml:"response"`
+			} `yaml:"transform"`
+		} `yaml:"overrides"`
+	}
+	if err := yaml.Unmarshal(raw, &rf); err != nil {
+		t.Fatalf("parse resolution.yaml: %v", err)
+	}
+	for _, ov := range rf.Overrides {
+		if ov.ContractVersion == version && ov.Transform != nil {
+			return *ov.Transform
+		}
+	}
+	t.Fatalf("no transform override found for %q in resolution.yaml", version)
+	return struct {
+		Target   string `yaml:"target"`
+		Request  any    `yaml:"request"`
+		Response any    `yaml:"response"`
+	}{}
+}
+
+func TestRetireScaffoldsAnOverride(t *testing.T) {
+	bundleDir := t.TempDir()
+	addLayer(t, bundleDir, "2024-01")
+	addLayer(t, bundleDir, "2025-06")
+	addLayer(t, bundleDir, "2026-11")
+
+	if err := bundlegen.Retire(bundleDir, "2024-01"); err != nil {
+		t.Fatalf("Retire: %v", err)
+	}
+
+	// resolution.yaml must exist with one override.
+	if count := resolutionOverrideCount(t, bundleDir); count != 1 {
+		t.Fatalf("override count = %d, want 1", count)
+	}
+
+	tr := resolutionTransformFor(t, bundleDir, "2024-01")
+	if tr.Target != "2025-06" {
+		t.Errorf("transform target = %q, want %q", tr.Target, "2025-06")
+	}
+	// Request and response must be present as empty sequences.
+	if tr.Request == nil {
+		t.Error("transform.request must be present (empty sequence)")
+	}
+	if tr.Response == nil {
+		t.Error("transform.response must be present (empty sequence)")
+	}
+}
+
+func TestRetireRefusesTheCurrentVersion(t *testing.T) {
+	bundleDir := t.TempDir()
+	addLayer(t, bundleDir, "2024-01")
+	addLayer(t, bundleDir, "2026-11")
+
+	if err := bundlegen.Retire(bundleDir, "2026-11"); err == nil {
+		t.Fatal("Retire of the newest/current version: expected a hard error, got nil")
+	}
+}
+
+func TestRetireRefusesAnUnknownVersion(t *testing.T) {
+	bundleDir := t.TempDir()
+	addLayer(t, bundleDir, "2024-01")
+	addLayer(t, bundleDir, "2026-11")
+
+	if err := bundlegen.Retire(bundleDir, "2020-01"); err == nil {
+		t.Fatal("Retire of an absent version: expected a hard error, got nil")
+	}
+}
+
+func TestRetireRefusesAnAlreadyOverriddenVersion(t *testing.T) {
+	bundleDir := t.TempDir()
+	addLayer(t, bundleDir, "2024-01")
+	addLayer(t, bundleDir, "2026-11")
+
+	// First retire succeeds.
+	if err := bundlegen.Retire(bundleDir, "2024-01"); err != nil {
+		t.Fatalf("first Retire: %v", err)
+	}
+	// Second retire of the same version must fail.
+	if err := bundlegen.Retire(bundleDir, "2024-01"); err == nil {
+		t.Fatal("second Retire of the same version: expected a hard error, got nil")
+	}
+}
+
+func TestRetirePreservesExistingOverrides(t *testing.T) {
+	// Use a real bundle so we can call bundle.Load at the end.
+	fds := bundletest.FDSBytes(t)
+	openapi := bundletest.ValidOpenAPI
+	const versionsA = `version: 1
+contracts:
+  - contract_version: "2024-01"
+    route: /v3/echo
+    method: POST
+    request_message: acme.v1.Ping
+    response_message: acme.v1.Pong
+`
+	const versionsB = `version: 1
+contracts:
+  - contract_version: "2025-06"
+    route: /v3/echo
+    method: POST
+    request_message: acme.v1.Ping
+    response_message: acme.v1.Pong
+`
+	const versionsC = `version: 1
+contracts:
+  - contract_version: "2026-11"
+    route: /v3/echo
+    method: POST
+    request_message: acme.v1.Ping
+    response_message: acme.v1.Pong
+`
+	bundleDir := bundletest.MultiDir(t,
+		bundletest.Layer{Name: "2024-01", Descriptors: fds, OpenAPI: openapi, Versions: versionsA},
+		bundletest.Layer{Name: "2025-06", Descriptors: fds, OpenAPI: openapi, Versions: versionsB},
+		bundletest.Layer{Name: "2026-11", Descriptors: fds, OpenAPI: openapi, Versions: versionsC},
+	)
+
+	// Seed a pre-existing override for 2025-06 (a route override).
+	bundletest.WriteResolution(t, bundleDir, `version: 1
+overrides:
+  - contract_version: "2025-06"
+    transform:
+      target: "2026-11"
+      request: []
+      response: []
+`)
+
+	// Retire 2024-01 — must preserve the 2025-06 override.
+	if err := bundlegen.Retire(bundleDir, "2024-01"); err != nil {
+		t.Fatalf("Retire: %v", err)
+	}
+
+	// Both overrides must be present.
+	if count := resolutionOverrideCount(t, bundleDir); count != 2 {
+		t.Fatalf("override count = %d after retire, want 2", count)
+	}
+
+	// The new override for 2024-01 must have the right target.
+	tr := resolutionTransformFor(t, bundleDir, "2024-01")
+	if tr.Target != "2025-06" {
+		t.Errorf("transform target for 2024-01 = %q, want %q", tr.Target, "2025-06")
+	}
+
+	// The whole bundle must still load cleanly (chains are valid).
+	if _, err := bundle.Load(bundleDir); err != nil {
+		t.Fatalf("bundle.Load after retire: %v", err)
+	}
+}
+
+// --- Verify tests ---
+
+func TestVerifyAcceptsAGoodBundle(t *testing.T) {
+	// bundletest.Dir builds a single-layer bundle that Load accepts.
+	bundleDir := bundletest.Dir(t, "")
+	if err := bundlegen.Verify(bundleDir); err != nil {
+		t.Fatalf("Verify on a good bundle: %v", err)
+	}
+}
+
+func TestVerifyRejectsABrokenBundle(t *testing.T) {
+	// Start with a valid bundle, then attach a resolution.yaml override that
+	// names a version not present in the bundle — Load will reject it.
+	bundleDir := bundletest.Dir(t, "")
+	bundletest.WriteResolution(t, bundleDir, `version: 1
+overrides:
+  - contract_version: "9999-99"
+    transform:
+      target: "2024-11"
+      request: []
+      response: []
+`)
+	if err := bundlegen.Verify(bundleDir); err == nil {
+		t.Fatal("Verify on a bundle with an unknown override version: expected a non-nil error, got nil")
 	}
 }
