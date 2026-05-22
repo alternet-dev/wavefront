@@ -2,42 +2,44 @@
 
 Running `wavefront`.
 
-## Single instance
+## Replicas
 
-Stateless. Run N replicas behind the ingress; no peer discovery, no shared
-state — the bundle is immutable input, so replicas are byte-identical. Scale on
-CPU/RPS like any stateless HTTP service.
+`wavefront` is stateless — the bundle is immutable, loaded-once input, so every
+replica is byte-identical. Run N replicas behind the ingress and scale on
+CPU/RPS like any stateless HTTP service; there is nothing to coordinate between
+them.
 
 ## Configuration
 
 All via environment, read once at startup — see the table in
-[README.md](../README.md#configuration). Required: `WAVEFRONT_BUNDLE_PATH`,
+[README.md](../README.md#configuration). Required: `WAVEFRONT_BUNDLE_PATH` and
 `WAVEFRONT_UPSTREAM_BASE_URL`.
 
-## Reloads
+## Bundle rollout
 
-`SIGHUP` reloads + re-validates the bundle without dropping in-flight requests.
-A failed reload logs and **keeps the previous bundle serving** — it never falls
-into a broken state. A missing/invalid bundle *at boot* is fatal (fail fast),
-deliberately, so a bad rollout cannot start.
+The bundle is loaded once, at boot. A missing or invalid bundle is fatal —
+`wavefront` refuses to start (fail-fast), so a bad bundle cannot take traffic.
+There is no in-place reload: ship a new bundle by deploying a new process or
+container. Because replicas are stateless, a normal rolling deploy is a clean
+swap.
 
 ## Observability
 
-- `GET /metrics` (on `WAVEFRONT_METRICS_ADDR`) — Prometheus/OpenMetrics.
-  Headline series: **translation-failure rate keyed by contract version** —
-  this is how an operator sees an old client cohort breaking against a new
-  backend *before* it pages someone.
-- `/health` (liveness), `/ready` (readiness — 200 only after a valid bundle
-  is loaded).
-- Structured logs keyed by contract version + transform outcome. Tracing
-  headers are propagated, not terminated.
+- `GET /metrics` (on `WAVEFRONT_METRICS_ADDR`) — Prometheus. Two counters:
+  `wavefront_requests_total` (proxy requests handled) and
+  `wavefront_errors_total`, labeled by error `code`, counting
+  `wavefront`-originated failures.
+- `/health` (liveness) and `/ready` (readiness — 200 only once a valid bundle
+  is loaded), served on the metrics listener.
+- Lifecycle events — config, bundle load, listen, shutdown — are logged as
+  structured JSON. Client tracing headers are forwarded to the upstream, not
+  terminated.
 
 ## Failure modes
 
 | Condition | Behavior |
 |---|---|
 | Bad bundle at boot | refuse to start |
-| Bad bundle on `SIGHUP` | keep previous, log, increment metric |
-| Unknown/missing contract version | typed `UNSUPPORTED_CONTRACT_VERSION` |
-| Transform references a now-absent field | typed `TRANSFORM_FAILED` + metric, not a 500 |
-| Upstream 5xx / timeout | typed error in the client's contract version |
+| Unknown / missing contract version | typed `unsupported_contract_version` |
+| Transform verb can't apply | typed `transform_failed` — 422 (request) / 502 (response) |
+| Upstream non-2xx, unreachable, or timeout | typed `upstream_error` / `upstream_timeout` |

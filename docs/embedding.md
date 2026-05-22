@@ -5,11 +5,10 @@ consumer-specific shape lives in the bundle and the deployment.
 
 ## 1. Generating the bundle
 
-The consumer derives the bundle from its own source of truth (e.g. a FastAPI
-app's in-process OpenAPI export → proto `FileDescriptorSet` + a generated
-`versions.yaml`). The bundle is committed in the consumer's repo and is the
-only contract between the two projects. `wavefront` never reaches into the
-consumer.
+The consumer derives the bundle from its own source of truth — typically a
+FastAPI app's in-process OpenAPI export. The bundle is committed in the
+consumer's repo and is the only contract between the two projects.
+`wavefront` never reaches into the consumer.
 
 Concretely, run the shipped generator in the consumer's CI against either the
 exported file or the live service's OpenAPI endpoint (so there is no manual
@@ -25,7 +24,7 @@ URL fetch is still frozen at build time — the bundle stays point-in-time.
 
 ## 2. Pinning + deploying
 
-Pin `wavefront` by image tag/digest, exactly like the `wss-mux` sibling:
+Pin `wavefront` by image tag/digest:
 
 - a Compose service block + Helm chart entry,
 - the bundle delivered via mount (ConfigMap / bind) or baked into an image
@@ -41,11 +40,13 @@ authority by construction. `wavefront` performs no routing or TLS itself.
 
 ## Deployment patterns
 
-- **Single instance** (default): stateless, horizontally scalable behind the
-  ingress; no inter-instance coordination (nothing to coordinate — the bundle
-  is immutable input).
-- **Blue/green bundle rollout**: ship a new bundle version, `SIGHUP`; failed
-  reload keeps serving the old bundle.
+- **Stateless replicas**: `wavefront` holds no per-client or inter-instance
+  state — the bundle is immutable input — so run it as N identical replicas
+  behind the ingress and scale horizontally.
+- **Bundle rollout**: a bundle change ships as a new deployment — build or
+  mount the new bundle and roll the `wavefront` processes. The binary loads the
+  bundle once at boot and fails fast on a bad one, so a broken bundle halts the
+  rollout before it replaces healthy instances.
 
 ## Tradeoffs you should know
 

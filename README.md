@@ -130,13 +130,13 @@ All configuration is environment variables, read once at startup.
 
 Operational notes:
 
-- **`SIGHUP`** reloads and re-validates the bundle without dropping in-flight
-  requests. A failed reload keeps the previous bundle serving.
-- **Fail-fast.** A missing/invalid bundle at boot → refuse to start.
-- **`GET /metrics`** exposes Prometheus/OpenMetrics counters keyed by contract
-  version + transform outcome; `/health` and `/ready` are the probes.
-- **Codec.** `protobuf` is the reference inbound codec; adapters are selected by
-  content negotiation. Auth + tracing headers are forwarded untouched.
+- **Fail-fast.** The bundle is loaded once at boot; a missing or invalid bundle
+  → refuse to start. Roll a new bundle by deploying a new process.
+- **`GET /metrics`** exposes Prometheus counters — `wavefront_requests_total`
+  and `wavefront_errors_total{code}`; `/health` and `/ready` are the probes.
+- **Codec.** `protobuf ↔ JSON` is the only adapter today; the adapter boundary
+  is built so another codec could be added. Auth + tracing headers are
+  forwarded untouched.
 
 The bundle schema and transform vocabulary are detailed in
 [docs/protocol.md](docs/protocol.md); integrating a consumer is covered in

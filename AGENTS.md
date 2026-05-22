@@ -7,16 +7,19 @@ If you're an LLM agent landing in this repo, read this first.
 `wavefront` is a small, infrastructure-agnostic edge proxy that terminates a
 versioned external contract and forwards, auth-transparently, to a single
 evolving internal HTTP/JSON backend. It is the *interpreter* of a declarative
-descriptor bundle (proto `FileDescriptorSet` + current OpenAPI + a version
-map), so a backend can migrate freely while clients frozen at older contract
-versions keep working. Codec-agnostic via adapters; `protobuf ↔ OpenAPI/JSON`
-is the reference adapter, not the identity. No broker, no database, no auth
+descriptor bundle — a directory of immutable per-version layers plus an
+operator-owned `resolution.yaml` — so a backend can migrate freely while
+clients frozen at older contract versions keep working. Codec-agnostic via
+adapters; `protobuf ↔ OpenAPI/JSON` is the reference adapter, not the identity.
+No broker, no database, no auth
 server, no external infrastructure required. It is the request/response sibling
-of the `wss-mux` edge-proxy family (`../wss-mux`); mirror that family's
-structural and operational conventions (README/AGENTS shape, doc set, dual
-license, env config, `SIGHUP` reload, `/metrics` + probes), never its
-WebSocket internals. **Language is Go** — the mirroring is structural, not
-language-level (`wss-mux` is Rust; that does not carry over).
+of the `wss-mux` edge-proxy family (`../wss-mux`); mirror only that family's
+**documentation structure and editorial tone** (README/AGENTS shape, the
+`docs/` set, dual license), never its WebSocket internals — and never assume a
+`wss-mux` runtime behavior is present here. wavefront's behavior is whatever
+its own code does; verify a claim against the code, not the sibling.
+**Language is Go** — the mirroring is structural, not language-level
+(`wss-mux` is Rust; that does not carry over).
 
 ## Reading order
 
@@ -39,8 +42,8 @@ language-level (`wss-mux` is Rust; that does not carry over).
   the bundle, never in `src/`.
 - One configured upstream. No service discovery, no routing-by-host, no TLS
   termination — the ingress owns those.
-- A missing/invalid bundle at boot ⇒ refuse to start (fail fast). A failed
-  `SIGHUP` reload keeps the previous bundle serving.
+- A missing/invalid bundle at boot ⇒ refuse to start (fail fast). The bundle is
+  loaded once at boot — there is no in-place reload.
 - Keep the dependency surface minimal: Go standard library plus a small set of
   vetted modules. No heavyweight web framework, no cgo/native dependencies, no
   ORM.
