@@ -10,8 +10,10 @@ package bundlegen
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -23,6 +25,9 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protodesc"
 	"google.golang.org/protobuf/types/descriptorpb"
+	"gopkg.in/yaml.v3"
+
+	"github.com/alternet-dev/wavefront/internal/bundle"
 )
 
 type schema struct {
@@ -451,4 +456,133 @@ func sanitize(version string) string {
 		return s // already prefixed by the caller's "v"
 	}
 	return s
+}
+
+// --- resolution.yaml helpers for Retire ---
+//
+// These structs mirror the on-disk shape just enough to detect existing
+// overrides and append a new transform-shim stanza. The request/response
+// stanza arrays are held as raw yaml.Node so that existing verb lists are
+// round-tripped without losing their values. Note: operator comments in
+// resolution.yaml are NOT preserved across a retire rewrite.
+
+type resolutionFile struct {
+	Version   int               `yaml:"version"`
+	Overrides []resolutionEntry `yaml:"overrides"`
+}
+
+type resolutionEntry struct {
+	ContractVersion string               `yaml:"contract_version"`
+	Transform       *resolutionTransform `yaml:"transform,omitempty"`
+	Route           *resolutionRoute     `yaml:"route,omitempty"`
+}
+
+type resolutionTransform struct {
+	Target   string    `yaml:"target"`
+	Request  yaml.Node `yaml:"request"`
+	Response yaml.Node `yaml:"response"`
+}
+
+type resolutionRoute struct {
+	Target string `yaml:"target"`
+}
+
+// emptySeqNode returns a YAML sequence node with no items (marshals as []).
+func emptySeqNode() yaml.Node {
+	return yaml.Node{Kind: yaml.SequenceNode, Tag: "!!seq"}
+}
+
+// Retire scaffolds a transform-shim override for version in bundleDir. It
+// converts version from the default (direct-route) behaviour to a transform
+// that chains to its immediate newer neighbour, leaving the request and
+// response stanza arrays empty for a human to fill.
+//
+// Hard errors:
+//   - version is not a layer in bundleDir
+//   - version is the newest layer (the current version is never retired)
+//   - version already has an override in resolution.yaml
+//
+// Any existing overrides for other versions are preserved verbatim.
+// Operator comments in resolution.yaml are not preserved across the rewrite.
+func Retire(bundleDir, version string) error {
+	entries, err := os.ReadDir(bundleDir)
+	if err != nil {
+		return fmt.Errorf("read bundle dir: %w", err)
+	}
+	var layers []string
+	for _, e := range entries {
+		if e.IsDir() {
+			layers = append(layers, e.Name())
+		}
+	}
+	// os.ReadDir returns entries sorted by name.
+	found := false
+	idx := -1
+	for i, l := range layers {
+		if l == version {
+			found = true
+			idx = i
+		}
+	}
+	if !found {
+		return fmt.Errorf("version %q is not a layer in the bundle", version)
+	}
+	if idx == len(layers)-1 {
+		return fmt.Errorf("refusing to retire the current version %q", version)
+	}
+	neighbour := layers[idx+1]
+
+	// Read existing resolution.yaml if present.
+	resPath := filepath.Join(bundleDir, "resolution.yaml")
+	var rf resolutionFile
+	raw, err := os.ReadFile(resPath)
+	if err != nil && !isNotExist(err) {
+		return fmt.Errorf("read resolution.yaml: %w", err)
+	}
+	if err == nil {
+		// File exists — parse it.
+		dec := yaml.NewDecoder(strings.NewReader(string(raw)))
+		if derr := dec.Decode(&rf); derr != nil {
+			return fmt.Errorf("parse resolution.yaml: %w", derr)
+		}
+	} else {
+		// File absent — start with schema version 1 and no overrides.
+		rf.Version = 1
+	}
+
+	// Check for a pre-existing override for version.
+	for _, ov := range rf.Overrides {
+		if ov.ContractVersion == version {
+			return fmt.Errorf("version %q already has an override in resolution.yaml; retire only scaffolds a fresh override", version)
+		}
+	}
+
+	// Append the transform-shim override.
+	rf.Overrides = append(rf.Overrides, resolutionEntry{
+		ContractVersion: version,
+		Transform: &resolutionTransform{
+			Target:   neighbour,
+			Request:  emptySeqNode(),
+			Response: emptySeqNode(),
+		},
+	})
+
+	out, merr := yaml.Marshal(&rf)
+	if merr != nil {
+		return fmt.Errorf("marshal resolution.yaml: %w", merr)
+	}
+	return os.WriteFile(resPath, out, 0o644)
+}
+
+func isNotExist(err error) bool {
+	return err != nil && (os.IsNotExist(err) || errors.Is(err, fs.ErrNotExist))
+}
+
+// Verify loads the bundle at bundleDir via bundle.Load and returns the typed
+// error on any inconsistency, or nil on success. It is the thin command-facing
+// wrapper that gives a CI consumer a single pass/fail over layers,
+// resolution.yaml, and the transform chains.
+func Verify(bundleDir string) error {
+	_, err := bundle.Load(bundleDir)
+	return err
 }

@@ -7,6 +7,8 @@
 //
 //	wavefront-bundle add --openapi <file|url> --bundle <dir>
 //	wavefront-bundle remove --version <id> --bundle <dir>
+//	wavefront-bundle retire --version <id> --bundle <dir>
+//	wavefront-bundle verify --bundle <dir>
 package main
 
 import (
@@ -27,7 +29,7 @@ func main() {
 // to errOut. It is the testable entry point — main is a thin os.Exit wrapper.
 func run(args []string, errOut io.Writer) int {
 	if len(args) == 0 {
-		fmt.Fprintln(errOut, "usage: wavefront-bundle <add|remove> [flags]")
+		fmt.Fprintln(errOut, "usage: wavefront-bundle <add|remove|retire|verify> [flags]")
 		return 2
 	}
 	switch args[0] {
@@ -35,6 +37,10 @@ func run(args []string, errOut io.Writer) int {
 		return runAdd(args[1:], errOut)
 	case "remove":
 		return runRemove(args[1:], errOut)
+	case "retire":
+		return runRetire(args[1:], errOut)
+	case "verify":
+		return runVerify(args[1:], errOut)
 	default:
 		fmt.Fprintf(errOut, "wavefront-bundle: unknown subcommand %q\n", args[0])
 		return 2
@@ -82,5 +88,49 @@ func runRemove(args []string, errOut io.Writer) int {
 		fmt.Fprintln(errOut, "wavefront-bundle remove:", err)
 		return 1
 	}
+	return 0
+}
+
+func runRetire(args []string, errOut io.Writer) int {
+	fs := flag.NewFlagSet("retire", flag.ContinueOnError)
+	fs.SetOutput(errOut)
+	version := fs.String("version", "", "the contract version (layer) to retire")
+	bundleDir := fs.String("bundle", "", "bundle directory containing the layer")
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 2
+	}
+	if *version == "" || *bundleDir == "" {
+		fmt.Fprintln(errOut, "usage: wavefront-bundle retire --version <id> --bundle <dir>")
+		return 2
+	}
+	if err := bundlegen.Retire(*bundleDir, *version); err != nil {
+		fmt.Fprintln(errOut, "wavefront-bundle retire:", err)
+		return 1
+	}
+	return 0
+}
+
+func runVerify(args []string, errOut io.Writer) int {
+	fs := flag.NewFlagSet("verify", flag.ContinueOnError)
+	fs.SetOutput(errOut)
+	bundleDir := fs.String("bundle", "", "bundle directory to verify")
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 2
+	}
+	if *bundleDir == "" {
+		fmt.Fprintln(errOut, "usage: wavefront-bundle verify --bundle <dir>")
+		return 2
+	}
+	if err := bundlegen.Verify(*bundleDir); err != nil {
+		fmt.Fprintln(errOut, "wavefront-bundle verify:", err)
+		return 1
+	}
+	fmt.Fprintf(errOut, "wavefront-bundle verify: %s ok\n", *bundleDir)
 	return 0
 }
