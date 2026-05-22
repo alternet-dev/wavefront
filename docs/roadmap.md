@@ -1,6 +1,6 @@
 # Roadmap
 
-Versioned plan. Pre-implementation; this is the intended sequence.
+Versioned plan. v0.1–v0.3 are shipped; v0.4+ is the intended forward sequence.
 
 ## v0.1 — initial
 
@@ -25,20 +25,26 @@ Versioned plan. Pre-implementation; this is the intended sequence.
   nested + array-element paths via the path grammar
   (`data.user.email`, `data[].createdAt`). `route` is the v0.1 binding.
 
-## v0.3 — multi-contract generator
+## v0.3 — multi-version bundle
 
-- Accumulates every still-pinned external contract version into the
-  one committed bundle: multi-entry `versions.yaml` + disjoint
-  per-version proto packages, a deterministic byte-reproducible merge
-  that never mutates a frozen version, re-emitted from the committed
-  bundle (its own source of truth). Each frozen external is re-pointed
-  at the *current* internal surface via the transform vocabulary —
-  multi-contract assembly and transform-stanza emission are one effort
-  and land together, not before. Retention is consumer-declared and
-  CI-gated (no automatic pruning); per-version transform stanzas are
-  consumer-authored (a shape delta can carry intent the generator
-  cannot infer); `buf breaking` gates each frozen package in the
-  consumer's CI.
+- A bundle is a directory of immutable per-version **layers**, each carrying
+  its own descriptor set, frozen OpenAPI, and route binding. The renamed
+  `wavefront-bundle` tool manages them: `add` emits a new layer, `remove` and
+  `retire` take an old one out of service, `verify` gates the bundle's
+  consistency in the consumer's CI. Adding a version is pure addition — a
+  frozen layer is never re-read or rewritten, and `buf breaking` guards each
+  frozen proto package in the consumer's CI.
+- Per-version **resolution**: a layer routes to a backend unchanged by
+  default; an operator-owned `resolution.yaml` overrides a version with a
+  mechanical `transform` shim, or a `route` to a named backend target.
+- A `transform` override may name a `target` version, **chaining** shims
+  across successive versions onto the live backend; the proxy composes the
+  chain link by link.
+- **Multi-target routing**: a deployment names backend targets, so different
+  contract versions can reach different internal deployments.
+- Retention is consumer-declared (`remove` / `retire`) and CI-gated
+  (`verify`), never automatic. Transform stanzas stay consumer-authored — a
+  shape delta carries intent the tool cannot infer.
 
 ## v0.4+ — to renegotiate
 
@@ -47,6 +53,10 @@ ships and we have prod feedback. v0.x stays open for as long as it
 takes to work the kinks out; v1.0 isn't an explicit target. Candidate
 work:
 
+- Drift detection between OpenAPI versions — a structural diff that drafts
+  transform-shim stanzas instead of leaving them hand-authored, with a
+  "few-versions, many-resolutions" mode. Deferred from v0.3; needs the
+  rename-vs-add intent problem solved first.
 - Per-version observability (translation-outcome metrics / logs).
 - `SIGHUP` hot reload with previous-bundle fallback.
 - Version-skew test suite (old bundle vs new internal shape) + `buf
@@ -76,8 +86,6 @@ fanout).
 ## Open questions
 
 - Bundle delivery default: mount vs image-baked layer.
-- Whether multiple upstreams (per-route) ever earns its complexity, or stays a
-  hard single-upstream invariant.
 - **GraphQL** is anticipated, but as a *separate future adapter*, not a codec
   swap: a GraphQL response shape is request-defined and every op is one
   `POST /graphql`, which breaks the fixed-`response_message`-per-route and
