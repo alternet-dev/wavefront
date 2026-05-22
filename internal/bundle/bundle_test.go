@@ -429,6 +429,75 @@ func TestLoadResolutionUnsupportedVersion(t *testing.T) {
 	}
 }
 
+func TestLoadResolutionRouteOverrideSetsTarget(t *testing.T) {
+	dir := writeBundle(t, fdsBytes(t), validOpenAPI, validVersions)
+	mustWrite(t, filepath.Join(dir, "resolution.yaml"), []byte(`version: 1
+overrides:
+  - contract_version: "2024-11"
+    route:
+      target: backend-v2
+`))
+	b, err := Load(dir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	c, ok := b.Contract("2024-11")
+	if !ok {
+		t.Fatal(`Contract("2024-11") not found`)
+	}
+	if c.Target() != "backend-v2" {
+		t.Errorf("Target() = %q, want \"backend-v2\"", c.Target())
+	}
+	if len(c.RequestOps()) != 0 || len(c.ResponseOps()) != 0 {
+		t.Errorf("route override must not set transform ops: req=%d resp=%d", len(c.RequestOps()), len(c.ResponseOps()))
+	}
+}
+
+func TestLoadResolutionBothTransformAndRouteRejected(t *testing.T) {
+	dir := writeBundle(t, fdsBytes(t), validOpenAPI, validVersions)
+	mustWrite(t, filepath.Join(dir, "resolution.yaml"), []byte(`version: 1
+overrides:
+  - contract_version: "2024-11"
+    transform:
+      request: []
+    route:
+      target: svc
+`))
+	_, err := Load(dir)
+	var ve *ValidationError
+	if !errors.As(err, &ve) {
+		t.Fatalf("want ValidationError for both transform+route set, got %v", err)
+	}
+}
+
+func TestLoadResolutionNeitherTransformNorRouteRejected(t *testing.T) {
+	dir := writeBundle(t, fdsBytes(t), validOpenAPI, validVersions)
+	mustWrite(t, filepath.Join(dir, "resolution.yaml"), []byte(`version: 1
+overrides:
+  - contract_version: "2024-11"
+`))
+	_, err := Load(dir)
+	var ve *ValidationError
+	if !errors.As(err, &ve) {
+		t.Fatalf("want ValidationError for neither transform nor route set, got %v", err)
+	}
+}
+
+func TestLoadResolutionRouteBlankTargetRejected(t *testing.T) {
+	dir := writeBundle(t, fdsBytes(t), validOpenAPI, validVersions)
+	mustWrite(t, filepath.Join(dir, "resolution.yaml"), []byte(`version: 1
+overrides:
+  - contract_version: "2024-11"
+    route:
+      target: ""
+`))
+	_, err := Load(dir)
+	var ve *ValidationError
+	if !errors.As(err, &ve) {
+		t.Fatalf("want ValidationError for blank route.target, got %v", err)
+	}
+}
+
 func TestLoadResolutionDuplicateOverrideRejected(t *testing.T) {
 	dir := writeBundle(t, fdsBytes(t), validOpenAPI, validVersions)
 	resolution := `version: 1

@@ -109,7 +109,12 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), s.cfg.RequestTimeout)
 	defer cancel()
 
-	url := strings.TrimRight(s.cfg.UpstreamBaseURL, "/") + call.Path
+	base, ok := s.cfg.TargetURL(c.Target())
+	if !ok {
+		s.writeError(w, wireerror.UpstreamError("unknown backend target "+c.Target()), c.ContractVersion())
+		return
+	}
+	url := strings.TrimRight(base, "/") + call.Path
 	if r.URL.RawQuery != "" {
 		url += "?" + r.URL.RawQuery // verbatim query passthrough
 	}

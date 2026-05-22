@@ -91,6 +91,7 @@ type Contract struct {
 	responseMessage string
 	requestOps      []transform.Op
 	responseOps     []transform.Op
+	target          string
 }
 
 func (c *Contract) ContractVersion() string     { return c.contractVersion }
@@ -100,6 +101,7 @@ func (c *Contract) RequestMessage() string      { return c.requestMessage }
 func (c *Contract) ResponseMessage() string     { return c.responseMessage }
 func (c *Contract) RequestOps() []transform.Op  { return c.requestOps }
 func (c *Contract) ResponseOps() []transform.Op { return c.responseOps }
+func (c *Contract) Target() string              { return c.target }
 
 type Bundle struct {
 	contracts map[string]*Contract
@@ -170,11 +172,16 @@ type yamlResolutionFile struct {
 type yamlResolution struct {
 	ContractVersion string         `yaml:"contract_version"`
 	Transform       *yamlTransform `yaml:"transform"`
+	Route           *yamlRoute     `yaml:"route"`
 }
 
 type yamlTransform struct {
 	Request  []yamlOp `yaml:"request"`
 	Response []yamlOp `yaml:"response"`
+}
+
+type yamlRoute struct {
+	Target string `yaml:"target"`
 }
 
 var allowedMethods = map[string]bool{
@@ -184,12 +191,13 @@ var allowedMethods = map[string]bool{
 }
 
 // loadResolution reads the optional operator-owned resolution.yaml at the
-// bundle root. An absent file yields an empty map — no version has a transform
-// override. Strict decode; the schema version must be 1.
-func loadResolution(dir string) (map[string]yamlTransform, error) {
+// bundle root. An absent file yields an empty map — no version has an
+// override. Strict decode; the schema version must be 1. Each override must
+// set exactly one of transform or route.
+func loadResolution(dir string) (map[string]yamlResolution, error) {
 	raw, err := os.ReadFile(filepath.Join(dir, fileResolution))
 	if errors.Is(err, fs.ErrNotExist) {
-		return map[string]yamlTransform{}, nil
+		return map[string]yamlResolution{}, nil
 	}
 	if err != nil {
 		return nil, &ReadError{File: fileResolution, Err: err}
@@ -203,7 +211,7 @@ func loadResolution(dir string) (map[string]yamlTransform, error) {
 	if yr.Version != 1 {
 		return nil, &UnsupportedVersionError{Version: yr.Version}
 	}
-	out := make(map[string]yamlTransform, len(yr.Overrides))
+	out := make(map[string]yamlResolution, len(yr.Overrides))
 	for _, ov := range yr.Overrides {
 		cv := strings.TrimSpace(ov.ContractVersion)
 		if cv == "" {
@@ -212,10 +220,15 @@ func loadResolution(dir string) (map[string]yamlTransform, error) {
 		if _, dup := out[cv]; dup {
 			return nil, &ValidationError{Contract: cv, Field: "contract_version", Reason: "duplicate resolution override"}
 		}
-		if ov.Transform == nil {
-			return nil, &ValidationError{Contract: cv, Field: "transform", Reason: "resolution override must set a transform"}
+		hasTransform := ov.Transform != nil
+		hasRoute := ov.Route != nil
+		if hasTransform == hasRoute { // both set or neither set
+			return nil, &ValidationError{Contract: cv, Field: "override", Reason: "must set exactly one of transform or route"}
 		}
-		out[cv] = *ov.Transform
+		if hasRoute && strings.TrimSpace(ov.Route.Target) == "" {
+			return nil, &ValidationError{Contract: cv, Field: "route.target", Reason: "route.target must name a target"}
+		}
+		out[cv] = ov
 	}
 	return out, nil
 }
@@ -297,17 +310,23 @@ func Load(dir string) (*Bundle, error) {
 				}
 				*pair.out = md
 			}
-			override := resolutionMap[c.contractVersion]
-			reqOps, oerr := toOps(c.contractVersion, "request", override.Request, reqMsg, respMsg)
-			if oerr != nil {
-				return nil, oerr
+			if ov, hasOverride := resolutionMap[c.contractVersion]; hasOverride {
+				if ov.Transform != nil {
+					reqOps, oerr := toOps(c.contractVersion, "request", ov.Transform.Request, reqMsg, respMsg)
+					if oerr != nil {
+						return nil, oerr
+					}
+					respOps, oerr := toOps(c.contractVersion, "response", ov.Transform.Response, reqMsg, respMsg)
+					if oerr != nil {
+						return nil, oerr
+					}
+					c.requestOps = reqOps
+					c.responseOps = respOps
+				} else {
+					// Route override — named target, no transform ops.
+					c.target = strings.TrimSpace(ov.Route.Target)
+				}
 			}
-			respOps, oerr := toOps(c.contractVersion, "response", override.Response, reqMsg, respMsg)
-			if oerr != nil {
-				return nil, oerr
-			}
-			c.requestOps = reqOps
-			c.responseOps = respOps
 			contracts[c.contractVersion] = c
 		}
 	}

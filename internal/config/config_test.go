@@ -205,6 +205,91 @@ func TestLogLevelValuesMap(t *testing.T) {
 	}
 }
 
+func TestTargetsParsesValidPairs(t *testing.T) {
+	p := minimal()
+	p["WAVEFRONT_TARGETS"] = "alpha=http://alpha:8080,beta=https://beta.example.com"
+	cfg, err := load(p)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(cfg.Targets) != 2 {
+		t.Fatalf("Targets len = %d, want 2", len(cfg.Targets))
+	}
+	if cfg.Targets["alpha"] != "http://alpha:8080" {
+		t.Errorf("Targets[alpha] = %q", cfg.Targets["alpha"])
+	}
+	if cfg.Targets["beta"] != "https://beta.example.com" {
+		t.Errorf("Targets[beta] = %q", cfg.Targets["beta"])
+	}
+}
+
+func TestTargetsMalformedPairIsError(t *testing.T) {
+	p := minimal()
+	p["WAVEFRONT_TARGETS"] = "noequals"
+	_, err := load(p)
+	var ie *InvalidError
+	if !errors.As(err, &ie) || ie.Var != "WAVEFRONT_TARGETS" {
+		t.Fatalf("want InvalidError(WAVEFRONT_TARGETS), got %v", err)
+	}
+}
+
+func TestTargetsDuplicateNameIsError(t *testing.T) {
+	p := minimal()
+	p["WAVEFRONT_TARGETS"] = "alpha=http://alpha:8080,alpha=http://alpha2:8080"
+	_, err := load(p)
+	var ie *InvalidError
+	if !errors.As(err, &ie) || ie.Var != "WAVEFRONT_TARGETS" {
+		t.Fatalf("want InvalidError(WAVEFRONT_TARGETS) for duplicate name, got %v", err)
+	}
+}
+
+func TestTargetsBadURLIsError(t *testing.T) {
+	p := minimal()
+	p["WAVEFRONT_TARGETS"] = "bad=ftp://not-http"
+	_, err := load(p)
+	var ie *InvalidError
+	if !errors.As(err, &ie) || ie.Var != "WAVEFRONT_TARGETS" {
+		t.Fatalf("want InvalidError(WAVEFRONT_TARGETS) for bad URL, got %v", err)
+	}
+}
+
+func TestTargetURLEmptyNameReturnsDefault(t *testing.T) {
+	p := minimal()
+	cfg, err := load(p)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	got, ok := cfg.TargetURL("")
+	if !ok || got != "http://localhost:9000" {
+		t.Errorf("TargetURL(\"\") = (%q, %v), want (\"http://localhost:9000\", true)", got, ok)
+	}
+}
+
+func TestTargetURLKnownNameReturnsURL(t *testing.T) {
+	p := minimal()
+	p["WAVEFRONT_TARGETS"] = "svc=http://svc:1234"
+	cfg, err := load(p)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	got, ok := cfg.TargetURL("svc")
+	if !ok || got != "http://svc:1234" {
+		t.Errorf("TargetURL(\"svc\") = (%q, %v), want (\"http://svc:1234\", true)", got, ok)
+	}
+}
+
+func TestTargetURLUnknownNameReturnsFalse(t *testing.T) {
+	p := minimal()
+	cfg, err := load(p)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	got, ok := cfg.TargetURL("nonexistent")
+	if ok || got != "" {
+		t.Errorf("TargetURL(\"nonexistent\") = (%q, %v), want (\"\", false)", got, ok)
+	}
+}
+
 func TestBlankOverrideFallsBackToDefault(t *testing.T) {
 	p := minimal()
 	p["WAVEFRONT_LISTEN_ADDR"] = ""
