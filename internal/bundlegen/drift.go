@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/alternet-dev/wavefront/internal/transform"
 )
@@ -131,15 +132,27 @@ type StanzaProposal struct {
 	Signals    []Signal
 }
 
+// CandidatePair is one ambiguous rename: a removed field and an added
+// field that share a primitive type but cannot be auto-renamed without
+// guessing operator intent. The renderer emits both interpretations
+// side by side in a YAML candidates block so a reviewer commits to one.
+type CandidatePair struct {
+	From, To string
+	Type     string
+	Signals  []Signal
+}
+
 // ShimProposal is the draft of a single resolution.yaml override entry:
-// request and response stanza lists plus any notes the drafter could not
-// express mechanically.
+// request and response stanza lists, candidate (ambiguous) pairs, plus
+// any notes the drafter could not express mechanically.
 type ShimProposal struct {
-	FromVersion string
-	ToVersion   string
-	Request     []StanzaProposal
-	Response    []StanzaProposal
-	Notes       []string
+	FromVersion        string
+	ToVersion          string
+	Request            []StanzaProposal
+	RequestCandidates  []CandidatePair
+	Response           []StanzaProposal
+	ResponseCandidates []CandidatePair
+	Notes              []string
 }
 
 // DraftShim compares two OpenAPI documents — the frozen "from" contract
@@ -152,16 +165,32 @@ type ShimProposal struct {
 //     type-appropriate placeholder
 //   - a field present in both but with a changed primitive type becomes
 //     a `coerce` stanza
-//   - a removed/added pair whose names case-normalize to the same string
-//     and share a primitive type becomes a confident `rename` stanza
-//   - a field in the "from" shape that has no peer left after pair
-//     matching is surfaced as a note rather than a stanza, because the
-//     transform verb set has no way to drop a known field — the operator
-//     must reconcile the gap by hand
+//   - a removed/added pair whose case-normalized names match becomes a
+//     confident `rename` stanza
+//   - a removed/added pair sharing a primitive type but with
+//     differently-normalized names becomes an ambiguous candidate the
+//     renderer surfaces as both `rename` and `delete + add` alternatives
 //
-// Top-level object properties only; nested objects, arrays, and
-// oneOf/allOf are not yet supported.
+// A field in the "from" shape that has no peer left after pair matching
+// becomes a Note — the transform verb set has no way to drop a known
+// field; the operator must reconcile by hand. Top-level object
+// properties only; nested objects, arrays, and oneOf/allOf are not yet
+// supported.
 func DraftShim(fromOpenAPI, toOpenAPI []byte) (*ShimProposal, error) {
+	return draftShim(fromOpenAPI, toOpenAPI, false)
+}
+
+// DraftShimStrict is the operator escape hatch: it suppresses every
+// confident case-rename match and reports each removed/added pair as a
+// candidate instead. Use when the drafter's confidence is itself the
+// thing in question — for example when reviewing a high-stakes contract
+// drift and an auto-rename would short-circuit a decision the operator
+// wants to make.
+func DraftShimStrict(fromOpenAPI, toOpenAPI []byte) (*ShimProposal, error) {
+	return draftShim(fromOpenAPI, toOpenAPI, true)
+}
+
+func draftShim(fromOpenAPI, toOpenAPI []byte, strict bool) (*ShimProposal, error) {
 	fromDoc, err := parseOpenAPIDoc(fromOpenAPI)
 	if err != nil {
 		return nil, fmt.Errorf("parse from: %w", err)
@@ -187,14 +216,16 @@ func DraftShim(fromOpenAPI, toOpenAPI []byte) (*ShimProposal, error) {
 
 	// Request direction: old client speaks `fromReq`, backend expects `toReq`.
 	// The transform reshapes the body from the "from" side to the "to" side.
-	reqProps, reqNotes := draftDirection(fromReq, toReq, "request")
+	reqProps, reqCands, reqNotes := draftDirection(fromReq, toReq, "request", strict)
 	p.Request = reqProps
+	p.RequestCandidates = reqCands
 	p.Notes = append(p.Notes, reqNotes...)
 
 	// Response direction: backend returns `toResp`, old client expects
 	// `fromResp`. The transform reshapes from `toResp` to `fromResp`.
-	respProps, respNotes := draftDirection(toResp, fromResp, "response")
+	respProps, respCands, respNotes := draftDirection(toResp, fromResp, "response", strict)
 	p.Response = respProps
+	p.ResponseCandidates = respCands
 	p.Notes = append(p.Notes, respNotes...)
 
 	return p, nil
@@ -243,16 +274,14 @@ func operationSchemas(doc openAPI) (req, resp *schema, err error) {
 
 // draftDirection diffs one direction of a transform: a `from` shape that
 // arrives and a `to` shape that must leave. It emits stanzas for the
-// changes the transform verbs cover; everything it cannot mechanically
-// express is appended to notes for human review.
+// changes the transform verbs cover, candidate pairs for the ambiguous
+// ones, and notes for everything it cannot mechanically express.
 //
-// Confident pair-matching: a removed field and an added field whose names
-// case-normalize to the same string and share a primitive type are paired
-// into a `rename` stanza instead of a separate add and remove.
-// Lower-confidence pairings (different normalized names, non-primitive
-// types) are deliberately left unmatched here — those need human
-// disambiguation rather than a guess.
-func draftDirection(from, to *schema, side string) ([]StanzaProposal, []string) {
+// When `strict` is set, the confident case-rename match is suppressed —
+// every removed/added primitive-type pair is reported as a candidate
+// instead of an auto-rename. The operator escape hatch when the
+// drafter's confidence is itself the thing in question.
+func draftDirection(from, to *schema, side string, strict bool) ([]StanzaProposal, []CandidatePair, []string) {
 	fromFields := topLevelProperties(from)
 	toFields := topLevelProperties(to)
 
@@ -273,7 +302,22 @@ func draftDirection(from, to *schema, side string) ([]StanzaProposal, []string) 
 		}
 	}
 
-	renames, unmatchedRemoved, unmatchedAdded := matchCaseRenames(removed, added, fromFields, toFields)
+	var (
+		renames                          []renamePair
+		unmatchedRemoved, unmatchedAdded []string
+	)
+	if strict {
+		// No confident matches; everything is fair game for the
+		// ambiguous pass below.
+		unmatchedRemoved = append(unmatchedRemoved, removed...)
+		unmatchedAdded = append(unmatchedAdded, added...)
+	} else {
+		renames, unmatchedRemoved, unmatchedAdded = matchCaseRenames(removed, added, fromFields, toFields)
+	}
+
+	// Of the still-unmatched removals/additions, pair any with a shared
+	// primitive type into an ambiguous candidate.
+	candidates, unmatchedRemoved, unmatchedAdded := matchAmbiguousPairs(unmatchedRemoved, unmatchedAdded, fromFields, toFields)
 
 	var props []StanzaProposal
 	var notes []string
@@ -326,7 +370,62 @@ func draftDirection(from, to *schema, side string) ([]StanzaProposal, []string) 
 			side, name))
 	}
 
-	return props, notes
+	return props, candidates, notes
+}
+
+// matchAmbiguousPairs pairs leftover removed and added fields by shared
+// primitive type alone — no name signal. Each pair becomes a candidate
+// the renderer surfaces as `# OPTION A — rename` vs
+// `# OPTION B — delete + add`, leaving the choice to the operator.
+//
+// Like matchCaseRenames, this is one-to-one and order-stable: each
+// removed field is considered once against the still-unconsumed
+// additions in declared order. Pairing two fields with the same type
+// but no other signal is intentionally weak — that's the *point*; the
+// renderer flags it as ambiguous instead of guessing.
+func matchAmbiguousPairs(removed, added []string, fromSchemas, toSchemas map[string]*schema) ([]CandidatePair, []string, []string) {
+	usedAdded := make(map[string]bool)
+	var pairs []CandidatePair
+	var unmatchedRemoved []string
+
+	for _, r := range removed {
+		fromT := primitiveType(fromSchemas[r])
+		if fromT == "" {
+			unmatchedRemoved = append(unmatchedRemoved, r)
+			continue
+		}
+		matched := ""
+		for _, a := range added {
+			if usedAdded[a] {
+				continue
+			}
+			toT := primitiveType(toSchemas[a])
+			if toT == "" || toT != fromT {
+				continue
+			}
+			matched = a
+			break
+		}
+		if matched == "" {
+			unmatchedRemoved = append(unmatchedRemoved, r)
+			continue
+		}
+		pairs = append(pairs, CandidatePair{
+			From:    r,
+			To:      matched,
+			Type:    fromT,
+			Signals: []Signal{SameTypeSignal(fromT), NoNameSignal()},
+		})
+		usedAdded[matched] = true
+	}
+
+	var unmatchedAdded []string
+	for _, a := range added {
+		if !usedAdded[a] {
+			unmatchedAdded = append(unmatchedAdded, a)
+		}
+	}
+	return pairs, unmatchedRemoved, unmatchedAdded
 }
 
 // renamePair is a single confident rename: the field name in the `from`
@@ -465,6 +564,139 @@ func zeroForSchema(s *schema) any {
 		return []any{}
 	case "object":
 		return map[string]any{}
+	}
+	return ""
+}
+
+// RenderOptions tunes ShimProposal.RenderYAML output. Date sets the
+// header comment's drafted-on stamp; an empty value resolves to today
+// (UTC, YYYY-MM-DD).
+type RenderOptions struct {
+	Date string
+}
+
+// RenderYAML emits the shim proposal as a YAML list element ready to
+// paste into a `resolution.yaml`'s `overrides:` block. Confident stanzas
+// land as fully-formed YAML entries; ambiguous pairs appear as
+// commented-out OPTION A / OPTION B blocks so the operator picks
+// intent. Notes are rendered as a top comment block; the renderer never
+// modifies a layer, never edits an existing resolution.yaml, and is
+// idempotent — a no-op proposal still emits a header and an empty
+// override skeleton so a reviewer sees the drafter ran.
+func (p *ShimProposal) RenderYAML(opts RenderOptions) string {
+	date := opts.Date
+	if date == "" {
+		date = time.Now().UTC().Format("2006-01-02")
+	}
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "# Drafted by `bundle draft-shim` on %s.\n", date)
+	b.WriteString("# Review every block, edit as needed, then paste into bundle/resolution.yaml's `overrides:` list.\n")
+	if len(p.Notes) > 0 {
+		b.WriteString("#\n")
+		b.WriteString("# Notes from the drafter (these need human reconciliation):\n")
+		for _, n := range p.Notes {
+			fmt.Fprintf(&b, "# - %s\n", n)
+		}
+	}
+	b.WriteString("#\n")
+	fmt.Fprintf(&b, "- contract_version: %q\n", p.FromVersion)
+	b.WriteString("  transform:\n")
+	fmt.Fprintf(&b, "    target: %q\n", p.ToVersion)
+	renderDirection(&b, "    request", p.Request, p.RequestCandidates, "request")
+	renderDirection(&b, "    response", p.Response, p.ResponseCandidates, "response")
+	return b.String()
+}
+
+// renderDirection writes the stanzas + candidate blocks for one side of
+// the transform. An empty direction omits the key entirely — a
+// resolution.yaml with no stanzas on a side is treated as no-op anyway.
+func renderDirection(b *strings.Builder, key string, props []StanzaProposal, cands []CandidatePair, side string) {
+	if len(props) == 0 && len(cands) == 0 {
+		return
+	}
+	fmt.Fprintf(b, "%s:\n", key)
+	for _, s := range props {
+		fmt.Fprintf(b, "      # CONFIDENT: %s\n", joinSignals(s.Signals))
+		fmt.Fprintf(b, "      - %s: %s\n", s.Verb, renderArgs(s.Args))
+	}
+	for _, c := range cands {
+		fmt.Fprintf(b, "      # AMBIGUOUS pair %q ↔ %q (%s).\n",
+			c.From, c.To, joinSignals(c.Signals))
+		b.WriteString("      # Pick exactly one option, edit, and delete the other comment block:\n")
+		b.WriteString("      #\n")
+		b.WriteString("      # OPTION A — interpret as a rename:\n")
+		fmt.Fprintf(b, "      # - rename: %s\n", renderArgs(RenameArgs{From: c.From, To: c.To}))
+		b.WriteString("      #\n")
+		b.WriteString("      # OPTION B — interpret as separate add + remove:\n")
+		fmt.Fprintf(b, "      # - default: %s\n", renderArgs(DefaultArgs{Field: c.To, Value: zeroForType(c.Type)}))
+		fmt.Fprintf(b, "      # (note: dropping the obsolete %s-side %q is not expressible in the verb set; the operator must reconcile manually if OPTION B is chosen)\n", side, c.From)
+	}
+}
+
+// joinSignals concatenates a list of Signal values via their canonical
+// String() form. Centralised so the renderer never reaches inside the
+// Signal contract.
+func joinSignals(signals []Signal) string {
+	parts := make([]string, len(signals))
+	for i, s := range signals {
+		parts[i] = s.String()
+	}
+	return strings.Join(parts, ", ")
+}
+
+// renderArgs writes a StanzaArgs value as compact YAML inline-flow
+// ({key: val, ...}). The arg-key order is fixed per verb (e.g.
+// `from`/`to` for rename, `field`/`value` for default) so the rendered
+// YAML is deterministic across runs.
+func renderArgs(args StanzaArgs) string {
+	switch a := args.(type) {
+	case RenameArgs:
+		return fmt.Sprintf("{ from: %s, to: %s }", formatYAMLValue(a.From), formatYAMLValue(a.To))
+	case DefaultArgs:
+		return fmt.Sprintf("{ field: %s, value: %s }", formatYAMLValue(a.Field), formatYAMLValue(a.Value))
+	case OptionalizeArgs:
+		return fmt.Sprintf("{ field: %s }", formatYAMLValue(a.Field))
+	case CoerceArgs:
+		return fmt.Sprintf("{ field: %s, to: %s }", formatYAMLValue(a.Field), formatYAMLValue(a.To))
+	default:
+		return fmt.Sprintf("{ /* unsupported args type %T */ }", args)
+	}
+}
+
+// formatYAMLValue emits a single arg value as a YAML scalar. Strings are
+// quoted; numbers, booleans, and nil pass through directly. Other types
+// fall back to %v — drafter args today are primitives only.
+func formatYAMLValue(v any) string {
+	switch t := v.(type) {
+	case string:
+		return fmt.Sprintf("%q", t)
+	case bool:
+		return fmt.Sprintf("%t", t)
+	case int, int32, int64:
+		return fmt.Sprintf("%d", t)
+	case float32, float64:
+		return fmt.Sprintf("%v", t)
+	case nil:
+		return "null"
+	default:
+		return fmt.Sprintf("%v", v)
+	}
+}
+
+// zeroForType returns a JSON-appropriate zero for a primitive type token
+// (the value coming out of primitiveType). Used by the candidates-block
+// renderer to seed the OPTION B `default` stanza's value.
+func zeroForType(t string) any {
+	switch t {
+	case "string":
+		return ""
+	case "boolean":
+		return false
+	case "int32", "int64":
+		return 0
+	case "float", "double":
+		return 0.0
 	}
 	return ""
 }
