@@ -5,10 +5,13 @@ import (
 	"context"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
+	"github.com/alternet-dev/wavefront/internal/bundle"
 	"github.com/alternet-dev/wavefront/internal/negotiate"
 	"github.com/alternet-dev/wavefront/internal/transform"
 	"github.com/alternet-dev/wavefront/internal/wireerror"
@@ -28,6 +31,10 @@ const (
 // contract. It pins metric cardinality and keeps the response header
 // well-defined.
 const versionUnknown = "unknown"
+
+// outcomeOK is the structured-log `outcome` value for a request that
+// completed without a wavefront-originated failure.
+const outcomeOK = "ok"
 
 // hopByHop are the RFC 7230 §6.1 connection-scoped headers plus the
 // framing/content headers net/http owns for the freshly-built upstream
@@ -74,12 +81,43 @@ func forwardClientHeaders(dst, src http.Header) {
 }
 
 func (s *Server) proxy(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
 	version := versionUnknown
-	defer func() { s.metrics.requests.WithLabelValues(version).Inc() }()
+	var route, target string
+	resolutionKind := ""
+	outcome := outcomeOK
+	upstreamStatus := 0
+
+	fail := func(werr *wireerror.Error, transformOutcome string) {
+		outcome = werr.Code()
+		s.writeError(w, werr, version, transformOutcome)
+	}
+
+	defer func() {
+		s.metrics.requests.WithLabelValues(version).Inc()
+		level := slog.LevelInfo
+		switch outcome {
+		case outcomeOK:
+			// already info
+		case "transform_failed":
+			level = slog.LevelError
+		default:
+			level = slog.LevelWarn
+		}
+		s.logger.LogAttrs(r.Context(), level, "proxy",
+			slog.String("contract_version", version),
+			slog.String("route", route),
+			slog.String("target", target),
+			slog.String("resolution_kind", resolutionKind),
+			slog.Int("upstream_status", upstreamStatus),
+			slog.String("outcome", outcome),
+			slog.Int64("latency_ms", time.Since(start).Milliseconds()),
+		)
+	}()
 
 	b := s.bundle.Load()
 	if b == nil {
-		s.writeError(w, wireerror.UpstreamError("no bundle loaded"), version, "")
+		fail(wireerror.UpstreamError("no bundle loaded"), "")
 		return
 	}
 
@@ -88,23 +126,25 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		var mbe *http.MaxBytesError
 		if errors.As(err, &mbe) {
-			s.writeError(w, wireerror.RequestBodyTooLarge(""), version, "")
+			fail(wireerror.RequestBodyTooLarge(""), "")
 			return
 		}
-		s.writeError(w, wireerror.DecodeFailed("could not read request body"), version, "")
+		fail(wireerror.DecodeFailed("could not read request body"), "")
 		return
 	}
 
 	c, werr := negotiate.Resolve(b, r.Header.Get(s.cfg.ContractVersionHeader))
 	if werr != nil {
-		s.writeError(w, werr, version, "")
+		fail(werr, "")
 		return
 	}
 	version = c.ContractVersion()
+	route = c.Route()
+	resolutionKind = describeResolution(c)
 
 	call, werr := s.adapter.DecodeRequest(c, body)
 	if werr != nil {
-		s.writeError(w, werr, version, "")
+		fail(werr, "")
 		return
 	}
 
@@ -112,7 +152,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request) {
 	for _, link := range chain {
 		call.Body, werr = transform.ApplyRequest(link.RequestOps(), call.Body)
 		if werr != nil {
-			s.writeError(w, werr, version, "request")
+			fail(werr, "request")
 			return
 		}
 	}
@@ -121,9 +161,10 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 
 	terminal := chain[len(chain)-1]
-	base, ok := s.cfg.TargetURL(terminal.Target())
+	target = terminal.Target()
+	base, ok := s.cfg.TargetURL(target)
 	if !ok {
-		s.writeError(w, wireerror.UpstreamError("unknown backend target "+terminal.Target()), version, "")
+		fail(wireerror.UpstreamError("unknown backend target "+target), "")
 		return
 	}
 	url := strings.TrimRight(base, "/") + call.Path
@@ -132,7 +173,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request) {
 	}
 	ureq, err := http.NewRequestWithContext(ctx, call.Method, url, bytes.NewReader(call.Body))
 	if err != nil {
-		s.writeError(w, wireerror.UpstreamError("could not build upstream request"), version, "")
+		fail(wireerror.UpstreamError("could not build upstream request"), "")
 		return
 	}
 	forwardClientHeaders(ureq.Header, r.Header)
@@ -141,41 +182,52 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request) {
 	uresp, err := s.client.Do(ureq)
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) || ctx.Err() == context.DeadlineExceeded {
-			s.writeError(w, wireerror.UpstreamTimeout(""), version, "")
+			fail(wireerror.UpstreamTimeout(""), "")
 			return
 		}
-		s.writeError(w, wireerror.UpstreamError("upstream unreachable"), version, "")
+		fail(wireerror.UpstreamError("upstream unreachable"), "")
 		return
 	}
 	defer uresp.Body.Close()
+	upstreamStatus = uresp.StatusCode
 
 	upBody, err := io.ReadAll(uresp.Body)
 	if err != nil {
-		s.writeError(w, wireerror.UpstreamError("could not read upstream response"), version, "")
+		fail(wireerror.UpstreamError("could not read upstream response"), "")
 		return
 	}
 	if uresp.StatusCode < 200 || uresp.StatusCode >= 300 {
-		s.writeError(w, wireerror.UpstreamError("upstream returned status "+strconv.Itoa(uresp.StatusCode)), version, "")
+		fail(wireerror.UpstreamError("upstream returned status "+strconv.Itoa(uresp.StatusCode)), "")
 		return
 	}
 
 	for i := len(chain) - 1; i >= 0; i-- {
 		upBody, werr = transform.ApplyResponse(chain[i].ResponseOps(), upBody)
 		if werr != nil {
-			s.writeError(w, werr, version, "response")
+			fail(werr, "response")
 			return
 		}
 	}
 
 	out, ct, werr := s.adapter.EncodeResponse(c, upBody)
 	if werr != nil {
-		s.writeError(w, werr, version, "")
+		fail(werr, "")
 		return
 	}
 	w.Header().Set(headerContentType, ct)
 	w.Header().Set(headerContractVersion, version)
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(out)
+}
+
+// describeResolution classifies a contract's resolution for the structured
+// log line: "transform" if a `resolution.yaml` override has installed any
+// transform stanzas or pointed at another version; otherwise "route".
+func describeResolution(c *bundle.Contract) string {
+	if len(c.RequestOps()) > 0 || len(c.ResponseOps()) > 0 || c.TransformTarget() != "" {
+		return "transform"
+	}
+	return "route"
 }
 
 func (s *Server) writeError(w http.ResponseWriter, werr *wireerror.Error, version, transformOutcome string) {
