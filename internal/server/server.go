@@ -71,6 +71,24 @@ func (s *Server) SetBundle(b *bundle.Bundle) {
 
 func (s *Server) Bundle() *bundle.Bundle { return s.bundle.Load() }
 
+// ReloadBundle re-reads the bundle directory configured on the server and,
+// on success, atomically swaps the live bundle. On failure, the previous
+// bundle is preserved and the error is both logged and returned so the
+// caller (typically a SIGHUP handler) can decide whether to react further.
+// In-flight requests continue against the bundle they observed at the start
+// of the request — the proxy reads the bundle pointer once per request.
+func (s *Server) ReloadBundle() error {
+	b, err := bundle.Load(s.cfg.BundlePath)
+	if err != nil {
+		slog.Error("bundle reload failed; keeping previous bundle",
+			"err", err, "path", s.cfg.BundlePath)
+		return err
+	}
+	s.bundle.Store(b)
+	slog.Info("bundle reloaded", "path", s.cfg.BundlePath)
+	return nil
+}
+
 // Message implements adapter.MessageResolver against the current bundle.
 func (s *Server) Message(fullName string) (protoreflect.MessageDescriptor, error) {
 	b := s.bundle.Load()

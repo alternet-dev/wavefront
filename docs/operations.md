@@ -29,12 +29,19 @@ and `WAVEFRONT_UPSTREAM_BASE_URL`.
 
 ## Bundle rollout
 
-The bundle is loaded once, at boot. A missing or invalid bundle is fatal —
+The bundle is loaded at boot. A missing or invalid bundle at boot is fatal —
 `wavefront` refuses to start (fail-fast), so a bad bundle cannot take
-traffic. There is no in-place reload: ship a new bundle by deploying a new
-process or container. Because replicas are stateless, a normal rolling deploy
-is a clean swap — readiness gates on the bundle, so the load balancer does
-not send traffic to a fresh pod until it has loaded.
+traffic. Because replicas are stateless, a normal rolling deploy is a clean
+swap — readiness gates on the bundle, so the load balancer does not send
+traffic to a fresh pod until it has loaded.
+
+For in-place updates without a redeploy, `wavefront` accepts `SIGHUP`: on
+the signal it re-reads `WAVEFRONT_BUNDLE_PATH` and atomically swaps the
+live bundle. A reload failure (malformed layer, dangling `resolution.yaml`
+reference) is logged at error level and the previous bundle keeps serving —
+the signal is non-destructive. In-flight requests finish against the
+bundle they started under; the proxy reads the bundle pointer once per
+request.
 
 ## Observability
 
