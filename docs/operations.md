@@ -38,11 +38,16 @@ not send traffic to a fresh pod until it has loaded.
 
 ## Observability
 
-- `GET /metrics` (on `WAVEFRONT_METRICS_ADDR`) — Prometheus. Two counters:
-  `wavefront_requests_total` (proxy requests handled) and
-  `wavefront_errors_total`, labelled by error `code`, counting
-  `wavefront`-originated failures. A rising `wavefront_errors_total{code=…}`
-  is the headline signal an operator watches.
+- `GET /metrics` (on `WAVEFRONT_METRICS_ADDR`) — Prometheus. Two counters,
+  both labelled by negotiated `contract_version` (or the literal `unknown`
+  when negotiation has not resolved a real version):
+  `wavefront_requests_total` (proxy requests handled), and
+  `wavefront_errors_total` (`wavefront`-originated failures), additionally
+  labelled by error `code` and a `transform_outcome` dimension that splits
+  `transform_failed` into `request` vs `response`. A rising
+  `wavefront_errors_total{code=…, contract_version=…}` is the headline
+  signal an operator watches — a specific old cohort breaking against the
+  current backend stands out by version, not just by code.
 - `/health` (liveness) always returns 200 once the process is up;
   `/ready` (readiness) returns 200 only once a valid bundle is loaded, 503
   before. Both served on the metrics listener.
@@ -73,12 +78,13 @@ not send traffic to a fresh pod until it has loaded.
   `WAVEFRONT_TARGETS`, then put a `route` override for that version in
   `resolution.yaml` selecting the named target. Other versions are
   unaffected; this is a per-version routing decision, not a deployment split.
-- **Investigate a `transform_failed` spike.** Confirm the rate on
-  `wavefront_errors_total{code="transform_failed"}`. Pin the affected version
-  from `X-Wavefront-Contract-Version` on the failing responses (ingress logs
-  or client traces). Inspect that version's `resolution.yaml` entry —
-  runtime transform failure usually means a source field is absent in the
-  live payload or a `coerce` is impossible for the value.
+- **Investigate a `transform_failed` spike.** Slice
+  `wavefront_errors_total{code="transform_failed"}` by `contract_version`
+  to find the affected cohort and by `transform_outcome` to see whether the
+  client request or the upstream response is the failing side. Inspect that
+  version's `resolution.yaml` entry — runtime transform failure usually
+  means a source field is absent in the live payload or a `coerce` is
+  impossible for the value.
 
 ## Symptoms → cause → fix
 

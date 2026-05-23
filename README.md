@@ -134,7 +134,9 @@ Operational notes:
 - **Fail-fast.** The bundle is loaded once at boot; a missing or invalid bundle
   → refuse to start. Roll a new bundle by deploying a new process.
 - **`GET /metrics`** exposes Prometheus counters — `wavefront_requests_total`
-  and `wavefront_errors_total{code}`; `/health` and `/ready` are the probes.
+  and `wavefront_errors_total`, both labelled by negotiated `contract_version`;
+  errors carry `code` plus a `transform_outcome` dimension that splits
+  `transform_failed` by chain side. `/health` and `/ready` are the probes.
 - **Codec.** `protobuf ↔ JSON` is the only adapter today; the adapter boundary
   is built so another codec could be added. Auth + tracing headers are
   forwarded untouched.
