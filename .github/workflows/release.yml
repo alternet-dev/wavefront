@@ -116,25 +116,46 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Mint tap-write token
+        id: app-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ vars.HOMEBREW_TAP_APP_ID }}
+          private-key: ${{ secrets.HOMEBREW_TAP_APP_PRIVATE_KEY }}
+          owner: alternet-dev
+          repositories: homebrew-tap
+
+      - name: Resolve App bot user id
+        id: bot
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          APP_SLUG: ${{ steps.app-token.outputs.app-slug }}
+        run: |
+          set -euo pipefail
+          user_id="$(gh api "/users/${APP_SLUG}[bot]" --jq .id)"
+          echo "user-id=${user_id}" >> "$GITHUB_OUTPUT"
+
       - name: Update homebrew-tap formula
         env:
-          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          APP_SLUG: ${{ steps.app-token.outputs.app-slug }}
+          BOT_USER_ID: ${{ steps.bot.outputs.user-id }}
           TAG: ${{ github.ref_name }}
           REVISION: ${{ github.sha }}
         run: |
           set -euo pipefail
           git clone --depth 1 \
-            "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/alternet-dev/homebrew-tap.git" \
+            "https://x-access-token:${GH_TOKEN}@github.com/alternet-dev/homebrew-tap.git" \
             tap
           cp packaging/homebrew-wavefront.rb tap/Formula/wavefront.rb
           cd tap
           sed -i "s|TAG_PLACEHOLDER|${TAG}|g; s|REVISION_PLACEHOLDER|${REVISION}|g" Formula/wavefront.rb
-          git config user.name "wavefront-release[bot]"
-          git config user.email "wavefront-release[bot]@users.noreply.github.com"
+          git config user.name "${APP_SLUG}[bot]"
+          git config user.email "${BOT_USER_ID}+${APP_SLUG}[bot]@users.noreply.github.com"
           git add Formula/wavefront.rb
           git diff --staged --quiet && echo "no formula change" && exit 0
           git commit -m "wavefront ${TAG}"
           BRANCH="$(git symbolic-ref --short HEAD)"
           git push \
-            "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/alternet-dev/homebrew-tap.git" \
+            "https://x-access-token:${GH_TOKEN}@github.com/alternet-dev/homebrew-tap.git" \
             HEAD:"${BRANCH}"
