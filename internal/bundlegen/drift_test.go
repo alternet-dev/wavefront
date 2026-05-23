@@ -36,7 +36,7 @@ func TestDraftShimAddedRequestFieldDraftsDefault(t *testing.T) {
 		t.Fatalf("DraftShim: %v", err)
 	}
 	want := []StanzaProposal{
-		{Verb: transform.KindDefault, Args: DefaultArgs{Field: "locale", Value: ""}, Confidence: Confident, Signals: []string{"pure-add"}},
+		{Verb: transform.KindDefault, Args: DefaultArgs{Field: "locale", Value: ""}, Confidence: Confident, Signals: []Signal{PureAddSignal()}},
 	}
 	if !reflect.DeepEqual(p.Request, want) {
 		t.Errorf("request proposals = %+v, want %+v", p.Request, want)
@@ -59,7 +59,7 @@ func TestDraftShimRemovedResponseFieldDraftsDefault(t *testing.T) {
 		t.Fatalf("DraftShim: %v", err)
 	}
 	want := []StanzaProposal{
-		{Verb: transform.KindDefault, Args: DefaultArgs{Field: "region", Value: ""}, Confidence: Confident, Signals: []string{"pure-add"}},
+		{Verb: transform.KindDefault, Args: DefaultArgs{Field: "region", Value: ""}, Confidence: Confident, Signals: []Signal{PureAddSignal()}},
 	}
 	if !reflect.DeepEqual(p.Response, want) {
 		t.Errorf("response proposals = %+v, want %+v", p.Response, want)
@@ -80,13 +80,13 @@ func TestDraftShimTypeChangeDraftsCoerce(t *testing.T) {
 		t.Fatalf("DraftShim: %v", err)
 	}
 	wantReq := []StanzaProposal{
-		{Verb: transform.KindCoerce, Args: CoerceArgs{Field: "id", To: "string"}, Confidence: Confident, Signals: []string{"type-change", "from:int32", "to:string"}},
+		{Verb: transform.KindCoerce, Args: CoerceArgs{Field: "id", To: "string"}, Confidence: Confident, Signals: []Signal{TypeChangeSignal(), FromTypeSignal("int32"), ToTypeSignal("string")}},
 	}
 	if !reflect.DeepEqual(p.Request, wantReq) {
 		t.Errorf("request proposals = %+v, want %+v", p.Request, wantReq)
 	}
 	wantResp := []StanzaProposal{
-		{Verb: transform.KindCoerce, Args: CoerceArgs{Field: "count", To: "string"}, Confidence: Confident, Signals: []string{"type-change", "from:int64", "to:string"}},
+		{Verb: transform.KindCoerce, Args: CoerceArgs{Field: "count", To: "string"}, Confidence: Confident, Signals: []Signal{TypeChangeSignal(), FromTypeSignal("int64"), ToTypeSignal("string")}},
 	}
 	if !reflect.DeepEqual(p.Response, wantResp) {
 		t.Errorf("response proposals = %+v, want %+v", p.Response, wantResp)
@@ -128,6 +128,91 @@ func TestDraftShimAddedResponseFieldNotesUnsupported(t *testing.T) {
 	}
 	if len(p.Notes) != 1 || !strings.Contains(p.Notes[0], `"region"`) || !strings.Contains(p.Notes[0], "response") {
 		t.Errorf("expected one note naming response field %q; got %v", "region", p.Notes)
+	}
+}
+
+func TestDraftShimCaseRenameRequest(t *testing.T) {
+	// A removed `userName` paired with an added `user_name` of the same
+	// type is a confident case-rename; the drafter emits a `rename`
+	// stanza on the request side rather than a separate add+remove.
+	from := openAPIDoc(t, "2024-01", `"userName":{"type":"string"}`, `"ok":{"type":"boolean"}`)
+	to := openAPIDoc(t, "2024-06", `"user_name":{"type":"string"}`, `"ok":{"type":"boolean"}`)
+
+	p, err := DraftShim(from, to)
+	if err != nil {
+		t.Fatalf("DraftShim: %v", err)
+	}
+	want := []StanzaProposal{
+		{Verb: transform.KindRename, Args: RenameArgs{From: "userName", To: "user_name"}, Confidence: Confident, Signals: []Signal{CaseRenameSignal(), SameTypeSignal("string")}},
+	}
+	if !reflect.DeepEqual(p.Request, want) {
+		t.Errorf("request proposals = %+v, want %+v", p.Request, want)
+	}
+	if len(p.Notes) != 0 {
+		t.Errorf("expected no notes — rename absorbed the pair; got %v", p.Notes)
+	}
+}
+
+func TestDraftShimCaseRenameResponse(t *testing.T) {
+	// For the response side the transform reshapes backend→old-client, so
+	// the rename's `from` is the backend's name (in `to/openapi.json`) and
+	// `to` is the old contract's name (in `from/openapi.json`).
+	from := openAPIDoc(t, "2024-01", `"user":{"type":"string"}`, `"userName":{"type":"string"}`)
+	to := openAPIDoc(t, "2024-06", `"user":{"type":"string"}`, `"user_name":{"type":"string"}`)
+
+	p, err := DraftShim(from, to)
+	if err != nil {
+		t.Fatalf("DraftShim: %v", err)
+	}
+	want := []StanzaProposal{
+		{Verb: transform.KindRename, Args: RenameArgs{From: "user_name", To: "userName"}, Confidence: Confident, Signals: []Signal{CaseRenameSignal(), SameTypeSignal("string")}},
+	}
+	if !reflect.DeepEqual(p.Response, want) {
+		t.Errorf("response proposals = %+v, want %+v", p.Response, want)
+	}
+}
+
+func TestDraftShimDifferentTypesNotRenamed(t *testing.T) {
+	// Removed `text` (string) and added `count` (integer) cannot be a
+	// rename — different types. The pure-diff behavior holds: a Note for
+	// the removal, a `default` for the addition.
+	from := openAPIDoc(t, "2024-01", `"text":{"type":"string"}`, `"ok":{"type":"boolean"}`)
+	to := openAPIDoc(t, "2024-06", `"count":{"type":"integer"}`, `"ok":{"type":"boolean"}`)
+
+	p, err := DraftShim(from, to)
+	if err != nil {
+		t.Fatalf("DraftShim: %v", err)
+	}
+	wantReq := []StanzaProposal{
+		{Verb: transform.KindDefault, Args: DefaultArgs{Field: "count", Value: 0}, Confidence: Confident, Signals: []Signal{PureAddSignal()}},
+	}
+	if !reflect.DeepEqual(p.Request, wantReq) {
+		t.Errorf("request proposals = %+v, want %+v", p.Request, wantReq)
+	}
+	if len(p.Notes) != 1 || !strings.Contains(p.Notes[0], `"text"`) {
+		t.Errorf("expected one note for removed request field %q; got %v", "text", p.Notes)
+	}
+}
+
+func TestDraftShimUnrelatedNamesNotRenamed(t *testing.T) {
+	// `text` and `message` are the canonical ambiguous case — same type,
+	// no shared structure. The pair-matcher does NOT auto-rename them;
+	// the candidates-block renderer surfaces them for human
+	// disambiguation instead.
+	from := openAPIDoc(t, "2024-01", `"text":{"type":"string"}`, `"ok":{"type":"boolean"}`)
+	to := openAPIDoc(t, "2024-06", `"message":{"type":"string"}`, `"ok":{"type":"boolean"}`)
+
+	p, err := DraftShim(from, to)
+	if err != nil {
+		t.Fatalf("DraftShim: %v", err)
+	}
+	for _, s := range p.Request {
+		if s.Verb == transform.KindRename {
+			t.Errorf("unrelated names must not auto-rename; got %+v", s)
+		}
+	}
+	if len(p.Notes) != 1 || !strings.Contains(p.Notes[0], `"text"`) {
+		t.Errorf("expected one note for removed field %q; got %v", "text", p.Notes)
 	}
 }
 

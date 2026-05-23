@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strings"
 
 	"github.com/alternet-dev/wavefront/internal/transform"
 )
@@ -53,6 +54,71 @@ func (DefaultArgs) isStanzaArgs()     {}
 func (OptionalizeArgs) isStanzaArgs() {}
 func (CoerceArgs) isStanzaArgs()      {}
 
+// SignalKind enumerates the structural observations the drafter can
+// record about a proposed stanza or candidate pair. A bare kind
+// describes a structural fact on its own; a parametric kind carries a
+// primitive-type token in the accompanying Signal.Value.
+type SignalKind string
+
+const (
+	SignalKindPureAdd    SignalKind = "pure-add"
+	SignalKindTypeChange SignalKind = "type-change"
+	SignalKindFromType   SignalKind = "from"
+	SignalKindToType     SignalKind = "to"
+	SignalKindCaseRename SignalKind = "case-rename"
+	SignalKindSameType   SignalKind = "same-type"
+	SignalKindNoName     SignalKind = "no-name-signal"
+)
+
+// Signal is one structural observation the drafter recorded about a
+// proposed stanza or candidate pair. Bare signals carry no Value;
+// parametric signals carry a primitive-type token. Build a Signal
+// through one of the constructor functions below — they enforce the
+// bare-vs-parametric invariant — so a renderer downstream can rely on
+// String() emitting the canonical "kind" or "kind:value" form without
+// re-validating.
+type Signal struct {
+	Kind  SignalKind
+	Value string // empty for bare signals
+}
+
+// String returns the canonical surfaced form: "kind" for bare signals,
+// "kind:value" for parametric ones. The renderer joins these with ", "
+// when emitting the explanatory YAML comment alongside a stanza.
+func (s Signal) String() string {
+	if s.Value == "" {
+		return string(s.Kind)
+	}
+	return string(s.Kind) + ":" + s.Value
+}
+
+// PureAddSignal is the bare observation that a field is present in the
+// "to" shape only.
+func PureAddSignal() Signal { return Signal{Kind: SignalKindPureAdd} }
+
+// TypeChangeSignal is the bare observation that a field's primitive
+// type changed; pair it with FromTypeSignal and ToTypeSignal to carry
+// the before/after tokens.
+func TypeChangeSignal() Signal { return Signal{Kind: SignalKindTypeChange} }
+
+// FromTypeSignal carries the "from" side primitive type of a change.
+func FromTypeSignal(t string) Signal { return Signal{Kind: SignalKindFromType, Value: t} }
+
+// ToTypeSignal carries the "to" side primitive type of a change.
+func ToTypeSignal(t string) Signal { return Signal{Kind: SignalKindToType, Value: t} }
+
+// CaseRenameSignal is the bare observation that two field names share
+// their case-and-separator-normalized form.
+func CaseRenameSignal() Signal { return Signal{Kind: SignalKindCaseRename} }
+
+// SameTypeSignal carries the shared primitive type of a rename or
+// candidate pair.
+func SameTypeSignal(t string) Signal { return Signal{Kind: SignalKindSameType, Value: t} }
+
+// NoNameSignal is the bare observation that a pair shares no name signal
+// at all (same type but otherwise unrelated identifiers).
+func NoNameSignal() Signal { return Signal{Kind: SignalKindNoName} }
+
 // StanzaProposal is one drafted transform stanza, before any YAML
 // rendering. Verb is the canonical transform.Kind that selects which
 // StanzaArgs implementer is held in Args; Signals records the structural
@@ -62,7 +128,7 @@ type StanzaProposal struct {
 	Verb       transform.Kind
 	Args       StanzaArgs
 	Confidence Confidence
-	Signals    []string
+	Signals    []Signal
 }
 
 // ShimProposal is the draft of a single resolution.yaml override entry:
@@ -78,16 +144,18 @@ type ShimProposal struct {
 
 // DraftShim compares two OpenAPI documents — the frozen "from" contract
 // and the drifted "to" contract — and proposes a transform-shim override
-// that bridges them. It detects three confident change classes at the
-// request and response message's top-level fields:
+// that bridges them. It detects four change classes at the request and
+// response message's top-level fields:
 //
 //   - a field in the "to" shape that the "from" shape lacks (a pure
 //     addition) becomes a `default` stanza filling the new field with a
 //     type-appropriate placeholder
 //   - a field present in both but with a changed primitive type becomes
 //     a `coerce` stanza
-//   - a field in the "from" shape that the "to" shape lacks (a pure
-//     removal) is surfaced as a note rather than a stanza, because the
+//   - a removed/added pair whose names case-normalize to the same string
+//     and share a primitive type becomes a confident `rename` stanza
+//   - a field in the "from" shape that has no peer left after pair
+//     matching is surfaced as a note rather than a stanza, because the
 //     transform verb set has no way to drop a known field — the operator
 //     must reconcile the gap by hand
 //
@@ -177,6 +245,13 @@ func operationSchemas(doc openAPI) (req, resp *schema, err error) {
 // arrives and a `to` shape that must leave. It emits stanzas for the
 // changes the transform verbs cover; everything it cannot mechanically
 // express is appended to notes for human review.
+//
+// Confident pair-matching: a removed field and an added field whose names
+// case-normalize to the same string and share a primitive type are paired
+// into a `rename` stanza instead of a separate add and remove.
+// Lower-confidence pairings (different normalized names, non-primitive
+// types) are deliberately left unmatched here — those need human
+// disambiguation rather than a guess.
 func draftDirection(from, to *schema, side string) ([]StanzaProposal, []string) {
 	fromFields := topLevelProperties(from)
 	toFields := topLevelProperties(to)
@@ -186,23 +261,46 @@ func draftDirection(from, to *schema, side string) ([]StanzaProposal, []string) 
 	inTo := makeSet(toNames)
 	inFrom := makeSet(fromNames)
 
+	var removed, added []string
+	for _, n := range fromNames {
+		if !inTo[n] {
+			removed = append(removed, n)
+		}
+	}
+	for _, n := range toNames {
+		if !inFrom[n] {
+			added = append(added, n)
+		}
+	}
+
+	renames, unmatchedRemoved, unmatchedAdded := matchCaseRenames(removed, added, fromFields, toFields)
+
 	var props []StanzaProposal
 	var notes []string
 
-	// Fields added (in `to`, not in `from`) — fill via `default`.
-	for _, name := range toNames {
-		if inFrom[name] {
-			continue
-		}
+	// Confident renames take precedence over the underlying add/remove.
+	for _, r := range renames {
+		props = append(props, StanzaProposal{
+			Verb:       transform.KindRename,
+			Args:       RenameArgs{From: r.from, To: r.to},
+			Confidence: Confident,
+			Signals:    []Signal{CaseRenameSignal(), SameTypeSignal(primitiveType(fromFields[r.from]))},
+		})
+	}
+
+	// Unmatched additions still need a `default` so an old client's
+	// request body carries the new contract's required field.
+	for _, name := range unmatchedAdded {
 		props = append(props, StanzaProposal{
 			Verb:       transform.KindDefault,
 			Args:       DefaultArgs{Field: name, Value: zeroForSchema(toFields[name])},
 			Confidence: Confident,
-			Signals:    []string{"pure-add"},
+			Signals:    []Signal{PureAddSignal()},
 		})
 	}
 
-	// Type changes for fields present in both.
+	// Type changes for fields present in both — orthogonal to rename
+	// matching, since both endpoints carry the same name.
 	for _, name := range fromNames {
 		if !inTo[name] {
 			continue
@@ -216,23 +314,86 @@ func draftDirection(from, to *schema, side string) ([]StanzaProposal, []string) 
 			Verb:       transform.KindCoerce,
 			Args:       CoerceArgs{Field: name, To: toT},
 			Confidence: Confident,
-			Signals:    []string{"type-change", "from:" + fromT, "to:" + toT},
+			Signals:    []Signal{TypeChangeSignal(), FromTypeSignal(fromT), ToTypeSignal(toT)},
 		})
 	}
 
-	// Fields removed (in `from`, not in `to`) — the verb set has no way
-	// to drop a known field on this side; surface as a note so the human
-	// can decide.
-	for _, name := range fromNames {
-		if inTo[name] {
-			continue
-		}
+	// Unmatched removals: the verb set has no way to drop a known field
+	// on this side; surface as a note so the human can decide.
+	for _, name := range unmatchedRemoved {
 		notes = append(notes, fmt.Sprintf(
 			"%s field %q is present in the from shape but absent from the to shape; the transform verb set has no way to drop a known field, so the operator must reconcile this manually",
 			side, name))
 	}
 
 	return props, notes
+}
+
+// renamePair is a single confident rename: the field name in the `from`
+// shape and the field name it should take in the `to` shape.
+type renamePair struct{ from, to string }
+
+// matchCaseRenames pairs a removed field with an added field when their
+// case-normalized names are identical and they share a primitive type.
+// Anything else is left unmatched for the add/note behavior.
+//
+// The matching is one-to-one and order-stable: each removed field is
+// considered once, against the still-unconsumed additions, in declared
+// order. The current scoring is binary — a pair either matches both
+// signals (normalized name + primitive type) or it doesn't.
+func matchCaseRenames(removed, added []string, fromSchemas, toSchemas map[string]*schema) ([]renamePair, []string, []string) {
+	usedAdded := make(map[string]bool)
+	var pairs []renamePair
+	var unmatchedRemoved []string
+
+	for _, r := range removed {
+		normR := normalizeFieldName(r)
+		fromT := primitiveType(fromSchemas[r])
+		if normR == "" || fromT == "" {
+			unmatchedRemoved = append(unmatchedRemoved, r)
+			continue
+		}
+		matched := ""
+		for _, a := range added {
+			if usedAdded[a] {
+				continue
+			}
+			if normalizeFieldName(a) != normR {
+				continue
+			}
+			toT := primitiveType(toSchemas[a])
+			if toT == "" || toT != fromT {
+				continue
+			}
+			matched = a
+			break
+		}
+		if matched == "" {
+			unmatchedRemoved = append(unmatchedRemoved, r)
+			continue
+		}
+		pairs = append(pairs, renamePair{from: r, to: matched})
+		usedAdded[matched] = true
+	}
+
+	var unmatchedAdded []string
+	for _, a := range added {
+		if !usedAdded[a] {
+			unmatchedAdded = append(unmatchedAdded, a)
+		}
+	}
+	return pairs, unmatchedRemoved, unmatchedAdded
+}
+
+// normalizeFieldName folds a field name to its case- and separator-free
+// form. `userName`, `user_name`, `user-name`, and `USERNAME` all collapse
+// to `username` — the signal the drafter uses to declare a confident
+// rename.
+func normalizeFieldName(s string) string {
+	s = strings.ToLower(s)
+	s = strings.ReplaceAll(s, "_", "")
+	s = strings.ReplaceAll(s, "-", "")
+	return s
 }
 
 // topLevelProperties returns the properties map of an object schema, or
