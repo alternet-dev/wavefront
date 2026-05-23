@@ -44,3 +44,21 @@ jobs:
         with:
           go-version-file: go.mod
       - run: test -z "$(gofmt -l .)"
+
+  buf-breaking:
+    name: buf-breaking
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: bufbuild/buf-setup-action@v1
+      - run: buf lint
+      - name: buf breaking against trunk
+        run: |
+          if ! git ls-tree -r origin/trunk --name-only | grep -q '\.proto$'; then
+            echo "No .proto files on trunk yet; bootstrap run, breaking gate is a no-op."
+            exit 0
+          fi
+          git show-ref --verify --quiet refs/heads/trunk || git branch trunk origin/trunk
+          buf breaking --against ".git#branch=trunk"

@@ -1,0 +1,20 @@
+// wavefront.v0.Error — the fixed, version-independent wire-error message
+// returned to a client as the body of any wavefront-originated failure
+// (see internal/wireerror). The v0 package suffix tracks wavefront's own
+// pre-1.0 status; the wire schema rolls forward with the project's major
+// version and is otherwise append-only and stable.
+//
+// `buf breaking` in CI enforces field-number / type stability mechanically;
+// internal/wireerror/proto_consistency_test.go pins the in-code descriptor
+// to this file.
+
+syntax = "proto3";
+
+package wavefront.v0;
+
+option go_package = "github.com/alternet-dev/wavefront/proto/wavefront/v0;wavefrontv0";
+
+message Error {
+  string code = 1;
+  string message = 2;
+}

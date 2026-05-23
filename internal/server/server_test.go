@@ -220,7 +220,7 @@ func TestUnknownContractVersionIs400(t *testing.T) {
 		t.Errorf("Content-Type = %q", resp.Header.Get("Content-Type"))
 	}
 	if body, _ := io.ReadAll(resp.Body); len(body) == 0 {
-		t.Error("error body (wavefront.v1.Error) should be non-empty")
+		t.Error("error body (wavefront.v0.Error) should be non-empty")
 	}
 }
 

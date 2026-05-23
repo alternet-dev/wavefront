@@ -1,0 +1,15 @@
+version: v2
+modules:
+  - path: proto
+lint:
+  use:
+    - STANDARD
+  except:
+    # The wavefront wire schema is intentionally pre-1.0, tracking the
+    # product's own v0 status. The PACKAGE_VERSION_SUFFIX rule expects a
+    # v1+ stability track and treats the bare `v0` suffix as malformed;
+    # exclude it so the package can name what it actually is.
+    - PACKAGE_VERSION_SUFFIX
+breaking:
+  use:
+    - FILE

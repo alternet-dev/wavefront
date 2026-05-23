@@ -26,6 +26,6 @@ func TestUnsupportedContractVersionReturns400(t *testing.T) {
 		t.Errorf("X-Wavefront-Error = %q", resp.Header.Get("X-Wavefront-Error"))
 	}
 	if body, _ := io.ReadAll(resp.Body); len(body) == 0 {
-		t.Error("wavefront.v1.Error body should be non-empty")
+		t.Error("wavefront.v0.Error body should be non-empty")
 	}
 }

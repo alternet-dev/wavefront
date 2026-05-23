@@ -14,7 +14,7 @@ func decodeBody(t *testing.T, b []byte) (code, message string) {
 	t.Helper()
 	m := dynamicpb.NewMessage(errorMD)
 	if err := proto.Unmarshal(b, m); err != nil {
-		t.Fatalf("unmarshal wavefront.v1.Error: %v", err)
+		t.Fatalf("unmarshal wavefront.v0.Error: %v", err)
 	}
 	c := m.Get(errorMD.Fields().ByName("code")).String()
 	msg := m.Get(errorMD.Fields().ByName("message")).String()

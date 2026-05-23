@@ -146,7 +146,7 @@ from a backend domain error) return:
 - an extension header **`X-Wavefront-Error: <code>`** (machine-readable; an old
   client simply ignores it),
 - **`X-Wavefront-Contract-Version`** on *every* response (success and error),
-- a body that is a fixed, version-independent **`wavefront.v1.Error { code,
+- a body that is a fixed, version-independent **`wavefront.v0.Error { code,
   message }`** protobuf message — decodable even when negotiation failed,
   because the type never varies.
 
@@ -161,7 +161,7 @@ from a backend domain error) return:
 | `transform_failed` | 502 | `Content-Type` | a response transform verb can't apply — live internal shape drifted from the bundle's response stanzas |
 
 No client library is shipped: a client checks the HTTP status; structured
-handling (reading the header or decoding `wavefront.v1.Error`) is the
+handling (reading the header or decoding `wavefront.v0.Error`) is the
 consumer's own choice.
 
 ## Forward compatibility
@@ -169,3 +169,11 @@ consumer's own choice.
 Removing or renaming a schema field or a transform verb is a breaking change.
 The bundle schema and the transform vocabulary are append-only — a break is a
 deliberate, reviewed decision, never a silent one.
+
+The `wavefront.v0.Error` wire message is declared canonically at
+[`proto/wavefront/v0/error.proto`](../proto/wavefront/v0/error.proto). It is
+gated by `buf breaking` in CI against `trunk`, so a breaking edit to the
+proto is mechanically refused. The in-code descriptor in
+`internal/wireerror/errorproto.go` is pinned to this file by
+`internal/wireerror/proto_consistency_test.go` — the two cannot drift apart
+without a test failure.

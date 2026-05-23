@@ -9,7 +9,7 @@ import (
 )
 
 // errorMD is the descriptor for the fixed, version-independent
-// `wavefront.v1.Error { string code = 1; string message = 2; }`. It is built
+// `wavefront.v0.Error { string code = 1; string message = 2; }`. It is built
 // in-code (no .proto, no protoc, no codegen) for consistency with the bundle
 // generator's in-code descriptor construction, and because the type never
 // varies — it must encode even when contract negotiation failed.
@@ -17,8 +17,8 @@ var errorMD protoreflect.MessageDescriptor
 
 func init() {
 	fdp := &descriptorpb.FileDescriptorProto{
-		Name:    proto.String("wavefront/v1/error.proto"),
-		Package: proto.String("wavefront.v1"),
+		Name:    proto.String("wavefront/v0/error.proto"),
+		Package: proto.String("wavefront.v0"),
 		Syntax:  proto.String("proto3"),
 		MessageType: []*descriptorpb.DescriptorProto{{
 			Name: proto.String("Error"),
@@ -42,7 +42,7 @@ func init() {
 	}
 	fd, err := protodesc.NewFile(fdp, nil)
 	if err != nil {
-		panic("wireerror: building wavefront.v1.Error descriptor: " + err.Error())
+		panic("wireerror: building wavefront.v0.Error descriptor: " + err.Error())
 	}
 	errorMD = fd.Messages().Get(0)
 }
@@ -53,7 +53,7 @@ func marshalError(code, message string) []byte {
 	m.Set(errorMD.Fields().ByName("message"), protoreflect.ValueOfString(message))
 	b, err := proto.Marshal(m)
 	if err != nil {
-		panic("wireerror: marshaling wavefront.v1.Error: " + err.Error())
+		panic("wireerror: marshaling wavefront.v0.Error: " + err.Error())
 	}
 	return b
 }
