@@ -1,0 +1,43 @@
+{
+  "openapi": "3.0.0",
+  "info": {"title": "login", "version": "2024-02"},
+  "paths": {
+    "/v1/login": {
+      "post": {
+        "operationId": "login",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {"$ref": "#/components/schemas/LoginRequest"}
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {"$ref": "#/components/schemas/LoginReply"}
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "LoginRequest": {
+        "type": "object",
+        "properties": {
+          "user": {"type": "string"}
+        }
+      },
+      "LoginReply": {
+        "type": "object",
+        "properties": {
+          "ok": {"type": "boolean"}
+        }
+      }
+    }
+  }
+}

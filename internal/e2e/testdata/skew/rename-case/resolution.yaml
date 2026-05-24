@@ -1,0 +1,8 @@
+version: 1
+overrides:
+  - contract_version: "2024-01"
+    transform:
+      request:
+        - rename: { from: userName, to: user_name }
+      response:
+        - rename: { from: user_name, to: userName }

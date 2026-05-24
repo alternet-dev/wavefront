@@ -1,0 +1,6 @@
+version: 1
+overrides:
+  - contract_version: "2024-02"
+    transform:
+      request:
+        - default: { field: locale, value: en-US }

@@ -1,0 +1,43 @@
+{
+  "openapi": "3.0.0",
+  "info": {"title": "echo", "version": "2024-06"},
+  "paths": {
+    "/v1/echo": {
+      "post": {
+        "operationId": "echo",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {"$ref": "#/components/schemas/EchoRequest"}
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {"$ref": "#/components/schemas/EchoReply"}
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "EchoRequest": {
+        "type": "object",
+        "properties": {
+          "user_name": {"type": "string"}
+        }
+      },
+      "EchoReply": {
+        "type": "object",
+        "properties": {
+          "user_name": {"type": "string"}
+        }
+      }
+    }
+  }
+}
