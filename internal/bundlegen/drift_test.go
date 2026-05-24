@@ -104,6 +104,10 @@ func TestDraftShimRemovedRequestFieldNotesUnsupported(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DraftShim: %v", err)
 	}
+	// Without the ambiguous match, `legacy` and (no peer) would simply note. But
+	// the ambiguous pair-matcher will pair `legacy` (string) with no addition
+	// because there's none; expect a Note. Same for `user` — kept on both sides.
+	// Since there is no addition to pair with, `legacy` falls through as a Note.
 	if len(p.Request) != 0 {
 		t.Errorf("request proposals = %+v, want empty (drop-unknown is unsupported)", p.Request)
 	}
@@ -115,7 +119,8 @@ func TestDraftShimRemovedRequestFieldNotesUnsupported(t *testing.T) {
 func TestDraftShimAddedResponseFieldNotesUnsupported(t *testing.T) {
 	// Backend now returns `region`; the old contract doesn't declare it.
 	// The adapter's strict JSON unmarshal can't see unknown fields, and
-	// the verb set has no way to strip them from the response.
+	// the verb set has no way to strip them from the response. The
+	// drafter records a Note for the operator instead of a stanza.
 	from := openAPIDoc(t, "2024-01", `"user":{"type":"string"}`, `"name":{"type":"string"}`)
 	to := openAPIDoc(t, "2024-06", `"user":{"type":"string"}`, `"name":{"type":"string"},"region":{"type":"string"}`)
 
@@ -194,11 +199,11 @@ func TestDraftShimDifferentTypesNotRenamed(t *testing.T) {
 	}
 }
 
-func TestDraftShimUnrelatedNamesNotRenamed(t *testing.T) {
+func TestDraftShimUnrelatedNamesProduceCandidates(t *testing.T) {
 	// `text` and `message` are the canonical ambiguous case — same type,
-	// no shared structure. The pair-matcher does NOT auto-rename them;
-	// the candidates-block renderer surfaces them for human
-	// disambiguation instead.
+	// no shared structure. The drafter surfaces them as a candidate pair
+	// the renderer emits as an `# OPTION A — rename` / `# OPTION B —
+	// delete + add` block; no auto-rename, no note.
 	from := openAPIDoc(t, "2024-01", `"text":{"type":"string"}`, `"ok":{"type":"boolean"}`)
 	to := openAPIDoc(t, "2024-06", `"message":{"type":"string"}`, `"ok":{"type":"boolean"}`)
 
@@ -211,8 +216,144 @@ func TestDraftShimUnrelatedNamesNotRenamed(t *testing.T) {
 			t.Errorf("unrelated names must not auto-rename; got %+v", s)
 		}
 	}
-	if len(p.Notes) != 1 || !strings.Contains(p.Notes[0], `"text"`) {
-		t.Errorf("expected one note for removed field %q; got %v", "text", p.Notes)
+	wantCands := []CandidatePair{
+		{From: "text", To: "message", Type: "string", Signals: []Signal{SameTypeSignal("string"), NoNameSignal()}},
+	}
+	if !reflect.DeepEqual(p.RequestCandidates, wantCands) {
+		t.Errorf("request candidates = %+v, want %+v", p.RequestCandidates, wantCands)
+	}
+	if len(p.Notes) != 0 {
+		t.Errorf("expected no notes — the ambiguous pair absorbed both ends; got %v", p.Notes)
+	}
+}
+
+func TestDraftShimStrictForcesCandidatesForCaseRenames(t *testing.T) {
+	// Default mode auto-matches userName ↔ user_name as a confident
+	// rename. Strict mode suppresses every confident match and reports
+	// the pair as a candidate instead — the operator chooses.
+	from := openAPIDoc(t, "2024-01", `"userName":{"type":"string"}`, `"ok":{"type":"boolean"}`)
+	to := openAPIDoc(t, "2024-06", `"user_name":{"type":"string"}`, `"ok":{"type":"boolean"}`)
+
+	p, err := DraftShimStrict(from, to)
+	if err != nil {
+		t.Fatalf("DraftShimStrict: %v", err)
+	}
+	for _, s := range p.Request {
+		if s.Verb == transform.KindRename {
+			t.Errorf("strict mode should not auto-rename; got %+v", s)
+		}
+	}
+	wantCands := []CandidatePair{
+		{From: "userName", To: "user_name", Type: "string", Signals: []Signal{SameTypeSignal("string"), NoNameSignal()}},
+	}
+	if !reflect.DeepEqual(p.RequestCandidates, wantCands) {
+		t.Errorf("request candidates = %+v, want %+v", p.RequestCandidates, wantCands)
+	}
+}
+
+func TestRenderYAMLIncludesConfidentStanzas(t *testing.T) {
+	from := openAPIDoc(t, "2024-01", `"userName":{"type":"string"}`, `"ok":{"type":"boolean"}`)
+	to := openAPIDoc(t, "2024-06", `"user_name":{"type":"string"},"locale":{"type":"string"}`, `"ok":{"type":"boolean"}`)
+
+	p, err := DraftShim(from, to)
+	if err != nil {
+		t.Fatalf("DraftShim: %v", err)
+	}
+	out := p.RenderYAML(RenderOptions{Date: "2026-05-23"})
+
+	for _, want := range []string{
+		"# Drafted by `bundle draft-shim` on 2026-05-23.",
+		`- contract_version: "2024-01"`,
+		`target: "2024-06"`,
+		"    request:",
+		"      # CONFIDENT: case-rename, same-type:string",
+		`      - rename: { from: "userName", to: "user_name" }`,
+		"      # CONFIDENT: pure-add",
+		`      - default: { field: "locale", value: "" }`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("rendered YAML missing %q\n--- output ---\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "AMBIGUOUS") {
+		t.Errorf("no candidates expected; got AMBIGUOUS block:\n%s", out)
+	}
+}
+
+func TestRenderYAMLEmitsCandidatesBlock(t *testing.T) {
+	from := openAPIDoc(t, "2024-01", `"text":{"type":"string"}`, `"ok":{"type":"boolean"}`)
+	to := openAPIDoc(t, "2024-06", `"message":{"type":"string"}`, `"ok":{"type":"boolean"}`)
+
+	p, err := DraftShim(from, to)
+	if err != nil {
+		t.Fatalf("DraftShim: %v", err)
+	}
+	out := p.RenderYAML(RenderOptions{Date: "2026-05-23"})
+
+	for _, want := range []string{
+		`# AMBIGUOUS pair "text" ↔ "message"`,
+		"# Pick exactly one option, edit, and delete the other comment block:",
+		"# OPTION A — interpret as a rename:",
+		`# - rename: { from: "text", to: "message" }`,
+		"# OPTION B — interpret as separate add + remove:",
+		`# - default: { field: "message", value: "" }`,
+		"# (note: dropping the obsolete request-side \"text\"",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("rendered YAML missing %q\n--- output ---\n%s", want, out)
+		}
+	}
+	// The candidate block must remain inside the comment lane — a
+	// reviewer pasting the file unedited gets a no-op override, never an
+	// accidental auto-rename.
+	for _, line := range strings.Split(out, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "- rename:") && !strings.HasPrefix(trimmed, "# - rename:") {
+			t.Errorf("candidate rename leaked outside the comment lane: %q", line)
+		}
+	}
+}
+
+func TestRenderYAMLOmitsEmptyDirection(t *testing.T) {
+	// Only the request side has a change; the response direction has no
+	// stanzas. The renderer should skip the `response:` key entirely
+	// (matching the bundle's convention of treating absent keys as no-op).
+	from := openAPIDoc(t, "2024-01", `"user":{"type":"string"}`, `"ok":{"type":"boolean"}`)
+	to := openAPIDoc(t, "2024-06", `"user":{"type":"string"},"locale":{"type":"string"}`, `"ok":{"type":"boolean"}`)
+
+	p, err := DraftShim(from, to)
+	if err != nil {
+		t.Fatalf("DraftShim: %v", err)
+	}
+	out := p.RenderYAML(RenderOptions{Date: "2026-05-23"})
+	if strings.Contains(out, "    response:") {
+		t.Errorf("rendered YAML should omit empty response direction:\n%s", out)
+	}
+	if !strings.Contains(out, "    request:") {
+		t.Errorf("rendered YAML should keep the populated request direction:\n%s", out)
+	}
+}
+
+func TestRenderYAMLIncludesNotes(t *testing.T) {
+	// A removed-from-new request field becomes a Note (the verb set has
+	// no drop verb). The renderer surfaces every Note in a top comment
+	// block.
+	from := openAPIDoc(t, "2024-01", `"user":{"type":"string"},"legacy":{"type":"object","properties":{}}`, `"ok":{"type":"boolean"}`)
+	to := openAPIDoc(t, "2024-06", `"user":{"type":"string"}`, `"ok":{"type":"boolean"}`)
+
+	p, err := DraftShim(from, to)
+	if err != nil {
+		t.Fatalf("DraftShim: %v", err)
+	}
+	if len(p.Notes) == 0 {
+		t.Fatal("expected at least one note (non-primitive remove)")
+	}
+	out := p.RenderYAML(RenderOptions{Date: "2026-05-23"})
+	if !strings.Contains(out, "# Notes from the drafter (these need human reconciliation):") {
+		t.Errorf("rendered YAML missing Notes header:\n%s", out)
+	}
+	if !strings.Contains(out, `"legacy"`) {
+		t.Errorf("rendered YAML missing legacy-field note content:\n%s", out)
 	}
 }
 
