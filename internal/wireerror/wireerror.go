@@ -1,6 +1,6 @@
 // Package wireerror is the error contract: the typed, wavefront-originated
 // failures returned to a client as a proper HTTP status + standard headers +
-// the `X-Wavefront-Error` code + a fixed `wavefront.v1.Error` protobuf body.
+// the `X-Wavefront-Error` code + a fixed `wavefront.v0.Error` protobuf body.
 // Established in v0.1 and stable through v1.0 (iterated additively). The code/
 // status/header table here is authoritative against docs/protocol.md.
 package wireerror
@@ -43,7 +43,7 @@ func (e *Error) Headers() http.Header {
 	return h
 }
 
-// ProtoBody is the marshaled wavefront.v1.Error response body.
+// ProtoBody is the marshaled wavefront.v0.Error response body.
 func (e *Error) ProtoBody() []byte { return marshalError(e.code, e.message) }
 
 func msgOr(msg, def string) string {

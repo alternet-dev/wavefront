@@ -21,7 +21,7 @@ func TestTransformFailedRequestIs422(t *testing.T) {
 	}
 	m := dynamicpb.NewMessage(errorMD)
 	if err := proto.Unmarshal(e.ProtoBody(), m); err != nil {
-		t.Fatalf("ProtoBody not a wavefront.v1.Error: %v", err)
+		t.Fatalf("ProtoBody not a wavefront.v0.Error: %v", err)
 	}
 	if got := m.Get(errorMD.Fields().ByName("code")).String(); got != "transform_failed" {
 		t.Errorf("proto code=%q want transform_failed", got)
@@ -47,7 +47,7 @@ func TestTransformFailedResponseIs502(t *testing.T) {
 	}
 	m := dynamicpb.NewMessage(errorMD)
 	if err := proto.Unmarshal(e.ProtoBody(), m); err != nil {
-		t.Fatalf("ProtoBody not a wavefront.v1.Error: %v", err)
+		t.Fatalf("ProtoBody not a wavefront.v0.Error: %v", err)
 	}
 	if got := m.Get(errorMD.Fields().ByName("code")).String(); got != "transform_failed" {
 		t.Errorf("proto code=%q want transform_failed", got)
