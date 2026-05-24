@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	httppprof "net/http/pprof"
 	"sync/atomic"
@@ -40,6 +41,7 @@ type Server struct {
 	adapter adapter.Adapter
 	client  *http.Client
 	metrics *metrics
+	logger  *slog.Logger
 }
 
 func New(cfg *config.Config) *Server {
@@ -47,9 +49,19 @@ func New(cfg *config.Config) *Server {
 		cfg:     cfg,
 		client:  &http.Client{}, // the per-request context owns the deadline
 		metrics: newMetrics(),
+		logger:  slog.Default(),
 	}
 	s.adapter = adapter.NewProtoJSON(s) // *Server is the MessageResolver
 	return s
+}
+
+// SetLogger overrides the structured logger used by the request path. The
+// default is slog.Default(). Tests use this to capture per-request log lines.
+func (s *Server) SetLogger(l *slog.Logger) {
+	if l == nil {
+		l = slog.Default()
+	}
+	s.logger = l
 }
 
 // SetBundle installs the bundle and marks the proxy ready.

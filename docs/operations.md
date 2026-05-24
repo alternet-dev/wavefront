@@ -54,6 +54,12 @@ not send traffic to a fresh pod until it has loaded.
 - Lifecycle events — config, bundle load, listen, shutdown — are logged as
   structured JSON. Client tracing headers are forwarded to the upstream, not
   terminated.
+- Every proxied request emits one structured `slog` line with
+  `contract_version`, `route`, `target`, `resolution_kind`
+  (`route` / `transform`), `upstream_status`, `outcome`, and `latency_ms`.
+  Successful requests log at `info`; non-2xx upstream and pre-negotiate
+  failures at `warn`; `transform_failed` at `error`. The same fields ship
+  through any handler the operator configures via `slog.SetDefault`.
 - Every response (success or error) carries `X-Wavefront-Contract-Version`,
   so an ingress log or client trace pins which version a request resolved
   against without help from the proxy.
