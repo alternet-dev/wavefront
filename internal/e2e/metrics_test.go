@@ -42,7 +42,8 @@ func TestMetricsErrorsLabeledByCode(t *testing.T) {
 
 func TestMetricsRequestsCounterIncrements(t *testing.T) {
 	// Claim: wavefront_requests_total increments once per proxy request,
-	// regardless of outcome.
+	// regardless of outcome, and the increment is labelled by the negotiated
+	// contract_version.
 	h := Spawn(t, SpawnOpts{
 		BackendHandler: func(w http.ResponseWriter, _ *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
@@ -68,12 +69,42 @@ func TestMetricsRequestsCounterIncrements(t *testing.T) {
 	defer mresp.Body.Close()
 	body, _ := io.ReadAll(mresp.Body)
 
-	re := regexp.MustCompile(`wavefront_requests_total\s+(\d+)`)
+	re := regexp.MustCompile(`wavefront_requests_total\{[^}]*contract_version="2024-11"[^}]*\}\s+(\d+)`)
 	m := re.FindStringSubmatch(string(body))
 	if m == nil {
-		t.Fatalf("metrics missing wavefront_requests_total; body:\n%s", body)
+		t.Fatalf(`metrics missing wavefront_requests_total{contract_version="2024-11"}; body:\n%s`, body)
 	}
 	if m[1] != "3" {
-		t.Errorf("wavefront_requests_total = %s, want 3", m[1])
+		t.Errorf(`wavefront_requests_total{contract_version="2024-11"} = %s, want 3`, m[1])
+	}
+}
+
+func TestMetricsRequestsLabelsUnknownOnNegotiationFailure(t *testing.T) {
+	// Claim: a request that fails contract-version negotiation still counts,
+	// labelled contract_version="unknown" so cohorts don't pollute the metric
+	// with arbitrary client-supplied header values.
+	h := Spawn(t, SpawnOpts{})
+
+	req, _ := http.NewRequest(http.MethodPost, h.Proxy.URL, strings.NewReader(""))
+	req.Header.Set("X-Api-Contract-Version", "9999-99")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	mresp, err := http.Get(h.Ops.URL + "/metrics")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mresp.Body.Close()
+	body, _ := io.ReadAll(mresp.Body)
+
+	re := regexp.MustCompile(`wavefront_requests_total\{[^}]*contract_version="unknown"[^}]*\}\s+(\d+)`)
+	if !re.MatchString(string(body)) {
+		t.Fatalf(`metrics missing wavefront_requests_total{contract_version="unknown"}; body:\n%s`, body)
+	}
+	if re := regexp.MustCompile(`wavefront_requests_total\{[^}]*contract_version="9999-99"`); re.MatchString(string(body)) {
+		t.Errorf(`metrics labelled the unknown client version verbatim; cardinality would be unbounded. body:\n%s`, body)
 	}
 }

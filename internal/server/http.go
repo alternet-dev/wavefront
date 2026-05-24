@@ -22,6 +22,13 @@ const (
 	headerWavefrontError  = "X-Wavefront-Error"
 )
 
+// versionUnknown is the contract_version label value (and response-header
+// value) used when negotiation has not yet resolved a real version: a
+// pre-negotiate error, or a client header that does not name a known
+// contract. It pins metric cardinality and keeps the response header
+// well-defined.
+const versionUnknown = "unknown"
+
 // hopByHop are the RFC 7230 §6.1 connection-scoped headers plus the
 // framing/content headers net/http owns for the freshly-built upstream
 // request. wavefront forwards every OTHER client header through untouched —
@@ -67,12 +74,12 @@ func forwardClientHeaders(dst, src http.Header) {
 }
 
 func (s *Server) proxy(w http.ResponseWriter, r *http.Request) {
-	s.metrics.requests.Inc()
-	requested := r.Header.Get(s.cfg.ContractVersionHeader)
+	version := versionUnknown
+	defer func() { s.metrics.requests.WithLabelValues(version).Inc() }()
 
 	b := s.bundle.Load()
 	if b == nil {
-		s.writeError(w, wireerror.UpstreamError("no bundle loaded"), requested)
+		s.writeError(w, wireerror.UpstreamError("no bundle loaded"), version, "")
 		return
 	}
 
@@ -81,22 +88,23 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		var mbe *http.MaxBytesError
 		if errors.As(err, &mbe) {
-			s.writeError(w, wireerror.RequestBodyTooLarge(""), requested)
+			s.writeError(w, wireerror.RequestBodyTooLarge(""), version, "")
 			return
 		}
-		s.writeError(w, wireerror.DecodeFailed("could not read request body"), requested)
+		s.writeError(w, wireerror.DecodeFailed("could not read request body"), version, "")
 		return
 	}
 
-	c, werr := negotiate.Resolve(b, requested)
+	c, werr := negotiate.Resolve(b, r.Header.Get(s.cfg.ContractVersionHeader))
 	if werr != nil {
-		s.writeError(w, werr, requested)
+		s.writeError(w, werr, version, "")
 		return
 	}
+	version = c.ContractVersion()
 
 	call, werr := s.adapter.DecodeRequest(c, body)
 	if werr != nil {
-		s.writeError(w, werr, c.ContractVersion())
+		s.writeError(w, werr, version, "")
 		return
 	}
 
@@ -104,7 +112,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request) {
 	for _, link := range chain {
 		call.Body, werr = transform.ApplyRequest(link.RequestOps(), call.Body)
 		if werr != nil {
-			s.writeError(w, werr, c.ContractVersion())
+			s.writeError(w, werr, version, "request")
 			return
 		}
 	}
@@ -115,7 +123,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request) {
 	terminal := chain[len(chain)-1]
 	base, ok := s.cfg.TargetURL(terminal.Target())
 	if !ok {
-		s.writeError(w, wireerror.UpstreamError("unknown backend target "+terminal.Target()), c.ContractVersion())
+		s.writeError(w, wireerror.UpstreamError("unknown backend target "+terminal.Target()), version, "")
 		return
 	}
 	url := strings.TrimRight(base, "/") + call.Path
@@ -124,7 +132,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request) {
 	}
 	ureq, err := http.NewRequestWithContext(ctx, call.Method, url, bytes.NewReader(call.Body))
 	if err != nil {
-		s.writeError(w, wireerror.UpstreamError("could not build upstream request"), c.ContractVersion())
+		s.writeError(w, wireerror.UpstreamError("could not build upstream request"), version, "")
 		return
 	}
 	forwardClientHeaders(ureq.Header, r.Header)
@@ -133,56 +141,52 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request) {
 	uresp, err := s.client.Do(ureq)
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) || ctx.Err() == context.DeadlineExceeded {
-			s.writeError(w, wireerror.UpstreamTimeout(""), c.ContractVersion())
+			s.writeError(w, wireerror.UpstreamTimeout(""), version, "")
 			return
 		}
-		s.writeError(w, wireerror.UpstreamError("upstream unreachable"), c.ContractVersion())
+		s.writeError(w, wireerror.UpstreamError("upstream unreachable"), version, "")
 		return
 	}
 	defer uresp.Body.Close()
 
 	upBody, err := io.ReadAll(uresp.Body)
 	if err != nil {
-		s.writeError(w, wireerror.UpstreamError("could not read upstream response"), c.ContractVersion())
+		s.writeError(w, wireerror.UpstreamError("could not read upstream response"), version, "")
 		return
 	}
 	if uresp.StatusCode < 200 || uresp.StatusCode >= 300 {
-		s.writeError(w, wireerror.UpstreamError("upstream returned status "+strconv.Itoa(uresp.StatusCode)), c.ContractVersion())
+		s.writeError(w, wireerror.UpstreamError("upstream returned status "+strconv.Itoa(uresp.StatusCode)), version, "")
 		return
 	}
 
 	for i := len(chain) - 1; i >= 0; i-- {
 		upBody, werr = transform.ApplyResponse(chain[i].ResponseOps(), upBody)
 		if werr != nil {
-			s.writeError(w, werr, c.ContractVersion())
+			s.writeError(w, werr, version, "response")
 			return
 		}
 	}
 
 	out, ct, werr := s.adapter.EncodeResponse(c, upBody)
 	if werr != nil {
-		s.writeError(w, werr, c.ContractVersion())
+		s.writeError(w, werr, version, "")
 		return
 	}
 	w.Header().Set(headerContentType, ct)
-	w.Header().Set(headerContractVersion, c.ContractVersion())
+	w.Header().Set(headerContractVersion, version)
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(out)
 }
 
-func (s *Server) writeError(w http.ResponseWriter, werr *wireerror.Error, contractVersion string) {
-	s.metrics.errors.WithLabelValues(werr.Code()).Inc()
+func (s *Server) writeError(w http.ResponseWriter, werr *wireerror.Error, version, transformOutcome string) {
+	s.metrics.errors.WithLabelValues(werr.Code(), version, transformOutcome).Inc()
 	for k, vs := range werr.Headers() {
 		for _, v := range vs {
 			w.Header().Add(k, v)
 		}
 	}
 	w.Header().Set(headerWavefrontError, werr.Code())
-	cv := strings.TrimSpace(contractVersion)
-	if cv == "" {
-		cv = "unknown"
-	}
-	w.Header().Set(headerContractVersion, cv)
+	w.Header().Set(headerContractVersion, version)
 	w.WriteHeader(werr.HTTPStatus())
 	_, _ = w.Write(werr.ProtoBody())
 }
