@@ -583,8 +583,36 @@ func isNotExist(err error) bool {
 // Verify loads the bundle at bundleDir via bundle.Load and returns the typed
 // error on any inconsistency, or nil on success. It is the thin command-facing
 // wrapper that gives a CI consumer a single pass/fail over layers,
-// resolution.yaml, and the transform chains.
+// resolution.yaml, and the transform chains. It also refuses a
+// resolution.yaml that still carries an unresolved drift-shim candidates
+// block — a draft pasted in unedited is a no-op override at runtime, but
+// shipping one signals the operator never picked an OPTION A / B and is
+// almost always a mistake.
 func Verify(bundleDir string) error {
-	_, err := bundle.Load(bundleDir)
-	return err
+	if _, err := bundle.Load(bundleDir); err != nil {
+		return err
+	}
+	return verifyNoUnresolvedCandidates(bundleDir)
+}
+
+// candidatesBlockMarker is the header `ShimProposal.RenderYAML` emits at
+// the top of every ambiguous candidates block. Its presence in a
+// committed resolution.yaml means a draft was pasted in but never
+// resolved — the operator left both OPTION A and OPTION B sitting in
+// the comment lane.
+const candidatesBlockMarker = "# AMBIGUOUS pair"
+
+func verifyNoUnresolvedCandidates(bundleDir string) error {
+	path := filepath.Join(bundleDir, "resolution.yaml")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("read resolution.yaml: %w", err)
+	}
+	if bytes.Contains(raw, []byte(candidatesBlockMarker)) {
+		return fmt.Errorf("resolution.yaml contains an unresolved drift-shim candidates block (look for %q); pick one option, edit the stanzas, and remove the comment block before committing", candidatesBlockMarker)
+	}
+	return nil
 }

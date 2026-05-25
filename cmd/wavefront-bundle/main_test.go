@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -178,5 +180,135 @@ overrides:
 func TestRunVerifyMissingFlag(t *testing.T) {
 	if code := run([]string{"verify"}, io.Discard); code != 2 {
 		t.Fatalf("verify without --bundle: exit %d, want 2", code)
+	}
+}
+
+// --- draft-shim subcommand ---
+
+func writeDriftPair(t *testing.T) (bundleDir, fromVer, toVer string) {
+	t.Helper()
+	bundleDir = t.TempDir()
+	fromVer = "2024-01"
+	toVer = "2024-06"
+	for _, layer := range []struct{ name, body string }{
+		{fromVer, `{"openapi":"3.0.0","info":{"title":"t","version":"` + fromVer + `"},
+"paths":{"/v/echo":{"post":{
+"requestBody":{"content":{"application/json":{"schema":{"$ref":"#/components/schemas/Req"}}}},
+"responses":{"200":{"content":{"application/json":{"schema":{"$ref":"#/components/schemas/Resp"}}}}}}}},
+"components":{"schemas":{
+"Req":{"type":"object","properties":{"userName":{"type":"string"}}},
+"Resp":{"type":"object","properties":{"ok":{"type":"boolean"}}}}}}`},
+		{toVer, `{"openapi":"3.0.0","info":{"title":"t","version":"` + toVer + `"},
+"paths":{"/v/echo":{"post":{
+"requestBody":{"content":{"application/json":{"schema":{"$ref":"#/components/schemas/Req"}}}},
+"responses":{"200":{"content":{"application/json":{"schema":{"$ref":"#/components/schemas/Resp"}}}}}}}},
+"components":{"schemas":{
+"Req":{"type":"object","properties":{"user_name":{"type":"string"}}},
+"Resp":{"type":"object","properties":{"ok":{"type":"boolean"}}}}}}`},
+	} {
+		dir := filepath.Join(bundleDir, layer.name)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "openapi.json"), []byte(layer.body), 0o600); err != nil {
+			t.Fatalf("write %s/openapi.json: %v", dir, err)
+		}
+	}
+	return bundleDir, fromVer, toVer
+}
+
+func TestRunDraftShimEmitsYAMLToStdout(t *testing.T) {
+	bundleDir, fromVer, toVer := writeDriftPair(t)
+	var out bytes.Buffer
+	code := runDraftShim(
+		[]string{"--bundle", bundleDir, "--from", fromVer, "--to", toVer},
+		io.Discard, &out)
+	if code != 0 {
+		t.Fatalf("draft-shim: exit %d, want 0", code)
+	}
+	if !strings.Contains(out.String(), `- rename: { from: "userName", to: "user_name" }`) {
+		t.Errorf("rendered YAML missing the confident case-rename:\n%s", out.String())
+	}
+	if !strings.Contains(out.String(), `target: "`+toVer+`"`) {
+		t.Errorf("rendered YAML missing target=%q:\n%s", toVer, out.String())
+	}
+}
+
+func TestRunDraftShimWritesOutFile(t *testing.T) {
+	bundleDir, fromVer, toVer := writeDriftPair(t)
+	outPath := filepath.Join(t.TempDir(), "draft.yaml")
+	code := runDraftShim(
+		[]string{"--bundle", bundleDir, "--from", fromVer, "--to", toVer, "--out", outPath},
+		io.Discard, io.Discard)
+	if code != 0 {
+		t.Fatalf("draft-shim: exit %d, want 0", code)
+	}
+	body, err := os.ReadFile(outPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", outPath, err)
+	}
+	if !strings.Contains(string(body), "- contract_version: \""+fromVer+"\"") {
+		t.Errorf("--out file missing contract_version header:\n%s", body)
+	}
+}
+
+func TestRunDraftShimStrictSurfacesCandidate(t *testing.T) {
+	// userName ↔ user_name is a confident case-rename in default mode.
+	// --strict refuses the auto-match and renders the candidates block.
+	bundleDir, fromVer, toVer := writeDriftPair(t)
+	var out bytes.Buffer
+	code := runDraftShim(
+		[]string{"--bundle", bundleDir, "--from", fromVer, "--to", toVer, "--strict"},
+		io.Discard, &out)
+	if code != 0 {
+		t.Fatalf("draft-shim --strict: exit %d, want 0", code)
+	}
+	if !strings.Contains(out.String(), "# AMBIGUOUS pair") {
+		t.Errorf("strict mode should emit a candidates block:\n%s", out.String())
+	}
+	if strings.Contains(out.String(), `      - rename:`) {
+		t.Errorf("strict mode should not emit a confident rename outside the comment lane:\n%s", out.String())
+	}
+}
+
+func TestRunDraftShimMissingFlags(t *testing.T) {
+	if code := runDraftShim([]string{"--bundle", t.TempDir()}, io.Discard, io.Discard); code != 2 {
+		t.Fatalf("missing --from/--to: exit %d, want 2", code)
+	}
+}
+
+func TestRunDraftShimMissingLayer(t *testing.T) {
+	bundleDir, _, toVer := writeDriftPair(t)
+	if code := runDraftShim(
+		[]string{"--bundle", bundleDir, "--from", "9999-99", "--to", toVer},
+		io.Discard, io.Discard); code != 1 {
+		t.Fatalf("missing from-layer: exit %d, want 1", code)
+	}
+}
+
+// --- verify: candidates-block check ---
+
+func TestRunVerifyRefusesUnresolvedCandidatesBlock(t *testing.T) {
+	in := writeSampleOpenAPI(t)
+	bundleDir := t.TempDir()
+	if code := run([]string{"add", "--openapi", in, "--bundle", bundleDir}, io.Discard); code != 0 {
+		t.Fatalf("add: exit %d", code)
+	}
+	res := []byte(`version: 1
+overrides:
+  - contract_version: "2026-05-17"
+    transform:
+      request:
+        # AMBIGUOUS pair "text" ↔ "message" (same-type:string).
+        # OPTION A — interpret as a rename:
+        # - rename: { from: "text", to: "message" }
+        # OPTION B — interpret as separate add + remove:
+        # - default: { field: "message", value: "" }
+`)
+	if err := os.WriteFile(filepath.Join(bundleDir, "resolution.yaml"), res, 0o644); err != nil {
+		t.Fatalf("write resolution.yaml: %v", err)
+	}
+	if code := run([]string{"verify", "--bundle", bundleDir}, io.Discard); code == 0 {
+		t.Fatal("verify on an unresolved-candidates resolution.yaml: want non-zero exit code")
 	}
 }

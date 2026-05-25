@@ -23,9 +23,14 @@ The generator passes the OpenAPI through into the committed bundle, so a
 URL fetch is still frozen at build time — the bundle stays point-in-time.
 
 Over time the bundle is curated with the rest of the `wavefront-bundle` CLI:
-`remove` / `retire` take a retired version out of service, and `verify` gates
-the bundle's consistency — run it in CI. Per-version routing and transform
-shims live in the operator-owned `resolution.yaml` at the bundle root; see
+`remove` / `retire` take a retired version out of service, `verify` gates
+the bundle's consistency (run it in CI), and `draft-shim` produces a
+candidate `resolution.yaml` override that bridges two layers' OpenAPI
+documents — confident stanzas for unambiguous changes, commented-out
+OPTION A / OPTION B candidates for ambiguous renames. `verify` refuses
+any committed `resolution.yaml` that still carries a candidates block,
+so a draft can't ship unedited. Per-version routing and transform shims
+live in the operator-owned `resolution.yaml` at the bundle root; see
 [protocol.md](protocol.md).
 
 ## 2. Pinning + deploying

@@ -9,6 +9,7 @@
 //	wavefront-bundle remove --version <id> --bundle <dir>
 //	wavefront-bundle retire --version <id> --bundle <dir>
 //	wavefront-bundle verify --bundle <dir>
+//	wavefront-bundle draft-shim --bundle <dir> --from <id> --to <id> [--out <file>] [--strict]
 package main
 
 import (
@@ -17,6 +18,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 
 	"github.com/alternet-dev/wavefront/internal/bundlegen"
 )
@@ -29,7 +31,7 @@ func main() {
 // to errOut. It is the testable entry point — main is a thin os.Exit wrapper.
 func run(args []string, errOut io.Writer) int {
 	if len(args) == 0 {
-		fmt.Fprintln(errOut, "usage: wavefront-bundle <add|remove|retire|verify> [flags]")
+		fmt.Fprintln(errOut, "usage: wavefront-bundle <add|remove|retire|verify|draft-shim> [flags]")
 		return 2
 	}
 	switch args[0] {
@@ -41,6 +43,8 @@ func run(args []string, errOut io.Writer) int {
 		return runRetire(args[1:], errOut)
 	case "verify":
 		return runVerify(args[1:], errOut)
+	case "draft-shim":
+		return runDraftShim(args[1:], errOut, os.Stdout)
 	default:
 		fmt.Fprintf(errOut, "wavefront-bundle: unknown subcommand %q\n", args[0])
 		return 2
@@ -129,6 +133,59 @@ func runVerify(args []string, errOut io.Writer) int {
 	}
 	if err := bundlegen.Verify(*bundleDir); err != nil {
 		fmt.Fprintln(errOut, "wavefront-bundle verify:", err)
+		return 1
+	}
+	return 0
+}
+
+func runDraftShim(args []string, errOut, stdout io.Writer) int {
+	fs := flag.NewFlagSet("draft-shim", flag.ContinueOnError)
+	fs.SetOutput(errOut)
+	bundleDir := fs.String("bundle", "", "bundle directory containing the two layers")
+	fromVersion := fs.String("from", "", "the old contract version (layer subdir) to bridge from")
+	toVersion := fs.String("to", "", "the new contract version (layer subdir) to bridge to")
+	outFile := fs.String("out", "", "write the drafted override to this file; default stdout")
+	strict := fs.Bool("strict", false, "suppress confident case-rename matches; surface every removed/added pair as a candidate")
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 2
+	}
+	if *bundleDir == "" || *fromVersion == "" || *toVersion == "" {
+		fmt.Fprintln(errOut, "usage: wavefront-bundle draft-shim --bundle <dir> --from <version> --to <version> [--out <file>] [--strict]")
+		return 2
+	}
+	fromBytes, err := os.ReadFile(filepath.Join(*bundleDir, *fromVersion, "openapi.json"))
+	if err != nil {
+		fmt.Fprintln(errOut, "wavefront-bundle draft-shim:", err)
+		return 1
+	}
+	toBytes, err := os.ReadFile(filepath.Join(*bundleDir, *toVersion, "openapi.json"))
+	if err != nil {
+		fmt.Fprintln(errOut, "wavefront-bundle draft-shim:", err)
+		return 1
+	}
+	var proposal *bundlegen.ShimProposal
+	if *strict {
+		proposal, err = bundlegen.DraftShimStrict(fromBytes, toBytes)
+	} else {
+		proposal, err = bundlegen.DraftShim(fromBytes, toBytes)
+	}
+	if err != nil {
+		fmt.Fprintln(errOut, "wavefront-bundle draft-shim:", err)
+		return 1
+	}
+	rendered := proposal.RenderYAML(bundlegen.RenderOptions{})
+	if *outFile != "" {
+		if err := os.WriteFile(*outFile, []byte(rendered), 0o644); err != nil {
+			fmt.Fprintln(errOut, "wavefront-bundle draft-shim:", err)
+			return 1
+		}
+		return 0
+	}
+	if _, err := fmt.Fprint(stdout, rendered); err != nil {
+		fmt.Fprintln(errOut, "wavefront-bundle draft-shim:", err)
 		return 1
 	}
 	return 0
