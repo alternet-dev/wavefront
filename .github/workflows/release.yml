@@ -107,6 +107,38 @@ jobs:
             $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
             $(printf "$REGISTRY_IMAGE@sha256:%s " *)
 
+  # Create the GitHub Release entry for this tag. The body is the tag's own
+  # annotation message (we write a short release-style summary into every
+  # `git tag -a`); pre-1.0 RC/beta tags (any tag containing `-`) are marked
+  # prerelease. Idempotent: a re-run after a partial release does not
+  # duplicate the entry.
+  gh-release:
+    needs: manifest
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            echo "release $GITHUB_REF_NAME already exists; nothing to do"
+            exit 0
+          fi
+          flags=()
+          [[ "$GITHUB_REF_NAME" == *-* ]] && flags+=(--prerelease)
+          gh release create "$GITHUB_REF_NAME" \
+            --title "$GITHUB_REF_NAME" \
+            --notes-from-tag \
+            --verify-tag \
+            "${flags[@]}"
+
   # Publish the wavefront-bundle CLI formula to the alternet-dev Homebrew tap.
   # The formula is source-built (Homebrew compiles it from this tag), so only
   # the tag and its commit need updating — no binaries are uploaded here.
