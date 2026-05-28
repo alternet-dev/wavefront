@@ -130,7 +130,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request) {
 	// Wrong-method folds into the same 404 (no 405, no `Allow` header)
 	// because each contract names exactly one method and the bundle is the
 	// only routing source of truth.
-	if !b.HasRoute(r.URL.Path, r.Method) {
+	if _, ok := b.LookupRoute(r.URL.Path, r.Method); !ok {
 		fail(wireerror.UnknownRoute("no contract binds "+r.Method+" "+r.URL.Path), "")
 		return
 	}

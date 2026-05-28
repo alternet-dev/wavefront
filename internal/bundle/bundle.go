@@ -117,7 +117,11 @@ func (b *Bundle) Contract(version string) (*Contract, bool) {
 	return c, ok
 }
 
-// HasRoute reports whether any contract in the bundle binds (path, method).
+// LookupRoute returns the first contract in the bundle that binds
+// (path, method), if any. It is a (value, ok) lookup — idiomatic in the
+// shape of `os.LookupEnv` or `(*sync.Map).Load` — so callers can both gate
+// on membership and use the matched contract without a second pass.
+//
 // The proxy uses this as the first-pass routing gate: a request whose
 // (URL.Path, Method) is not in the bundle's route set is refused before any
 // other request work (decode, negotiate, upstream call). A wrong-method
@@ -125,13 +129,18 @@ func (b *Bundle) Contract(version string) (*Contract, bool) {
 // exactly one method, so wrong-method folds into the same "no contract
 // binds this" miss that an entirely unknown path produces. The caller emits
 // `unknown_route` 404 in both cases.
-func (b *Bundle) HasRoute(path, method string) bool {
+//
+// Multiple contracts may legally bind the same (route, method) across
+// different `contract_version` values. LookupRoute returns the first match
+// in bundle order; selecting between same-(route, method) contracts is the
+// version-negotiation layer's job, not this layer's.
+func (b *Bundle) LookupRoute(path, method string) (*Contract, bool) {
 	for _, c := range b.contracts {
 		if c.route == path && c.method == method {
-			return true
+			return c, true
 		}
 	}
-	return false
+	return nil, false
 }
 
 // Message resolves a fully-qualified proto message name against the bundle's

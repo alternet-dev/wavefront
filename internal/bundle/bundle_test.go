@@ -517,13 +517,14 @@ overrides:
 	}
 }
 
-// TestHasRoute covers the bundle's route-membership check used by the proxy
-// as the first-pass routing gate. Path-method pairs that any contract binds
-// must hit; everything else (unknown path, known path with wrong method,
-// case-sensitive variants) must miss. The test deliberately exercises the
-// wrong-method case: each contract names exactly one method, so a path bound
-// to GET must miss when queried for POST.
-func TestHasRoute(t *testing.T) {
+// TestLookupRoute covers the bundle's route-membership check used by the
+// proxy as the first-pass routing gate. Path-method pairs that any contract
+// binds must hit (and return a non-nil *Contract); everything else (unknown
+// path, known path with wrong method, case-sensitive variants) must miss
+// (and return nil). The test deliberately exercises the wrong-method case:
+// each contract names exactly one method, so a path bound to GET must miss
+// when queried for POST.
+func TestLookupRoute(t *testing.T) {
 	mk := func(cv, route, method string) string {
 		return "version: 1\ncontracts:\n  - contract_version: \"" + cv + "\"\n" +
 			"    route: " + route + "\n    method: " + method + "\n" +
@@ -566,9 +567,49 @@ func TestHasRoute(t *testing.T) {
 		{"/V3/ECHO", "POST", false},
 	}
 	for _, c := range cases {
-		if got := b.HasRoute(c.path, c.method); got != c.want {
-			t.Errorf("HasRoute(%q, %q) = %v, want %v", c.path, c.method, got, c.want)
+		got, ok := b.LookupRoute(c.path, c.method)
+		if ok != c.want {
+			t.Errorf("LookupRoute(%q, %q) ok = %v, want %v", c.path, c.method, ok, c.want)
 		}
+		if c.want && got == nil {
+			t.Errorf("LookupRoute(%q, %q): want non-nil contract on hit, got nil", c.path, c.method)
+		}
+		if !c.want && got != nil {
+			t.Errorf("LookupRoute(%q, %q): want nil contract on miss, got %+v", c.path, c.method, got)
+		}
+	}
+}
+
+// TestLookupRouteMultipleContractsSamePath exercises the documented case
+// where two contracts in different layers bind the same (route, method)
+// under different contract_version values. LookupRoute must return one of
+// them; which one is the version-negotiation layer's problem, not this
+// layer's, so the test only checks that the returned contract is one of
+// the two known matches.
+func TestLookupRouteMultipleContractsSamePath(t *testing.T) {
+	mk := func(cv string) string {
+		return "version: 1\ncontracts:\n  - contract_version: \"" + cv + "\"\n" +
+			"    route: /v3/items\n    method: GET\n" +
+			"    request_message: acme.v1.Ping\n    response_message: acme.v1.Pong\n"
+	}
+	dir := t.TempDir()
+	for _, cv := range []string{"2024-11", "2025-01"} {
+		ld := filepath.Join(dir, cv)
+		mustMkdir(t, ld)
+		mustWrite(t, filepath.Join(ld, fileDescriptors), fdsBytes(t))
+		mustWrite(t, filepath.Join(ld, fileOpenAPI), []byte(validOpenAPI))
+		mustWrite(t, filepath.Join(ld, fileVersions), []byte(mk(cv)))
+	}
+	b, err := Load(dir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	got, ok := b.LookupRoute("/v3/items", "GET")
+	if !ok || got == nil {
+		t.Fatalf("LookupRoute hit expected, got ok=%v contract=%v", ok, got)
+	}
+	if got.ContractVersion() != "2024-11" && got.ContractVersion() != "2025-01" {
+		t.Errorf("LookupRoute returned a contract not among the two known matches: %q", got.ContractVersion())
 	}
 }
 
