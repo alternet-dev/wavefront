@@ -75,9 +75,13 @@ func Write(w http.ResponseWriter, werr *Error, contractVersion string) {
 	if contractVersion == "" {
 		contractVersion = VersionUnknown
 	}
+	// Set (not Add) for every header: the wire-error contract has no
+	// list-valued headers, and Add would produce duplicate values if the
+	// caller had pre-populated the response header or if Write were ever
+	// called twice on the same response.
 	for k, vs := range werr.Headers() {
 		for _, v := range vs {
-			w.Header().Add(k, v)
+			w.Header().Set(k, v)
 		}
 	}
 	w.Header().Set(HeaderWavefrontError, werr.Code())

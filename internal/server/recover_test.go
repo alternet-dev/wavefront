@@ -134,6 +134,110 @@ func TestPanicReturnsInternalErrorEnvelope(t *testing.T) {
 	}
 }
 
+// http.ErrAbortHandler is the stdlib's "abort the connection silently"
+// sentinel — used by http.MaxBytesReader, timeout handlers, etc. Swallowing
+// it would violate the contract: the recover middleware must re-panic, never
+// log, never write a wire-error envelope, and never count it on the errors
+// metric.
+func TestRecoverRePanicsErrAbortHandler(t *testing.T) {
+	var logbuf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logbuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	s := server.New(baseCfg("http://unused"))
+	s.SetLogger(logger)
+
+	handler := s.Recover(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
+		panic(http.ErrAbortHandler)
+	}))
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/anything", nil)
+
+	var got any
+	func() {
+		defer func() { got = recover() }()
+		handler.ServeHTTP(rec, req)
+	}()
+
+	if got != http.ErrAbortHandler {
+		t.Fatalf("expected ErrAbortHandler to be re-panicked, got %v (%T)", got, got)
+	}
+	if rec.Header().Get("X-Wavefront-Error") != "" {
+		t.Errorf("X-Wavefront-Error must not be set on ErrAbortHandler abort, got %q",
+			rec.Header().Get("X-Wavefront-Error"))
+	}
+	if rec.Body.Len() != 0 {
+		t.Errorf("response body must be empty on ErrAbortHandler abort, got %d bytes", rec.Body.Len())
+	}
+	if logbuf.Len() != 0 {
+		t.Errorf("no log output expected on ErrAbortHandler abort, got:\n%s", logbuf.String())
+	}
+}
+
+// If a handler started writing the response before panicking, the recover
+// middleware must NOT call wireerror.Write — doing so would trigger a
+// "superfluous response.WriteHeader" warning, leave the original status on
+// the wire, and append the protobuf body to whatever the handler had
+// already written, producing a malformed response. The middleware must
+// still log and count the panic; only the envelope emission is suppressed.
+func TestRecoverSkipsEnvelopeAfterResponseStarted(t *testing.T) {
+	var logbuf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logbuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	s := server.New(baseCfg("http://unused"))
+	s.SetLogger(logger)
+
+	const writtenBody = "partial body before panic"
+	handler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, writtenBody)
+		panic("boom after headers")
+	})
+
+	ts := httptest.NewServer(s.Recover(handler))
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/anything")
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	// Status must remain what the handler wrote — the recover block must NOT
+	// have called WriteHeader again.
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("status=%d want 200 (handler's original status, not the envelope's 500)", resp.StatusCode)
+	}
+	// X-Wavefront-Error would have been set by wireerror.Write — its absence
+	// proves the envelope was suppressed.
+	if got := resp.Header.Get("X-Wavefront-Error"); got != "" {
+		t.Errorf("X-Wavefront-Error must not be set when response was already written, got %q", got)
+	}
+	// Content-Type must be the one the handler set, not the envelope's
+	// application/protobuf.
+	if got := resp.Header.Get("Content-Type"); got != "text/plain" {
+		t.Errorf("Content-Type=%q; want the handler's text/plain, not the envelope's application/protobuf", got)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	// Body must be exactly what the handler wrote — no protobuf bytes appended.
+	if string(body) != writtenBody {
+		t.Errorf("body=%q; want %q (no envelope bytes should be appended)", body, writtenBody)
+	}
+	// The panic still must be observed in the log — the envelope is suppressed,
+	// not the forensic trail.
+	log := logbuf.String()
+	if !strings.Contains(log, "panic recovered in proxy handler") {
+		t.Errorf("primary panic-recovered log line missing; got:\n%s", log)
+	}
+	if !strings.Contains(log, "cannot emit") {
+		t.Errorf("expected a log line explaining the envelope was suppressed; got:\n%s", log)
+	}
+}
+
 func TestRecoverPassesThroughNormalResponse(t *testing.T) {
 	// The middleware must be a no-op for a handler that returns normally —
 	// it must not flush headers prematurely or interfere with the response.
