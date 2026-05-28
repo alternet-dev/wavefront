@@ -1,10 +1,14 @@
 package server_test
 
 import (
+	"bufio"
 	"encoding/json"
+	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -300,5 +304,151 @@ func TestUpstreamNon2xxIs502(t *testing.T) {
 	}
 	if resp.Header.Get("X-Wavefront-Error") != "upstream_error" {
 		t.Errorf("X-Wavefront-Error = %q", resp.Header.Get("X-Wavefront-Error"))
+	}
+}
+
+// Expect: 100-continue + Content-Length > MaxBodyBytes must produce a 413
+// directly, with NO "100 Continue" interim status on the wire. RFC 7231
+// §5.1.1: an Expect:100-continue request asks the server to acknowledge
+// before the client transmits the body; if the server already knows it will
+// reject the body for size, it must do so before signalling continue,
+// otherwise the client wastes bandwidth sending a body the server discards.
+//
+// The test uses a raw TCP connection (not http.Client) so it can observe the
+// exact byte sequence the server emits and assert no "HTTP/1.1 100 Continue"
+// status line appears.
+func TestExpect100ContinueOversizedContentLengthRejectedWithoutContinue(t *testing.T) {
+	b := loadBundle(t)
+	cfg := baseCfg("http://unused")
+	cfg.MaxBodyBytes = 16
+	s := server.New(cfg)
+	s.SetBundle(b)
+	front := httptest.NewServer(s.DataHandler())
+	defer front.Close()
+
+	u, err := url.Parse(front.URL)
+	if err != nil {
+		t.Fatalf("parse url: %v", err)
+	}
+	conn, err := net.Dial("tcp", u.Host)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+
+	// Send headers only; do NOT send any body bytes. If wavefront were to
+	// emit "100 Continue" we would observe it on the wire even without
+	// transmitting the body.
+	const bodyLen = 4096 // far above MaxBodyBytes = 16
+	req := fmt.Sprintf(
+		"POST /v3/echo HTTP/1.1\r\n"+
+			"Host: %s\r\n"+
+			"Content-Type: application/protobuf\r\n"+
+			"X-Api-Contract-Version: 2024-11\r\n"+
+			"Content-Length: %d\r\n"+
+			"Expect: 100-continue\r\n"+
+			"Connection: close\r\n"+
+			"\r\n",
+		u.Host, bodyLen,
+	)
+	if _, err := conn.Write([]byte(req)); err != nil {
+		t.Fatalf("write request: %v", err)
+	}
+
+	br := bufio.NewReader(conn)
+	statusLine, err := br.ReadString('\n')
+	if err != nil {
+		t.Fatalf("read status line: %v", err)
+	}
+	statusLine = strings.TrimRight(statusLine, "\r\n")
+	// The very first response line must be the 413 final status — NOT a
+	// "100 Continue" interim status. If we see 100 here, the server has
+	// violated the ordering rule.
+	if strings.HasPrefix(statusLine, "HTTP/1.1 100") || strings.HasPrefix(statusLine, "HTTP/1.0 100") {
+		t.Fatalf("server emitted 100 Continue before rejecting oversized body; status line = %q", statusLine)
+	}
+	if !strings.HasPrefix(statusLine, "HTTP/1.1 413") && !strings.HasPrefix(statusLine, "HTTP/1.0 413") {
+		t.Fatalf("first status line = %q; want a 413", statusLine)
+	}
+
+	// Read the rest of the response and confirm the wire-error envelope.
+	resp, err := http.ReadResponse(bufio.NewReader(strings.NewReader(statusLine+"\r\n"+readAll(t, br))), nil)
+	if err != nil {
+		t.Fatalf("parse response: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want 413", resp.StatusCode)
+	}
+	if got := resp.Header.Get("X-Wavefront-Error"); got != "request_body_too_large" {
+		t.Errorf("X-Wavefront-Error = %q, want request_body_too_large", got)
+	}
+	if got := resp.Header.Get("X-Wavefront-Contract-Version"); got != "2024-11" {
+		t.Errorf("X-Wavefront-Contract-Version = %q, want %q (raw client value echoed)", got, "2024-11")
+	}
+}
+
+// readAll drains br to EOF and returns the result; used by the Expect:100
+// test to feed the remaining bytes into http.ReadResponse after peeking at
+// the status line.
+func readAll(t *testing.T, r *bufio.Reader) string {
+	t.Helper()
+	var sb strings.Builder
+	buf := make([]byte, 1024)
+	for {
+		n, err := r.Read(buf)
+		if n > 0 {
+			sb.Write(buf[:n])
+		}
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			// timeout or close mid-read — the response was already partially
+			// captured into sb; let http.ReadResponse parse what we have.
+			break
+		}
+	}
+	return sb.String()
+}
+
+// Expect: 100-continue + Content-Length within MaxBodyBytes must proceed
+// normally. The Go HTTP client streams the body only after observing a
+// "100 Continue"; if wavefront accidentally rejected legitimate Expect-100
+// requests, this test would hang or fail.
+func TestExpect100ContinueWithinLimitSucceeds(t *testing.T) {
+	b := loadBundle(t)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"text":"pong"}`))
+	}))
+	defer upstream.Close()
+
+	s := server.New(baseCfg(upstream.URL))
+	s.SetBundle(b)
+	front := httptest.NewServer(s.DataHandler())
+	defer front.Close()
+
+	body := pingBytes(t, b, "hi", 1)
+	req, _ := http.NewRequest(http.MethodPost, front.URL+"/v3/echo", strings.NewReader(string(body)))
+	req.Header.Set("X-Api-Contract-Version", "2024-11")
+	req.Header.Set("Content-Type", "application/protobuf")
+	// ExpectContinueTimeout=1s on the transport — Go's client sends headers,
+	// waits up to this long for "100 Continue", then sends body.
+	req.Header.Set("Expect", "100-continue")
+	req.ContentLength = int64(len(body))
+
+	tr := &http.Transport{ExpectContinueTimeout: 1 * time.Second}
+	defer tr.CloseIdleConnections()
+	client := &http.Client{Transport: tr, Timeout: 5 * time.Second}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("do: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
 }

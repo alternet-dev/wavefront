@@ -49,6 +49,12 @@ func TestLoadsWithMinimalRequiredEnv(t *testing.T) {
 	if cfg.RequestTimeout != 15000*time.Millisecond {
 		t.Errorf("RequestTimeout default = %v", cfg.RequestTimeout)
 	}
+	if cfg.ReadHeaderTimeout != 10000*time.Millisecond {
+		t.Errorf("ReadHeaderTimeout default = %v", cfg.ReadHeaderTimeout)
+	}
+	if cfg.ReadTimeout != 30000*time.Millisecond {
+		t.Errorf("ReadTimeout default = %v", cfg.ReadTimeout)
+	}
 	if cfg.MaxBodyBytes != 1048576 {
 		t.Errorf("MaxBodyBytes default = %d", cfg.MaxBodyBytes)
 	}
@@ -63,6 +69,8 @@ func TestOverridesParse(t *testing.T) {
 	p["WAVEFRONT_METRICS_ADDR"] = "127.0.0.1:5678"
 	p["WAVEFRONT_CONTRACT_VERSION_HEADER"] = "X-Contract"
 	p["WAVEFRONT_REQUEST_TIMEOUT_MS"] = "3000"
+	p["WAVEFRONT_READ_HEADER_TIMEOUT_MS"] = "4000"
+	p["WAVEFRONT_READ_TIMEOUT_MS"] = "5000"
 	p["WAVEFRONT_MAX_BODY_BYTES"] = "2048"
 	p["WAVEFRONT_LOG_LEVEL"] = "debug"
 	cfg, err := load(p)
@@ -80,6 +88,12 @@ func TestOverridesParse(t *testing.T) {
 	}
 	if cfg.RequestTimeout != 3*time.Second {
 		t.Errorf("RequestTimeout = %v", cfg.RequestTimeout)
+	}
+	if cfg.ReadHeaderTimeout != 4*time.Second {
+		t.Errorf("ReadHeaderTimeout = %v", cfg.ReadHeaderTimeout)
+	}
+	if cfg.ReadTimeout != 5*time.Second {
+		t.Errorf("ReadTimeout = %v", cfg.ReadTimeout)
 	}
 	if cfg.MaxBodyBytes != 2048 {
 		t.Errorf("MaxBodyBytes = %d", cfg.MaxBodyBytes)
@@ -159,6 +173,30 @@ func TestInvalidRequestTimeoutIsError(t *testing.T) {
 		var ie *InvalidError
 		if !errors.As(err, &ie) || ie.Var != "WAVEFRONT_REQUEST_TIMEOUT_MS" {
 			t.Errorf("%q: want InvalidError(WAVEFRONT_REQUEST_TIMEOUT_MS), got %v", bad, err)
+		}
+	}
+}
+
+func TestInvalidReadHeaderTimeoutIsError(t *testing.T) {
+	for _, bad := range []string{"soon", "0", "-5"} {
+		p := minimal()
+		p["WAVEFRONT_READ_HEADER_TIMEOUT_MS"] = bad
+		_, err := load(p)
+		var ie *InvalidError
+		if !errors.As(err, &ie) || ie.Var != "WAVEFRONT_READ_HEADER_TIMEOUT_MS" {
+			t.Errorf("%q: want InvalidError(WAVEFRONT_READ_HEADER_TIMEOUT_MS), got %v", bad, err)
+		}
+	}
+}
+
+func TestInvalidReadTimeoutIsError(t *testing.T) {
+	for _, bad := range []string{"soon", "0", "-5"} {
+		p := minimal()
+		p["WAVEFRONT_READ_TIMEOUT_MS"] = bad
+		_, err := load(p)
+		var ie *InvalidError
+		if !errors.As(err, &ie) || ie.Var != "WAVEFRONT_READ_TIMEOUT_MS" {
+			t.Errorf("%q: want InvalidError(WAVEFRONT_READ_TIMEOUT_MS), got %v", bad, err)
 		}
 	}
 }
