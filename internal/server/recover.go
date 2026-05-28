@@ -43,6 +43,10 @@ func (t *responseTracker) Write(b []byte) (int, error) {
 // the full forensic trail. The client only ever sees the fixed envelope —
 // the panic value and the stack trace never reach the wire.
 //
+// The envelope's X-Wavefront-Contract-Version echoes the raw client-sent
+// header (or `unknown` when the client sent none); the metric label stays
+// at `unknown` to keep Prometheus cardinality bounded.
+//
 // Two cases are deliberately excluded from envelope emission:
 //
 //   - http.ErrAbortHandler — the stdlib's sentinel for "abort the connection
@@ -59,6 +63,18 @@ func (t *responseTracker) Write(b []byte) (int, error) {
 func (s *Server) Recover(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		tracker := &responseTracker{ResponseWriter: w}
+		// responseVersion is what we echo in X-Wavefront-Contract-Version on
+		// the panic envelope. The panic fires outside the negotiate path, so
+		// we have no bundle-known version to stand on; fall back to the raw
+		// client-sent header value (or versionUnknown when the client sent
+		// none) so the caller can correlate the failure with what it sent.
+		// The metric label and the structured log stay at versionUnknown to
+		// keep Prometheus cardinality bounded — only the response header
+		// echoes the raw value.
+		responseVersion := versionUnknown
+		if v := r.Header.Get(s.cfg.ContractVersionHeader); v != "" {
+			responseVersion = v
+		}
 		defer func() {
 			rec := recover()
 			if rec == nil {
@@ -96,7 +112,7 @@ func (s *Server) Recover(next http.Handler) http.Handler {
 				)
 				return
 			}
-			wireerror.Write(tracker, werr, versionUnknown)
+			wireerror.Write(tracker, werr, responseVersion)
 		}()
 		next.ServeHTTP(tracker, r)
 	})
