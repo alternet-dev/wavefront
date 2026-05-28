@@ -84,6 +84,7 @@ func TestUpstreamRedirectIs502(t *testing.T) {
 
 			req, _ := http.NewRequest(http.MethodPost, front.URL+"/v3/echo", strings.NewReader(string(pingBytes(t, b, "hi", 1))))
 			req.Header.Set("X-Api-Contract-Version", "2024-11")
+			req.Header.Set("Content-Type", "application/protobuf")
 			resp, err := http.DefaultClient.Do(req)
 			if err != nil {
 				t.Fatal(err)
