@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"google.golang.org/protobuf/proto"
@@ -13,6 +14,14 @@ import (
 // fdsBytes builds a self-contained FileDescriptorSet (package acme.v1, two
 // proto3 string messages) and returns its wire bytes.
 func fdsBytes(t *testing.T) []byte {
+	t.Helper()
+	return fdsBytesPkg(t, "acme/v1/types.proto", "acme.v1", "Ping", "Pong")
+}
+
+// fdsBytesPkg builds a self-contained FileDescriptorSet wire bytes with a
+// single file under the supplied (file, package) names and two proto3 string
+// messages. It is used to construct per-layer disjoint-package fixtures.
+func fdsBytesPkg(t *testing.T, fileName, pkg, msgA, msgB string) []byte {
 	t.Helper()
 	strField := func(name string, num int32) *descriptorpb.FieldDescriptorProto {
 		return &descriptorpb.FieldDescriptorProto{
@@ -25,12 +34,12 @@ func fdsBytes(t *testing.T) []byte {
 	}
 	fds := &descriptorpb.FileDescriptorSet{
 		File: []*descriptorpb.FileDescriptorProto{{
-			Name:    proto.String("acme/v1/types.proto"),
-			Package: proto.String("acme.v1"),
+			Name:    proto.String(fileName),
+			Package: proto.String(pkg),
 			Syntax:  proto.String("proto3"),
 			MessageType: []*descriptorpb.DescriptorProto{
-				{Name: proto.String("Ping"), Field: []*descriptorpb.FieldDescriptorProto{strField("text", 1)}},
-				{Name: proto.String("Pong"), Field: []*descriptorpb.FieldDescriptorProto{strField("text", 1)}},
+				{Name: proto.String(msgA), Field: []*descriptorpb.FieldDescriptorProto{strField("text", 1)}},
+				{Name: proto.String(msgB), Field: []*descriptorpb.FieldDescriptorProto{strField("text", 1)}},
 			},
 		}},
 	}
@@ -306,21 +315,27 @@ func fdsWithSharedDep(t *testing.T, layerFile, layerPkg, msg, depField string) [
 }
 
 func TestLoadDeduplicatesSharedDependency(t *testing.T) {
-	mk := func(cv, msg string) string {
+	mk := func(cv, pkg, msg string) string {
 		return "version: 1\ncontracts:\n  - contract_version: \"" + cv + "\"\n" +
 			"    route: /x\n    method: GET\n" +
-			"    request_message: a." + msg + "\n    response_message: a." + msg + "\n"
+			"    request_message: " + pkg + "." + msg + "\n    response_message: " + pkg + "." + msg + "\n"
 	}
 	dir := t.TempDir()
-	for _, l := range []struct{ name, cv, file, msg string }{
-		{"2024-11", "2024-11", "a/one.proto", "One"},
-		{"2026-05", "2026-05", "a/two.proto", "Two"},
+	// Each layer ships a per-version layer-unique file in its own per-version
+	// proto package (the wavefront.gen.v<version> convention) plus a
+	// bit-identical shared/dep.proto (same bytes). mergeDescriptors collapses
+	// the shared file; the package-collision check only fires on multiple
+	// layers contributing UNIQUE files in the same package, which is not the
+	// case here.
+	for _, l := range []struct{ name, cv, file, pkg, msg string }{
+		{"2024-11", "2024-11", "gen/v2024_11/one.proto", "wavefront.gen.v2024_11", "One"},
+		{"2026-05", "2026-05", "gen/v2026_05/two.proto", "wavefront.gen.v2026_05", "Two"},
 	} {
 		ld := filepath.Join(dir, l.name)
 		mustMkdir(t, ld)
-		mustWrite(t, filepath.Join(ld, fileDescriptors), fdsWithSharedDep(t, l.file, "a", l.msg, "v"))
+		mustWrite(t, filepath.Join(ld, fileDescriptors), fdsWithSharedDep(t, l.file, l.pkg, l.msg, "v"))
 		mustWrite(t, filepath.Join(ld, fileOpenAPI), []byte(validOpenAPI))
-		mustWrite(t, filepath.Join(ld, fileVersions), []byte(mk(l.cv, l.msg)))
+		mustWrite(t, filepath.Join(ld, fileVersions), []byte(mk(l.cv, l.pkg, l.msg)))
 	}
 	if _, err := Load(dir); err != nil {
 		t.Fatalf("Load with an identical shared dependency across layers: %v", err)
@@ -328,23 +343,26 @@ func TestLoadDeduplicatesSharedDependency(t *testing.T) {
 }
 
 func TestLoadRejectsConflictingDescriptors(t *testing.T) {
-	mk := func(cv, msg string) string {
+	mk := func(cv, pkg, msg string) string {
 		return "version: 1\ncontracts:\n  - contract_version: \"" + cv + "\"\n" +
 			"    route: /x\n    method: GET\n" +
-			"    request_message: a." + msg + "\n    response_message: a." + msg + "\n"
+			"    request_message: " + pkg + "." + msg + "\n    response_message: " + pkg + "." + msg + "\n"
 	}
 	dir := t.TempDir()
 	// Both layers carry shared/dep.proto, but with a different field name —
-	// the same file name with conflicting bytes. Load must reject it.
-	for _, l := range []struct{ name, cv, file, msg, depField string }{
-		{"2024-11", "2024-11", "a/one.proto", "One", "v"},
-		{"2026-05", "2026-05", "a/two.proto", "Two", "different"},
+	// the same file name with conflicting bytes. mergeDescriptors must
+	// reject it. Layer-unique files use per-version disjoint packages so
+	// the package-collision check passes; the conflicting shared dep is
+	// the only failure mode under test.
+	for _, l := range []struct{ name, cv, file, pkg, msg, depField string }{
+		{"2024-11", "2024-11", "gen/v2024_11/one.proto", "wavefront.gen.v2024_11", "One", "v"},
+		{"2026-05", "2026-05", "gen/v2026_05/two.proto", "wavefront.gen.v2026_05", "Two", "different"},
 	} {
 		ld := filepath.Join(dir, l.name)
 		mustMkdir(t, ld)
-		mustWrite(t, filepath.Join(ld, fileDescriptors), fdsWithSharedDep(t, l.file, "a", l.msg, l.depField))
+		mustWrite(t, filepath.Join(ld, fileDescriptors), fdsWithSharedDep(t, l.file, l.pkg, l.msg, l.depField))
 		mustWrite(t, filepath.Join(ld, fileOpenAPI), []byte(validOpenAPI))
-		mustWrite(t, filepath.Join(ld, fileVersions), []byte(mk(l.cv, l.msg)))
+		mustWrite(t, filepath.Join(ld, fileVersions), []byte(mk(l.cv, l.pkg, l.msg)))
 	}
 	if _, err := Load(dir); err == nil {
 		t.Fatal("Load with conflicting definitions of shared/dep.proto: expected an error, got nil")
@@ -693,5 +711,135 @@ func TestVersionsSingleLayer(t *testing.T) {
 	got := b.Versions()
 	if len(got) != 1 || got[0] != "2024-11" {
 		t.Errorf("Versions() = %v, want [2024-11]", got)
+	}
+}
+
+// --- proto-package collision: defense-in-depth check ---
+
+// TestLoadDisjointPackagesAcrossLayers is the happy path for the
+// package-collision check: two layers, each with its own per-version proto
+// package, load successfully. This mirrors the convention the docs spell
+// out (wavefront.gen.v<version>).
+func TestLoadDisjointPackagesAcrossLayers(t *testing.T) {
+	mk := func(cv, pkg string) string {
+		return "version: 1\ncontracts:\n  - contract_version: \"" + cv + "\"\n" +
+			"    route: /v3/echo\n    method: GET\n" +
+			"    request_message: " + pkg + ".Ping\n    response_message: " + pkg + ".Pong\n"
+	}
+	dir := t.TempDir()
+	for _, l := range []struct{ name, cv, file, pkg string }{
+		{"2024-11", "2024-11", "gen/v2024_11/types.proto", "wavefront.gen.v2024_11"},
+		{"2025-03", "2025-03", "gen/v2025_03/types.proto", "wavefront.gen.v2025_03"},
+	} {
+		ld := filepath.Join(dir, l.name)
+		mustMkdir(t, ld)
+		mustWrite(t, filepath.Join(ld, fileDescriptors), fdsBytesPkg(t, l.file, l.pkg, "Ping", "Pong"))
+		mustWrite(t, filepath.Join(ld, fileOpenAPI), []byte(validOpenAPI))
+		mustWrite(t, filepath.Join(ld, fileVersions), []byte(mk(l.cv, l.pkg)))
+	}
+	if _, err := Load(dir); err != nil {
+		t.Fatalf("Load with disjoint per-version proto packages: %v", err)
+	}
+}
+
+// TestLoadPackageCollisionRejected is the unhappy path: two layers each
+// uniquely contribute types into the same proto package. Load must return
+// a typed *PackageCollisionError naming that package and both layer names
+// in sorted order, with a message that suggests the per-version namespacing
+// fix.
+func TestLoadPackageCollisionRejected(t *testing.T) {
+	mk := func(cv string) string {
+		return "version: 1\ncontracts:\n  - contract_version: \"" + cv + "\"\n" +
+			"    route: /v3/echo\n    method: GET\n" +
+			"    request_message: wavefront.gen.shared.Ping\n" +
+			"    response_message: wavefront.gen.shared.Pong\n"
+	}
+	dir := t.TempDir()
+	// Two layers each ship a UNIQUE file (different file names) that lands
+	// in the same proto package "wavefront.gen.shared". The bytes differ
+	// (different message names) so mergeDescriptors' file-level dedup does
+	// not collapse them; the package-collision check must fire.
+	for _, l := range []struct{ name, file, msgA, msgB string }{
+		{"2024-11", "gen/shared/types_a.proto", "Ping", "Pong"},
+		{"2025-03", "gen/shared/types_b.proto", "Ping", "Pong"},
+	} {
+		ld := filepath.Join(dir, l.name)
+		mustMkdir(t, ld)
+		mustWrite(t, filepath.Join(ld, fileDescriptors), fdsBytesPkg(t, l.file, "wavefront.gen.shared", l.msgA, l.msgB))
+		mustWrite(t, filepath.Join(ld, fileOpenAPI), []byte(validOpenAPI))
+		mustWrite(t, filepath.Join(ld, fileVersions), []byte(mk(l.name)))
+	}
+	_, err := Load(dir)
+	var pce *PackageCollisionError
+	if !errors.As(err, &pce) {
+		t.Fatalf("want *PackageCollisionError, got %v", err)
+	}
+	if pce.Package != "wavefront.gen.shared" {
+		t.Errorf("Package = %q, want %q", pce.Package, "wavefront.gen.shared")
+	}
+	wantLayers := []string{"2024-11", "2025-03"}
+	if len(pce.Layers) != len(wantLayers) {
+		t.Fatalf("Layers = %v, want %v", pce.Layers, wantLayers)
+	}
+	for i := range wantLayers {
+		if pce.Layers[i] != wantLayers[i] {
+			t.Errorf("Layers[%d] = %q, want %q", i, pce.Layers[i], wantLayers[i])
+		}
+	}
+	// The message must name the colliding package and suggest the fix.
+	msg := pce.Error()
+	for _, want := range []string{"wavefront.gen.shared", "per-version"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("error message %q missing %q", msg, want)
+		}
+	}
+}
+
+// TestLoadPackageCollisionAcrossThreeLayers exercises the case where three
+// layers all unique-contribute files into the same proto package. The error
+// must enumerate all three layers in sorted order (not just the first two
+// encountered).
+func TestLoadPackageCollisionAcrossThreeLayers(t *testing.T) {
+	mk := func(cv string) string {
+		return "version: 1\ncontracts:\n  - contract_version: \"" + cv + "\"\n" +
+			"    route: /v3/echo\n    method: GET\n" +
+			"    request_message: wavefront.gen.shared.Ping\n" +
+			"    response_message: wavefront.gen.shared.Pong\n"
+	}
+	dir := t.TempDir()
+	for _, l := range []struct{ name, file string }{
+		{"2025-03", "gen/shared/types_b.proto"},
+		{"2026-11", "gen/shared/types_c.proto"},
+		{"2024-11", "gen/shared/types_a.proto"},
+	} {
+		ld := filepath.Join(dir, l.name)
+		mustMkdir(t, ld)
+		mustWrite(t, filepath.Join(ld, fileDescriptors), fdsBytesPkg(t, l.file, "wavefront.gen.shared", "Ping", "Pong"))
+		mustWrite(t, filepath.Join(ld, fileOpenAPI), []byte(validOpenAPI))
+		mustWrite(t, filepath.Join(ld, fileVersions), []byte(mk(l.name)))
+	}
+	_, err := Load(dir)
+	var pce *PackageCollisionError
+	if !errors.As(err, &pce) {
+		t.Fatalf("want *PackageCollisionError, got %v", err)
+	}
+	want := []string{"2024-11", "2025-03", "2026-11"}
+	if len(pce.Layers) != len(want) {
+		t.Fatalf("Layers = %v, want %v", pce.Layers, want)
+	}
+	for i := range want {
+		if pce.Layers[i] != want[i] {
+			t.Errorf("Layers[%d] = %q, want %q", i, pce.Layers[i], want[i])
+		}
+	}
+}
+
+// TestLoadSingleLayerCannotCollide asserts that a single-layer bundle (the
+// most common shape) can never trip the package-collision check, no matter
+// how many files / packages it contains.
+func TestLoadSingleLayerCannotCollide(t *testing.T) {
+	dir := writeBundle(t, fdsBytes(t), validOpenAPI, validVersions)
+	if _, err := Load(dir); err != nil {
+		t.Fatalf("single-layer bundle must not collide: %v", err)
 	}
 }
