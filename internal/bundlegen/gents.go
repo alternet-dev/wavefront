@@ -40,7 +40,7 @@ func GenTSClient(bundleDir, outDir, version string) (*GenTSClientResult, error) 
 
 	b, err := bundle.Load(bundleDir)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("gen-ts-client: load bundle: %w", err)
 	}
 	versions := b.Versions()
 	if len(versions) == 0 {
