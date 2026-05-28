@@ -40,7 +40,10 @@ func TestUpstreamTimeoutReturns504(t *testing.T) {
 
 func TestRequestBodyTooLargeReturns413(t *testing.T) {
 	// Claim: an inbound body exceeding WAVEFRONT_MAX_BODY_BYTES returns the
-	// typed request_body_too_large error (HTTP 413).
+	// typed request_body_too_large error (HTTP 413). The response header
+	// echoes the raw client-sent contract-version value so the caller can
+	// correlate the rejection with what it sent (even though the failure
+	// is pre-negotiate).
 	h := Spawn(t, SpawnOpts{
 		ConfigOverride: func(c *config.Config) { c.MaxBodyBytes = 8 },
 	})
@@ -57,6 +60,9 @@ func TestRequestBodyTooLargeReturns413(t *testing.T) {
 	}
 	if resp.Header.Get("X-Wavefront-Error") != "request_body_too_large" {
 		t.Errorf("X-Wavefront-Error = %q", resp.Header.Get("X-Wavefront-Error"))
+	}
+	if got := resp.Header.Get("X-Wavefront-Contract-Version"); got != "2024-11" {
+		t.Errorf("X-Wavefront-Contract-Version = %q, want %q (raw client value echoed)", got, "2024-11")
 	}
 }
 

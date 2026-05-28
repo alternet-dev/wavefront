@@ -63,9 +63,11 @@ func TestUnknownRouteReturns404Envelope(t *testing.T) {
 			if got := resp.Header.Get("Content-Type"); got != "application/protobuf" {
 				t.Errorf("Content-Type=%q want application/protobuf", got)
 			}
-			// We don't know the contract version when the route lookup fails:
-			// same pattern as panic recovery — header is present with the
-			// "unknown" sentinel.
+			// The client sent no contract-version header on these requests,
+			// so the response header falls back to the "unknown" sentinel.
+			// (When the client DOES send a value pre-negotiate, the raw
+			// value is echoed — covered by TestUnknownRouteIgnoresContractVersionHeader
+			// and TestUnknownRouteWithoutContractVersionHeader.)
 			if got := resp.Header.Get("X-Wavefront-Contract-Version"); got != "unknown" {
 				t.Errorf("X-Wavefront-Contract-Version=%q want unknown", got)
 			}
@@ -95,7 +97,10 @@ func TestUnknownRouteReturns404Envelope(t *testing.T) {
 // TestUnknownRouteIgnoresContractVersionHeader confirms that the route check
 // runs BEFORE contract-version negotiation: even a perfectly valid version
 // header on a request to an unbound path still produces unknown_route, not
-// some downstream error.
+// some downstream error. It also pins the response-header echo behaviour:
+// the gate runs pre-negotiate, but the raw client-sent value is echoed
+// verbatim in X-Wavefront-Contract-Version so the caller can correlate the
+// failure with what it sent.
 func TestUnknownRouteIgnoresContractVersionHeader(t *testing.T) {
 	b := loadBundle(t)
 	s := server.New(baseCfg("http://unused"))
@@ -115,6 +120,42 @@ func TestUnknownRouteIgnoresContractVersionHeader(t *testing.T) {
 	}
 	if got := resp.Header.Get("X-Wavefront-Error"); got != "unknown_route" {
 		t.Errorf("X-Wavefront-Error=%q want unknown_route", got)
+	}
+	// The route gate runs before negotiate validates the header, but the raw
+	// client-sent value is still echoed so the caller sees what wavefront
+	// received. The metric label and structured log keep "unknown" — only
+	// the response header carries the raw value.
+	if got := resp.Header.Get("X-Wavefront-Contract-Version"); got != "2024-11" {
+		t.Errorf("X-Wavefront-Contract-Version=%q want %q (raw client value echoed pre-negotiate)", got, "2024-11")
+	}
+}
+
+// TestUnknownRouteWithoutContractVersionHeader pins the fallback: when the
+// client sends no X-Api-Contract-Version header, the pre-negotiate
+// unknown_route 404 still emits a well-formed response with the
+// versionUnknown sentinel ("unknown") in X-Wavefront-Contract-Version.
+func TestUnknownRouteWithoutContractVersionHeader(t *testing.T) {
+	b := loadBundle(t)
+	s := server.New(baseCfg("http://unused"))
+	s.SetBundle(b)
+	front := httptest.NewServer(s.DataHandler())
+	defer front.Close()
+
+	req, _ := http.NewRequest(http.MethodGet, front.URL+"/no-such-route", strings.NewReader(""))
+	// Deliberately no X-Api-Contract-Version header.
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("status=%d want 404", resp.StatusCode)
+	}
+	if got := resp.Header.Get("X-Wavefront-Error"); got != "unknown_route" {
+		t.Errorf("X-Wavefront-Error=%q want unknown_route", got)
+	}
+	if got := resp.Header.Get("X-Wavefront-Contract-Version"); got != "unknown" {
+		t.Errorf("X-Wavefront-Contract-Version=%q want %q (fallback when client sent no header)", got, "unknown")
 	}
 }
 

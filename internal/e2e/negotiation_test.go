@@ -10,6 +10,8 @@ import (
 func TestUnsupportedContractVersionReturns400(t *testing.T) {
 	// Claim: an unknown / missing contract version returns the typed
 	// unsupported_contract_version error (HTTP 400), never a silent fallback.
+	// The response header echoes the raw client-sent value so the caller can
+	// see what wavefront received and correlate the failure.
 	h := Spawn(t, SpawnOpts{})
 
 	req, _ := http.NewRequest(http.MethodPost, h.Proxy.URL+"/v3/echo", strings.NewReader("ignored"))
@@ -24,6 +26,13 @@ func TestUnsupportedContractVersionReturns400(t *testing.T) {
 	}
 	if resp.Header.Get("X-Wavefront-Error") != "unsupported_contract_version" {
 		t.Errorf("X-Wavefront-Error = %q", resp.Header.Get("X-Wavefront-Error"))
+	}
+	// Pre-negotiate failure echoes the raw client-supplied version so the
+	// caller can correlate what it sent with the error envelope. The metric
+	// label and structured log keep "unknown" — only the response header
+	// echoes the raw value.
+	if got := resp.Header.Get("X-Wavefront-Contract-Version"); got != "1999-01" {
+		t.Errorf("X-Wavefront-Contract-Version = %q, want %q (raw client value echoed)", got, "1999-01")
 	}
 	if body, _ := io.ReadAll(resp.Body); len(body) == 0 {
 		t.Error("wavefront.v0.Error body should be non-empty")
