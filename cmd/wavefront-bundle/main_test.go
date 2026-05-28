@@ -341,8 +341,16 @@ func TestRunGenTSClientDefaultsToLatestVersion(t *testing.T) {
 	if !strings.Contains(out.String(), "emitted") || !strings.Contains(out.String(), "message class") {
 		t.Errorf("stdout should report the emitted message-class count:\n%s", out.String())
 	}
+	if !strings.Contains(out.String(), "routes.ts") {
+		t.Errorf("stdout should mention the emitted routes.ts:\n%s", out.String())
+	}
 	if _, err := os.Stat(outDir); err != nil {
 		t.Errorf("--out should have been created: %v", err)
+	}
+	// routes.ts must exist at the root of --out (downstream client.ts will
+	// import from it).
+	if _, err := os.Stat(filepath.Join(outDir, "routes.ts")); err != nil {
+		t.Errorf("routes.ts should be present at --out root: %v", err)
 	}
 	// At least one .ts file must have been written under outDir.
 	var sawTS bool

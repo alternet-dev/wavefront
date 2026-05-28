@@ -20,13 +20,14 @@ import (
 
 // GenTSClientResult is the resolved input + outputs of the TypeScript-client
 // codegen for one contract version. The CLI layer renders a status line from
-// it; downstream chunks (routes.ts, client.ts) extend the struct with their
-// own output lists.
+// it; the downstream client.ts chunk will extend the struct with its own
+// output list.
 type GenTSClientResult struct {
 	BundleDir    string
 	OutDir       string
 	Version      string
 	MessageFiles []string // paths relative to OutDir of emitted .ts message classes
+	RoutesFile   string   // path relative to OutDir of the typed route map (routes.ts)
 }
 
 // ProtocGenESMissingError is returned by GenTSClient when protoc-gen-es is
@@ -117,7 +118,13 @@ func GenTSClient(bundleDir, outDir, version string) (*GenTSClientResult, error) 
 		return nil, err
 	}
 
-	messageFiles, err := emitMessageClasses(bundleDir, outDir, resolved)
+	messageFiles, fds, err := emitMessageClasses(bundleDir, outDir, resolved)
+	if err != nil {
+		return nil, err
+	}
+
+	layerDir := filepath.Join(bundleDir, resolved)
+	routesFile, err := emitRoutesFile(layerDir, outDir, resolved, fds)
 	if err != nil {
 		return nil, err
 	}
@@ -127,6 +134,7 @@ func GenTSClient(bundleDir, outDir, version string) (*GenTSClientResult, error) 
 		OutDir:       outDir,
 		Version:      resolved,
 		MessageFiles: messageFiles,
+		RoutesFile:   routesFile,
 	}, nil
 }
 
@@ -162,8 +170,10 @@ func ensureEmptyOutDir(outDir string) error {
 
 // emitMessageClasses invokes protoc-gen-es on the given layer's
 // descriptors.binpb and writes the resulting .ts files under outDir. It
-// returns the relative paths of every file written, in sorted order so the
-// status line and tests are deterministic across runs.
+// returns the relative paths of every file written (sorted ascending so
+// the status line and downstream chunks see a deterministic order) and
+// the parsed FileDescriptorSet so the caller can derive routes.ts
+// imports without re-reading and re-parsing the descriptors.
 //
 // Wire shape: protoc-gen-es is a stock protoc plugin — it reads a wire-
 // encoded CodeGeneratorRequest on stdin and writes a wire-encoded
@@ -171,23 +181,23 @@ func ensureEmptyOutDir(outDir string) error {
 // FileDescriptorSet, marshal it, pipe it in, then unmarshal stdout and
 // write each response.File to disk at the path protoc-gen-es chose
 // (typically <package-path>/<basename>_pb.ts).
-func emitMessageClasses(bundleDir, outDir, version string) ([]string, error) {
+func emitMessageClasses(bundleDir, outDir, version string) ([]string, *descriptorpb.FileDescriptorSet, error) {
 	binPath, err := exec.LookPath("protoc-gen-es")
 	if err != nil {
-		return nil, &ProtocGenESMissingError{Cause: err}
+		return nil, nil, &ProtocGenESMissingError{Cause: err}
 	}
 
 	descPath := filepath.Join(bundleDir, version, "descriptors.binpb")
 	descBytes, err := os.ReadFile(descPath)
 	if err != nil {
-		return nil, fmt.Errorf("gen-ts-client: read %s: %w", descPath, err)
+		return nil, nil, fmt.Errorf("gen-ts-client: read %s: %w", descPath, err)
 	}
 	var fds descriptorpb.FileDescriptorSet
 	if err := proto.Unmarshal(descBytes, &fds); err != nil {
-		return nil, fmt.Errorf("gen-ts-client: parse %s: %w", descPath, err)
+		return nil, nil, fmt.Errorf("gen-ts-client: parse %s: %w", descPath, err)
 	}
 	if len(fds.File) == 0 {
-		return nil, fmt.Errorf("gen-ts-client: %s contains no files", descPath)
+		return nil, nil, fmt.Errorf("gen-ts-client: %s contains no files", descPath)
 	}
 
 	// file_to_generate lists the .proto files the plugin should emit code
@@ -206,7 +216,7 @@ func emitMessageClasses(bundleDir, outDir, version string) ([]string, error) {
 	}
 	reqBytes, err := proto.Marshal(req)
 	if err != nil {
-		return nil, fmt.Errorf("gen-ts-client: marshal CodeGeneratorRequest: %w", err)
+		return nil, nil, fmt.Errorf("gen-ts-client: marshal CodeGeneratorRequest: %w", err)
 	}
 
 	var stdout, stderr bytes.Buffer
@@ -215,22 +225,22 @@ func emitMessageClasses(bundleDir, outDir, version string) ([]string, error) {
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
-		return nil, fmt.Errorf("gen-ts-client: run protoc-gen-es: %w (stderr: %s)", err, strings.TrimSpace(stderr.String()))
+		return nil, nil, fmt.Errorf("gen-ts-client: run protoc-gen-es: %w (stderr: %s)", err, strings.TrimSpace(stderr.String()))
 	}
 
 	var resp pluginpb.CodeGeneratorResponse
 	if err := proto.Unmarshal(stdout.Bytes(), &resp); err != nil {
-		return nil, fmt.Errorf("gen-ts-client: parse CodeGeneratorResponse: %w", err)
+		return nil, nil, fmt.Errorf("gen-ts-client: parse CodeGeneratorResponse: %w", err)
 	}
 	if e := resp.GetError(); e != "" {
-		return nil, fmt.Errorf("gen-ts-client: protoc-gen-es: %s", e)
+		return nil, nil, fmt.Errorf("gen-ts-client: protoc-gen-es: %s", e)
 	}
 
 	written, err := writeGeneratedFiles(outDir, resp.File)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return written, nil
+	return written, &fds, nil
 }
 
 // writeGeneratedFiles materialises each CodeGeneratorResponse_File under

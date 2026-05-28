@@ -196,8 +196,10 @@ func runDraftShim(args []string, errOut, stdout io.Writer) int {
 
 // runGenTSClient parses gen-ts-client's flags and delegates to bundlegen.
 // The emission step shells out to protoc-gen-es on PATH and writes one
-// .ts file per .proto in the layer's descriptor set into --out. routes.ts
-// and client.ts are not emitted yet — they land in the follow-up chunks.
+// .ts file per .proto in the layer's descriptor set into --out, plus a
+// typed routes.ts route map at the --out root. client.ts (the request
+// helper around `routes` and the message classes) is not emitted yet —
+// it lands in the follow-up chunk.
 func runGenTSClient(args []string, errOut, stdout io.Writer) int {
 	fs := flag.NewFlagSet("gen-ts-client", flag.ContinueOnError)
 	fs.SetOutput(errOut)
@@ -220,7 +222,7 @@ func runGenTSClient(args []string, errOut, stdout io.Writer) int {
 		return 1
 	}
 	fmt.Fprintf(stdout,
-		"gen-ts-client: bundle=%s version=%s out=%s\n  emitted %d message class file(s)\n",
-		res.BundleDir, res.Version, res.OutDir, len(res.MessageFiles))
+		"gen-ts-client: bundle=%s version=%s out=%s\n  emitted %d message class file(s) and %s\n",
+		res.BundleDir, res.Version, res.OutDir, len(res.MessageFiles), res.RoutesFile)
 	return 0
 }
