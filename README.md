@@ -59,18 +59,33 @@ It IS NOT:
 - A reverse proxy / TLS terminator / router. The ingress owns that.
 - A WebSocket/streaming tier. wavefront is request/response only.
 
+## Install
+
+The `wavefront-bundle` CLI is published to the alternet-dev Homebrew tap as a
+prebuilt binary (no Go toolchain required):
+
+```bash
+brew install alternet-dev/tap/wavefront-bundle
+```
+
+The Homebrew formula installs only the CLI. The proxy server is distributed
+exclusively as the multi-arch container image at
+`ghcr.io/alternet-dev/wavefront`; see the container invocation in
+[Quick start](#quick-start) below.
+
 ## Quick start
 
 Generate the bundle from your OpenAPI — a file, or the live service's
 `/openapi.json` (no manual export step) — then run the proxy against it:
 
 ```bash
-go build -o wavefront-bundle ./cmd/wavefront-bundle
+# installed via Homebrew, or built from source:
+#   go build -o wavefront-bundle ./cmd/wavefront-bundle
 
 # from a file…
-./wavefront-bundle add --openapi ./openapi.json --bundle ./bundle
+wavefront-bundle add --openapi ./openapi.json --bundle ./bundle
 # …or straight from a running service:
-./wavefront-bundle add --openapi https://api.internal/openapi.json --bundle ./bundle
+wavefront-bundle add --openapi https://api.internal/openapi.json --bundle ./bundle
 ```
 
 The bundle is committed in your repo (it is the contract source of truth) and
