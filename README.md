@@ -126,6 +126,8 @@ All configuration is environment variables, read once at startup.
 | `WAVEFRONT_METRICS_ADDR` | `0.0.0.0:9090` | bind address for `/metrics` |
 | `WAVEFRONT_CONTRACT_VERSION_HEADER` | `X-Api-Contract-Version` | header carrying the client's contract version |
 | `WAVEFRONT_REQUEST_TIMEOUT_MS` | `15000` | upstream request timeout |
+| `WAVEFRONT_READ_HEADER_TIMEOUT_MS` | `10000` | data-plane `ReadHeaderTimeout` (slow-headers cap) |
+| `WAVEFRONT_READ_TIMEOUT_MS` | `30000` | data-plane `ReadTimeout` (headers + body) |
 | `WAVEFRONT_MAX_BODY_BYTES` | `1048576` | inbound body cap |
 | `WAVEFRONT_LOG_LEVEL` | `info` | structured log level |
 

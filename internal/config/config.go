@@ -13,6 +13,8 @@
 //	WAVEFRONT_METRICS_ADDR            — ops/metrics listen address (default 0.0.0.0:9090)
 //	WAVEFRONT_CONTRACT_VERSION_HEADER — header carrying the contract version (default X-Api-Contract-Version)
 //	WAVEFRONT_REQUEST_TIMEOUT_MS      — per-request upstream timeout in ms (default 15000)
+//	WAVEFRONT_READ_HEADER_TIMEOUT_MS  — data-plane ReadHeaderTimeout in ms (default 10000)
+//	WAVEFRONT_READ_TIMEOUT_MS         — data-plane ReadTimeout (headers+body) in ms (default 30000)
 //	WAVEFRONT_MAX_BODY_BYTES          — maximum request body size in bytes (default 1048576)
 //	WAVEFRONT_LOG_LEVEL               — log level: debug|info|warn|error (default info)
 package config
@@ -37,6 +39,8 @@ type Config struct {
 	MetricsAddr           string
 	ContractVersionHeader string
 	RequestTimeout        time.Duration
+	ReadHeaderTimeout     time.Duration
+	ReadTimeout           time.Duration
 	MaxBodyBytes          int64
 	LogLevel              slog.Level
 }
@@ -58,11 +62,13 @@ func (e *InvalidError) Error() string {
 func (e *InvalidError) Unwrap() error { return e.Err }
 
 const (
-	defListenAddr  = "0.0.0.0:8080"
-	defMetricsAddr = "0.0.0.0:9090"
-	defCVHeader    = "X-Api-Contract-Version"
-	defTimeoutMS   = 15000
-	defMaxBody     = 1 << 20
+	defListenAddr        = "0.0.0.0:8080"
+	defMetricsAddr       = "0.0.0.0:9090"
+	defCVHeader          = "X-Api-Contract-Version"
+	defTimeoutMS         = 15000
+	defReadHeaderTimeout = 10000
+	defReadTimeout       = 30000
+	defMaxBody           = 1 << 20
 )
 
 var errPositive = errors.New("must be greater than zero")
@@ -164,6 +170,24 @@ func Load(opts ...Option) (*Config, error) {
 		return nil, &InvalidError{Var: "WAVEFRONT_REQUEST_TIMEOUT_MS", Value: strconv.Itoa(timeoutMS), Err: errPositive}
 	}
 	cfg.RequestTimeout = time.Duration(timeoutMS) * time.Millisecond
+
+	readHeaderMS, e := parseIntVar(nonBlank, "WAVEFRONT_READ_HEADER_TIMEOUT_MS", defReadHeaderTimeout)
+	if e != nil {
+		return nil, e
+	}
+	if readHeaderMS <= 0 {
+		return nil, &InvalidError{Var: "WAVEFRONT_READ_HEADER_TIMEOUT_MS", Value: strconv.Itoa(readHeaderMS), Err: errPositive}
+	}
+	cfg.ReadHeaderTimeout = time.Duration(readHeaderMS) * time.Millisecond
+
+	readMS, e := parseIntVar(nonBlank, "WAVEFRONT_READ_TIMEOUT_MS", defReadTimeout)
+	if e != nil {
+		return nil, e
+	}
+	if readMS <= 0 {
+		return nil, &InvalidError{Var: "WAVEFRONT_READ_TIMEOUT_MS", Value: strconv.Itoa(readMS), Err: errPositive}
+	}
+	cfg.ReadTimeout = time.Duration(readMS) * time.Millisecond
 
 	maxBody, e := parseInt64Var(nonBlank, "WAVEFRONT_MAX_BODY_BYTES", defMaxBody)
 	if e != nil {

@@ -218,6 +218,23 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Early Content-Length size check: if the client declared a length that
+	// already exceeds MaxBodyBytes, reject with 413 BEFORE touching the body.
+	// This matters for Expect: 100-continue (RFC 7231 §5.1.1): Go's
+	// http.Server auto-emits "100 Continue" on the first body Read, so any
+	// rejection that happens via MaxBytesReader (which trips inside Read)
+	// would arrive after the client had already received the go-ahead.
+	// Reading r.ContentLength here keeps us out of Read until the size
+	// budget is known to be satisfiable. Chunked-encoded requests carry no
+	// Content-Length (r.ContentLength == -1) and are still caught by the
+	// MaxBytesReader mid-read — acceptable, because a client combining
+	// chunked + Expect-100 has no ground to complain about wasted bandwidth
+	// (it sent the body in pieces by its own choice).
+	if r.ContentLength > 0 && r.ContentLength > s.cfg.MaxBodyBytes {
+		fail(wireerror.RequestBodyTooLarge(""), "")
+		return
+	}
+
 	r.Body = http.MaxBytesReader(w, r.Body, s.cfg.MaxBodyBytes)
 	body, err := io.ReadAll(r.Body)
 	if err != nil {

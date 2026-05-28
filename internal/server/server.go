@@ -22,17 +22,19 @@ import (
 	"github.com/alternet-dev/wavefront/internal/config"
 )
 
-// HTTP server timeouts. The data-plane WriteTimeout is deliberately left
-// unset: a response is bounded by the per-request upstream context
-// (WAVEFRONT_REQUEST_TIMEOUT_MS — the operator's override), and a fixed
-// WriteTimeout would truncate a legitimately slow-but-valid upstream. The
-// ops listener serves only tiny, fast bodies, so it gets a WriteTimeout too.
+// HTTP server timeouts. ReadHeaderTimeout and ReadTimeout come from config —
+// WAVEFRONT_READ_HEADER_TIMEOUT_MS and WAVEFRONT_READ_TIMEOUT_MS — so an
+// operator can tune them per deployment. The data-plane WriteTimeout is
+// deliberately left unset: a response is bounded by the per-request upstream
+// context (WAVEFRONT_REQUEST_TIMEOUT_MS — the operator's override), and a
+// fixed WriteTimeout would truncate a legitimately slow-but-valid upstream.
+// The ops listener serves only tiny, fast bodies, so it gets a WriteTimeout
+// too. IdleTimeout and shutdownTimeout are internal — fixed defaults are
+// fine.
 const (
-	srvReadHeaderTimeout = 5 * time.Second
-	srvReadTimeout       = 15 * time.Second
-	srvIdleTimeout       = 60 * time.Second
-	opsWriteTimeout      = 10 * time.Second
-	shutdownTimeout      = 10 * time.Second
+	srvIdleTimeout  = 60 * time.Second
+	opsWriteTimeout = 10 * time.Second
+	shutdownTimeout = 10 * time.Second
 )
 
 type Server struct {
@@ -157,16 +159,16 @@ func (s *Server) Run(ctx context.Context) error {
 	data := &http.Server{
 		Addr:              s.cfg.ListenAddr,
 		Handler:           s.DataHandler(),
-		ReadHeaderTimeout: srvReadHeaderTimeout,
-		ReadTimeout:       srvReadTimeout,
+		ReadHeaderTimeout: s.cfg.ReadHeaderTimeout,
+		ReadTimeout:       s.cfg.ReadTimeout,
 		IdleTimeout:       srvIdleTimeout,
 		// WriteTimeout intentionally unset — see the timeout consts.
 	}
 	ops := &http.Server{
 		Addr:              s.cfg.MetricsAddr,
 		Handler:           s.OpsHandler(),
-		ReadHeaderTimeout: srvReadHeaderTimeout,
-		ReadTimeout:       srvReadTimeout,
+		ReadHeaderTimeout: s.cfg.ReadHeaderTimeout,
+		ReadTimeout:       s.cfg.ReadTimeout,
 		WriteTimeout:      opsWriteTimeout,
 		IdleTimeout:       srvIdleTimeout,
 	}
