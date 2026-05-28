@@ -46,8 +46,18 @@ type Server struct {
 
 func New(cfg *config.Config) *Server {
 	s := &Server{
-		cfg:     cfg,
-		client:  &http.Client{}, // the per-request context owns the deadline
+		cfg: cfg,
+		// The per-request context owns the deadline; CheckRedirect refuses
+		// every 3xx so an upstream redirect surfaces as a 3xx response to
+		// the proxy (and falls into the default arm of the status switch in
+		// http.go → upstream_error 502). The bundle's route binding is the
+		// authoritative path — a redirect from the upstream is shape drift
+		// the operator needs to see, not silently follow.
+		client: &http.Client{
+			CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+		},
 		metrics: newMetrics(),
 		logger:  slog.Default(),
 	}
