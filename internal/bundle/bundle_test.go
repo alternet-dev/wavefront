@@ -643,3 +643,55 @@ func TestLoadMultipleLayers(t *testing.T) {
 		t.Errorf("resolve acme.v1.Ping against merged registry: %v", err)
 	}
 }
+
+// Versions exposes the loaded contract versions in lexical-ascending order.
+// Downstream tooling (gen-ts-client, etc.) needs a stable list to pick the
+// latest layer (the lexically-highest version) and to render a "available:
+// ..." hint when a caller pins an unknown version.
+func TestVersionsReturnsAllContractsLexicalAscending(t *testing.T) {
+	mk := func(cv, route string) string {
+		return "version: 1\ncontracts:\n  - contract_version: \"" + cv + "\"\n" +
+			"    route: " + route + "\n    method: GET\n" +
+			"    request_message: acme.v1.Ping\n    response_message: acme.v1.Pong\n"
+	}
+	dir := t.TempDir()
+	// Write layers in non-sorted creation order to confirm Versions() does the
+	// sort itself (does not rely on directory-entry order at the call site).
+	for _, l := range []struct{ name, cv, route string }{
+		{"2026-05", "2026-05", "/b"},
+		{"2024-11", "2024-11", "/a"},
+		{"2025-03", "2025-03", "/c"},
+	} {
+		ld := filepath.Join(dir, l.name)
+		mustMkdir(t, ld)
+		mustWrite(t, filepath.Join(ld, fileDescriptors), fdsBytes(t))
+		mustWrite(t, filepath.Join(ld, fileOpenAPI), []byte(validOpenAPI))
+		mustWrite(t, filepath.Join(ld, fileVersions), []byte(mk(l.cv, l.route)))
+	}
+	b, err := Load(dir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	got := b.Versions()
+	want := []string{"2024-11", "2025-03", "2026-05"}
+	if len(got) != len(want) {
+		t.Fatalf("Versions() len = %d, want %d (got=%v)", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("Versions()[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+func TestVersionsSingleLayer(t *testing.T) {
+	dir := writeBundle(t, fdsBytes(t), validOpenAPI, validVersions)
+	b, err := Load(dir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	got := b.Versions()
+	if len(got) != 1 || got[0] != "2024-11" {
+		t.Errorf("Versions() = %v, want [2024-11]", got)
+	}
+}

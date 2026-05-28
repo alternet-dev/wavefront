@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"google.golang.org/protobuf/proto"
@@ -141,6 +142,19 @@ func (b *Bundle) LookupRoute(path, method string) (*Contract, bool) {
 		}
 	}
 	return nil, false
+}
+
+// Versions returns the contract versions present in the bundle, sorted
+// lexically ascending. The last element is the "latest" layer — the
+// highest contract version — which is the default target for downstream
+// per-bundle codegen (gen-ts-client and friends).
+func (b *Bundle) Versions() []string {
+	out := make([]string, 0, len(b.contracts))
+	for cv := range b.contracts {
+		out = append(out, cv)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // Message resolves a fully-qualified proto message name against the bundle's

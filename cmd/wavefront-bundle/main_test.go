@@ -286,6 +286,178 @@ func TestRunDraftShimMissingLayer(t *testing.T) {
 	}
 }
 
+// --- gen-ts-client subcommand ---
+
+// writeTwoLayerBundle writes a fixture bundle with two contract versions:
+// 2026-05-17 (from the sample OpenAPI) and 2027-01-09 (a second add). It
+// returns the bundle dir; the latest version is "2027-01-09".
+func writeTwoLayerBundle(t *testing.T) (bundleDir, latest, older string) {
+	t.Helper()
+	bundleDir = t.TempDir()
+	if code := run([]string{"add", "--openapi", writeSampleOpenAPI(t), "--bundle", bundleDir}, io.Discard); code != 0 {
+		t.Fatalf("seed bundle (add older): exit %d", code)
+	}
+	// Second layer with a different info.version so it sorts above the first.
+	const doc2 = `{"openapi":"3.0.0","info":{"title":"t","version":"2027-01-09"},
+"paths":{"/v3/echo":{"post":{
+"requestBody":{"content":{"application/json":{"schema":{"$ref":"#/components/schemas/Req"}}}},
+"responses":{"200":{"content":{"application/json":{"schema":{"$ref":"#/components/schemas/Req"}}}}}}}},
+"components":{"schemas":{"Req":{"type":"object","properties":{"text":{"type":"string"}}}}}}`
+	p := filepath.Join(t.TempDir(), "openapi2.json")
+	if err := os.WriteFile(p, []byte(doc2), 0o600); err != nil {
+		t.Fatalf("write openapi2: %v", err)
+	}
+	if code := run([]string{"add", "--openapi", p, "--bundle", bundleDir}, io.Discard); code != 0 {
+		t.Fatalf("seed bundle (add newer): exit %d", code)
+	}
+	return bundleDir, "2027-01-09", "2026-05-17"
+}
+
+func TestRunGenTSClientDefaultsToLatestVersion(t *testing.T) {
+	bundleDir, latest, _ := writeTwoLayerBundle(t)
+	outDir := filepath.Join(t.TempDir(), "client") // missing — must be created
+	var out bytes.Buffer
+	code := runGenTSClient(
+		[]string{"--bundle", bundleDir, "--out", outDir},
+		io.Discard, &out)
+	if code != 0 {
+		t.Fatalf("gen-ts-client (default version): exit %d, want 0", code)
+	}
+	if !strings.Contains(out.String(), "version="+latest) {
+		t.Errorf("stdout should name the resolved version %q:\n%s", latest, out.String())
+	}
+	if !strings.Contains(out.String(), "scaffolding only") {
+		t.Errorf("stdout should signal scaffolding-only:\n%s", out.String())
+	}
+	if _, err := os.Stat(outDir); err != nil {
+		t.Errorf("--out should have been created: %v", err)
+	}
+}
+
+func TestRunGenTSClientPinsVersion(t *testing.T) {
+	bundleDir, _, older := writeTwoLayerBundle(t)
+	outDir := filepath.Join(t.TempDir(), "client")
+	var out bytes.Buffer
+	code := runGenTSClient(
+		[]string{"--bundle", bundleDir, "--out", outDir, "--version", older},
+		io.Discard, &out)
+	if code != 0 {
+		t.Fatalf("gen-ts-client --version %s: exit %d, want 0", older, code)
+	}
+	if !strings.Contains(out.String(), "version="+older) {
+		t.Errorf("stdout should reflect the pinned version %q:\n%s", older, out.String())
+	}
+}
+
+func TestRunGenTSClientRejectsUnknownVersion(t *testing.T) {
+	bundleDir, latest, older := writeTwoLayerBundle(t)
+	outDir := filepath.Join(t.TempDir(), "client")
+	var errOut bytes.Buffer
+	code := runGenTSClient(
+		[]string{"--bundle", bundleDir, "--out", outDir, "--version", "9999-99"},
+		&errOut, io.Discard)
+	if code == 0 {
+		t.Fatal("gen-ts-client --version <bogus>: want non-zero exit code")
+	}
+	msg := errOut.String()
+	if !strings.Contains(msg, "9999-99") {
+		t.Errorf("error should name the missing version:\n%s", msg)
+	}
+	// The available list must surface both known versions; order is the
+	// lexically-ascending list emitted by bundle.Versions().
+	for _, v := range []string{older, latest} {
+		if !strings.Contains(msg, v) {
+			t.Errorf("error should list available version %q:\n%s", v, msg)
+		}
+	}
+}
+
+func TestRunGenTSClientBundleLoadFailureSurfaces(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "does-not-exist")
+	outDir := filepath.Join(t.TempDir(), "client")
+	var errOut bytes.Buffer
+	code := runGenTSClient(
+		[]string{"--bundle", missing, "--out", outDir},
+		&errOut, io.Discard)
+	if code == 0 {
+		t.Fatal("gen-ts-client with missing bundle: want non-zero exit code")
+	}
+	if errOut.Len() == 0 {
+		t.Error("gen-ts-client with missing bundle: expected an error message on stderr")
+	}
+}
+
+func TestRunGenTSClientRefusesNonEmptyOut(t *testing.T) {
+	bundleDir, _, _ := writeTwoLayerBundle(t)
+	outDir := t.TempDir() // pre-existing, will populate
+	if err := os.WriteFile(filepath.Join(outDir, "stale.ts"), []byte("// stale\n"), 0o600); err != nil {
+		t.Fatalf("seed stale file: %v", err)
+	}
+	var errOut bytes.Buffer
+	code := runGenTSClient(
+		[]string{"--bundle", bundleDir, "--out", outDir},
+		&errOut, io.Discard)
+	if code == 0 {
+		t.Fatal("gen-ts-client into a non-empty --out: want non-zero exit code")
+	}
+	if !strings.Contains(errOut.String(), "empty") {
+		t.Errorf("error should explain that --out must be empty or missing:\n%s", errOut.String())
+	}
+}
+
+func TestRunGenTSClientAcceptsExistingEmptyOut(t *testing.T) {
+	bundleDir, _, _ := writeTwoLayerBundle(t)
+	outDir := t.TempDir() // pre-existing, empty
+	code := runGenTSClient(
+		[]string{"--bundle", bundleDir, "--out", outDir},
+		io.Discard, io.Discard)
+	if code != 0 {
+		t.Fatalf("gen-ts-client into an existing empty --out: exit %d, want 0", code)
+	}
+}
+
+func TestRunGenTSClientRefusesOutThatIsAFile(t *testing.T) {
+	bundleDir, _, _ := writeTwoLayerBundle(t)
+	outDir := filepath.Join(t.TempDir(), "not-a-dir")
+	if err := os.WriteFile(outDir, []byte("file\n"), 0o600); err != nil {
+		t.Fatalf("seed file at --out path: %v", err)
+	}
+	var errOut bytes.Buffer
+	code := runGenTSClient(
+		[]string{"--bundle", bundleDir, "--out", outDir},
+		&errOut, io.Discard)
+	if code == 0 {
+		t.Fatal("gen-ts-client with --out pointing at a file: want non-zero exit code")
+	}
+}
+
+func TestRunGenTSClientMissingFlags(t *testing.T) {
+	// No flags at all.
+	if code := runGenTSClient(nil, io.Discard, io.Discard); code != 2 {
+		t.Fatalf("gen-ts-client without flags: exit %d, want 2", code)
+	}
+	// Missing --out.
+	if code := runGenTSClient([]string{"--bundle", t.TempDir()}, io.Discard, io.Discard); code != 2 {
+		t.Fatalf("gen-ts-client without --out: exit %d, want 2", code)
+	}
+	// Missing --bundle.
+	if code := runGenTSClient([]string{"--out", t.TempDir()}, io.Discard, io.Discard); code != 2 {
+		t.Fatalf("gen-ts-client without --bundle: exit %d, want 2", code)
+	}
+}
+
+func TestRunDispatchGenTSClient(t *testing.T) {
+	// run() must dispatch the gen-ts-client subcommand. Use a missing bundle
+	// so we don't need to seed one — the dispatch path is what's under test.
+	missing := filepath.Join(t.TempDir(), "no-bundle")
+	code := run(
+		[]string{"gen-ts-client", "--bundle", missing, "--out", filepath.Join(t.TempDir(), "client")},
+		io.Discard)
+	if code == 0 {
+		t.Fatal("run gen-ts-client with missing bundle: want non-zero exit code")
+	}
+}
+
 // --- verify: candidates-block check ---
 
 func TestRunVerifyRefusesUnresolvedCandidatesBlock(t *testing.T) {
