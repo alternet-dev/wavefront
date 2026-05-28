@@ -121,6 +121,20 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// First-pass routing gate: the inbound (path, method) must match a
+	// contract registered in the bundle. If it does not — unknown path, or
+	// known path with a wrong method — emit the unknown_route 404 envelope
+	// and stop. The check runs before negotiation: we do not yet know
+	// (or care about) the contract-version header, so `version` stays
+	// `versionUnknown` on the response header and the structured log line.
+	// Wrong-method folds into the same 404 (no 405, no `Allow` header)
+	// because each contract names exactly one method and the bundle is the
+	// only routing source of truth.
+	if !b.HasRoute(r.URL.Path, r.Method) {
+		fail(wireerror.UnknownRoute("no contract binds "+r.Method+" "+r.URL.Path), "")
+		return
+	}
+
 	r.Body = http.MaxBytesReader(w, r.Body, s.cfg.MaxBodyBytes)
 	body, err := io.ReadAll(r.Body)
 	if err != nil {

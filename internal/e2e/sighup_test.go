@@ -81,7 +81,7 @@ func TestReloadBundleFailurePreservesPrevious(t *testing.T) {
 // version and returns the (HTTP status, X-Wavefront-Error code) pair.
 func sendSkewProbe(t *testing.T, h *Harness, version string) (int, string) {
 	t.Helper()
-	req, _ := http.NewRequest(http.MethodPost, h.Proxy.URL, bytes.NewReader(PingBytes(t, h.Bundle, "hi", 1)))
+	req, _ := http.NewRequest(http.MethodPost, h.Proxy.URL+"/v3/echo", bytes.NewReader(PingBytes(t, h.Bundle, "hi", 1)))
 	req.Header.Set("X-Api-Contract-Version", version)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {

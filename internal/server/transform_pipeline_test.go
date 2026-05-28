@@ -76,7 +76,7 @@ overrides:
 	fs := httptest.NewServer(s.DataHandler())
 	defer fs.Close()
 
-	req, _ := http.NewRequest(http.MethodPost, fs.URL, bytes.NewReader(transformPing(t, b)))
+	req, _ := http.NewRequest(http.MethodPost, fs.URL+"/v3/echo", bytes.NewReader(transformPing(t, b)))
 	req.Header.Set("X-Api-Contract-Version", "2024-11")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -136,7 +136,7 @@ overrides:
 	fs := httptest.NewServer(s.DataHandler())
 	defer fs.Close()
 
-	req, _ := http.NewRequest(http.MethodPost, fs.URL, bytes.NewReader(transformPing(t, b)))
+	req, _ := http.NewRequest(http.MethodPost, fs.URL+"/v3/echo", bytes.NewReader(transformPing(t, b)))
 	req.Header.Set("X-Api-Contract-Version", "2024-11")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -188,7 +188,7 @@ overrides:
 		t.Fatalf("marshal: %v", perr)
 	}
 
-	req, _ := http.NewRequest(http.MethodPost, fs.URL, bytes.NewReader(empty))
+	req, _ := http.NewRequest(http.MethodPost, fs.URL+"/v3/echo", bytes.NewReader(empty))
 	req.Header.Set("X-Api-Contract-Version", "2024-11")
 	resp, derr := http.DefaultClient.Do(req)
 	if derr != nil {

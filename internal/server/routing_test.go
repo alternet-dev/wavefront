@@ -99,7 +99,7 @@ func TestRouteOverrideSendsVersionToNamedTarget(t *testing.T) {
 	body := pingBytes(t, b, "hi", 1)
 
 	// Request with version "2024-11" (no override) must reach the default upstream.
-	req1, _ := http.NewRequest(http.MethodPost, front.URL+"/anything", strings.NewReader(string(body)))
+	req1, _ := http.NewRequest(http.MethodPost, front.URL+"/v3/echo", strings.NewReader(string(body)))
 	req1.Header.Set("X-Api-Contract-Version", "2024-11")
 	resp1, err := http.DefaultClient.Do(req1)
 	if err != nil {
@@ -114,7 +114,7 @@ func TestRouteOverrideSendsVersionToNamedTarget(t *testing.T) {
 	}
 
 	// Request with version "2026-05" (route override → "v2") must reach the named upstream.
-	req2, _ := http.NewRequest(http.MethodPost, front.URL+"/anything", strings.NewReader(string(body)))
+	req2, _ := http.NewRequest(http.MethodPost, front.URL+"/v3/echo", strings.NewReader(string(body)))
 	req2.Header.Set("X-Api-Contract-Version", "2026-05")
 	resp2, err := http.DefaultClient.Do(req2)
 	if err != nil {
@@ -145,7 +145,7 @@ func TestRouteOverrideUnknownTargetIs502(t *testing.T) {
 	defer front.Close()
 
 	body := pingBytes(t, b, "hi", 1)
-	req, _ := http.NewRequest(http.MethodPost, front.URL+"/anything", strings.NewReader(string(body)))
+	req, _ := http.NewRequest(http.MethodPost, front.URL+"/v3/echo", strings.NewReader(string(body)))
 	req.Header.Set("X-Api-Contract-Version", "2026-05")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {

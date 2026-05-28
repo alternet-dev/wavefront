@@ -117,6 +117,23 @@ func (b *Bundle) Contract(version string) (*Contract, bool) {
 	return c, ok
 }
 
+// HasRoute reports whether any contract in the bundle binds (path, method).
+// The proxy uses this as the first-pass routing gate: a request whose
+// (URL.Path, Method) is not in the bundle's route set is refused before any
+// other request work (decode, negotiate, upstream call). A wrong-method
+// request — same path, different method — is NOT routed: each contract names
+// exactly one method, so wrong-method folds into the same "no contract
+// binds this" miss that an entirely unknown path produces. The caller emits
+// `unknown_route` 404 in both cases.
+func (b *Bundle) HasRoute(path, method string) bool {
+	for _, c := range b.contracts {
+		if c.route == path && c.method == method {
+			return true
+		}
+	}
+	return false
+}
+
 // Message resolves a fully-qualified proto message name against the bundle's
 // FileDescriptorSet.
 func (b *Bundle) Message(fullName string) (protoreflect.MessageDescriptor, error) {

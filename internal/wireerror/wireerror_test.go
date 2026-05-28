@@ -34,6 +34,7 @@ func TestCodeStatusTableMatchesProtocol(t *testing.T) {
 		{UpstreamError(""), "upstream_error", 502},
 		{TransformFailedRequest(""), "transform_failed", 422},
 		{TransformFailedResponse(""), "transform_failed", 502},
+		{UnknownRoute(""), "unknown_route", 404},
 	}
 	for _, c := range cases {
 		if c.err.Code() != c.code {
@@ -50,6 +51,7 @@ func TestContentTypeAlwaysProtobuf(t *testing.T) {
 		UnsupportedContractVersion(""), DecodeFailed(""), RequestBodyTooLarge(""),
 		UpstreamTimeout(""), UpstreamError(""),
 		TransformFailedRequest(""), TransformFailedResponse(""),
+		UnknownRoute(""),
 	} {
 		if got := e.Headers().Get("Content-Type"); got != "application/protobuf" {
 			t.Errorf("%s: Content-Type = %q, want application/protobuf", e.Code(), got)
@@ -64,6 +66,7 @@ func TestRetryAfterOnlyOnUpstreamTimeout(t *testing.T) {
 	for _, e := range []*Error{
 		UnsupportedContractVersion(""), DecodeFailed(""), RequestBodyTooLarge(""), UpstreamError(""),
 		TransformFailedRequest(""), TransformFailedResponse(""),
+		UnknownRoute(""),
 	} {
 		if got := e.Headers().Get("Retry-After"); got != "" {
 			t.Errorf("%s: Retry-After should be unset, got %q", e.Code(), got)

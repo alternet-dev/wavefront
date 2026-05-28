@@ -141,7 +141,7 @@ func TestProxySuccessForwardsAndTranslates(t *testing.T) {
 	front := httptest.NewServer(s.DataHandler())
 	defer front.Close()
 
-	req, _ := http.NewRequest(http.MethodPost, front.URL+"/anything", strings.NewReader(string(pingBytes(t, b, "hi", 7))))
+	req, _ := http.NewRequest(http.MethodPost, front.URL+"/v3/echo", strings.NewReader(string(pingBytes(t, b, "hi", 7))))
 	req.Header.Set("X-Api-Contract-Version", "2024-11")
 	req.Header.Set("Authorization", "Bearer abc")
 	req.Header.Set("traceparent", "tp-1")
@@ -181,7 +181,7 @@ func TestBodyTooLargeIs413(t *testing.T) {
 	front := httptest.NewServer(s.DataHandler())
 	defer front.Close()
 
-	req, _ := http.NewRequest(http.MethodPost, front.URL+"/x", strings.NewReader("way more than four bytes"))
+	req, _ := http.NewRequest(http.MethodPost, front.URL+"/v3/echo", strings.NewReader("way more than four bytes"))
 	req.Header.Set("X-Api-Contract-Version", "2024-11")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -203,7 +203,7 @@ func TestUnknownContractVersionIs400(t *testing.T) {
 	front := httptest.NewServer(s.DataHandler())
 	defer front.Close()
 
-	req, _ := http.NewRequest(http.MethodPost, front.URL+"/x", strings.NewReader("ignored"))
+	req, _ := http.NewRequest(http.MethodPost, front.URL+"/v3/echo", strings.NewReader("ignored"))
 	req.Header.Set("X-Api-Contract-Version", "2099-01")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -239,7 +239,7 @@ func TestUpstreamTimeoutIs504(t *testing.T) {
 	front := httptest.NewServer(s.DataHandler())
 	defer front.Close()
 
-	req, _ := http.NewRequest(http.MethodPost, front.URL+"/x", strings.NewReader(string(pingBytes(t, b, "hi", 1))))
+	req, _ := http.NewRequest(http.MethodPost, front.URL+"/v3/echo", strings.NewReader(string(pingBytes(t, b, "hi", 1))))
 	req.Header.Set("X-Api-Contract-Version", "2024-11")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -270,7 +270,7 @@ func TestUpstreamNon2xxIs502(t *testing.T) {
 	front := httptest.NewServer(s.DataHandler())
 	defer front.Close()
 
-	req, _ := http.NewRequest(http.MethodPost, front.URL+"/x", strings.NewReader(string(pingBytes(t, b, "hi", 1))))
+	req, _ := http.NewRequest(http.MethodPost, front.URL+"/v3/echo", strings.NewReader(string(pingBytes(t, b, "hi", 1))))
 	req.Header.Set("X-Api-Contract-Version", "2024-11")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {

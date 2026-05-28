@@ -12,7 +12,7 @@ func TestUnsupportedContractVersionReturns400(t *testing.T) {
 	// unsupported_contract_version error (HTTP 400), never a silent fallback.
 	h := Spawn(t, SpawnOpts{})
 
-	req, _ := http.NewRequest(http.MethodPost, h.Proxy.URL+"/x", strings.NewReader("ignored"))
+	req, _ := http.NewRequest(http.MethodPost, h.Proxy.URL+"/v3/echo", strings.NewReader("ignored"))
 	req.Header.Set("X-Api-Contract-Version", "1999-01")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {

@@ -20,7 +20,7 @@ func TestUpstreamTimeoutReturns504(t *testing.T) {
 		ConfigOverride: func(c *config.Config) { c.RequestTimeout = 40 * time.Millisecond },
 	})
 
-	req, _ := http.NewRequest(http.MethodPost, h.Proxy.URL+"/x", bytes.NewReader(PingBytes(t, h.Bundle, "hi", 1)))
+	req, _ := http.NewRequest(http.MethodPost, h.Proxy.URL+"/v3/echo", bytes.NewReader(PingBytes(t, h.Bundle, "hi", 1)))
 	req.Header.Set("X-Api-Contract-Version", "2024-11")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -45,7 +45,7 @@ func TestRequestBodyTooLargeReturns413(t *testing.T) {
 		ConfigOverride: func(c *config.Config) { c.MaxBodyBytes = 8 },
 	})
 
-	req, _ := http.NewRequest(http.MethodPost, h.Proxy.URL+"/x", strings.NewReader("far more than eight bytes of body"))
+	req, _ := http.NewRequest(http.MethodPost, h.Proxy.URL+"/v3/echo", strings.NewReader("far more than eight bytes of body"))
 	req.Header.Set("X-Api-Contract-Version", "2024-11")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -72,7 +72,7 @@ func TestUpstreamUnreachableReturns502(t *testing.T) {
 		},
 	})
 
-	req, _ := http.NewRequest(http.MethodPost, h.Proxy.URL+"/x", bytes.NewReader(PingBytes(t, h.Bundle, "hi", 1)))
+	req, _ := http.NewRequest(http.MethodPost, h.Proxy.URL+"/v3/echo", bytes.NewReader(PingBytes(t, h.Bundle, "hi", 1)))
 	req.Header.Set("X-Api-Contract-Version", "2024-11")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -102,7 +102,7 @@ overrides:
 `,
 	})
 
-	req, _ := http.NewRequest(http.MethodPost, h.Proxy.URL, bytes.NewReader(PingBytes(t, h.Bundle, "hi", 7)))
+	req, _ := http.NewRequest(http.MethodPost, h.Proxy.URL+"/v3/echo", bytes.NewReader(PingBytes(t, h.Bundle, "hi", 7)))
 	req.Header.Set("X-Api-Contract-Version", "2024-11")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -136,7 +136,7 @@ overrides:
 `,
 	})
 
-	req, _ := http.NewRequest(http.MethodPost, h.Proxy.URL, bytes.NewReader(PingTextOnly(t, h.Bundle, "hi")))
+	req, _ := http.NewRequest(http.MethodPost, h.Proxy.URL+"/v3/echo", bytes.NewReader(PingTextOnly(t, h.Bundle, "hi")))
 	req.Header.Set("X-Api-Contract-Version", "2024-11")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
