@@ -123,6 +123,10 @@ jobs:
             runner: macos-14
             goos: darwin
             goarch: arm64
+          - target: x86_64-apple-darwin
+            runner: macos-13
+            goos: darwin
+            goarch: amd64
           - target: x86_64-unknown-linux-gnu
             runner: ubuntu-latest
             goos: linux
