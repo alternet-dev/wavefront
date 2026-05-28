@@ -52,6 +52,7 @@ func TestUpstreamStatusPassthroughTable(t *testing.T) {
 			defer front.Close()
 
 			req, _ := http.NewRequest(http.MethodPost, front.URL+"/v3/echo", strings.NewReader(string(pingBytes(t, b, "hi", 1))))
+			req.Header.Set("Content-Type", "application/protobuf")
 			req.Header.Set("X-Api-Contract-Version", "2024-11")
 			resp, err := http.DefaultClient.Do(req)
 			if err != nil {
@@ -109,6 +110,7 @@ func TestUpstream429PreservesRetryAfter(t *testing.T) {
 	defer front.Close()
 
 	req, _ := http.NewRequest(http.MethodPost, front.URL+"/v3/echo", strings.NewReader(string(pingBytes(t, b, "hi", 1))))
+	req.Header.Set("Content-Type", "application/protobuf")
 	req.Header.Set("X-Api-Contract-Version", "2024-11")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -145,6 +147,7 @@ func TestUpstream429NoRetryAfter(t *testing.T) {
 	defer front.Close()
 
 	req, _ := http.NewRequest(http.MethodPost, front.URL+"/v3/echo", strings.NewReader(string(pingBytes(t, b, "hi", 1))))
+	req.Header.Set("Content-Type", "application/protobuf")
 	req.Header.Set("X-Api-Contract-Version", "2024-11")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -182,6 +185,7 @@ func TestUpstream404IsUpstreamStatus(t *testing.T) {
 	// /v3/echo IS bound by the fixture, so the route gate admits the request
 	// and the upstream is consulted.
 	req, _ := http.NewRequest(http.MethodPost, front.URL+"/v3/echo", strings.NewReader(string(pingBytes(t, b, "hi", 1))))
+	req.Header.Set("Content-Type", "application/protobuf")
 	req.Header.Set("X-Api-Contract-Version", "2024-11")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -217,6 +221,7 @@ func TestUpstream422IsUpstreamStatus(t *testing.T) {
 	defer front.Close()
 
 	req, _ := http.NewRequest(http.MethodPost, front.URL+"/v3/echo", strings.NewReader(string(pingBytes(t, b, "hi", 1))))
+	req.Header.Set("Content-Type", "application/protobuf")
 	req.Header.Set("X-Api-Contract-Version", "2024-11")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -259,6 +264,7 @@ func TestUpstreamNon2xxOutsideSetIs502(t *testing.T) {
 			defer front.Close()
 
 			req, _ := http.NewRequest(http.MethodPost, front.URL+"/v3/echo", strings.NewReader(string(pingBytes(t, b, "hi", 1))))
+			req.Header.Set("Content-Type", "application/protobuf")
 			req.Header.Set("X-Api-Contract-Version", "2024-11")
 			resp, err := http.DefaultClient.Do(req)
 			if err != nil {

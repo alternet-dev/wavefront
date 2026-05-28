@@ -114,6 +114,7 @@ func TestChainAppliesRequestOpsInOrder(t *testing.T) {
 	}
 
 	req, _ := http.NewRequest(http.MethodPost, front.URL+"/v3/echo", bytes.NewReader(raw))
+	req.Header.Set("Content-Type", "application/protobuf")
 	req.Header.Set("X-Api-Contract-Version", "2024-01")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"mime"
 	"net/http"
 	"strconv"
 	"strings"
@@ -80,6 +81,44 @@ func forwardClientHeaders(dst, src http.Header) {
 	}
 }
 
+// hasRequestBody reports whether the inbound request presents bytes to the
+// proxy. A declared positive Content-Length, or a chunked Transfer-Encoding,
+// counts; an explicit zero-length body does not. This is what gates the 415
+// envelope check: a request with no body has not declared any envelope, so
+// the codec contract has nothing to enforce. net/http sets ContentLength to
+// the parsed value when the client supplied a Content-Length header, to -1
+// when the framing is chunked/unknown, and to 0 when the body is empty.
+func hasRequestBody(r *http.Request) bool {
+	if r.ContentLength > 0 {
+		return true
+	}
+	if r.ContentLength < 0 {
+		// Chunked or otherwise framed without a length — bytes are coming.
+		return true
+	}
+	for _, te := range r.TransferEncoding {
+		if te != "identity" && te != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// isProtobufContentType reports whether v names the codec's protobuf media
+// type. Media-type comparison is case-insensitive (RFC 9110 §8.3.1) and
+// parameter-tolerant: `application/protobuf; charset=binary` is still the
+// protobuf media type. An unparseable or absent value is rejected.
+func isProtobufContentType(v string) bool {
+	if v == "" {
+		return false
+	}
+	mt, _, err := mime.ParseMediaType(v)
+	if err != nil {
+		return false
+	}
+	return strings.EqualFold(mt, wireerror.MediaTypeProtobuf)
+}
+
 func (s *Server) proxy(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	// version is the bundle-known contract version (or versionUnknown until
@@ -150,6 +189,33 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request) {
 	if _, ok := b.LookupRoute(r.URL.Path, r.Method); !ok {
 		fail(wireerror.UnknownRoute("no contract binds "+r.Method+" "+r.URL.Path), "")
 		return
+	}
+
+	// Pre-decode envelope check: a request that carries a body must declare
+	// the codec's media type. The v0.1 codec is `application/protobuf`
+	// (wireerror.MediaTypeProtobuf); a wrong declaration is rejected here
+	// with the 415 unsupported_media_type envelope rather than being folded
+	// into the downstream 400 decode_failed. This keeps the two failure modes
+	// distinct on the wire: 415 = wrong envelope, 400 = valid envelope whose
+	// bytes don't parse.
+	//
+	// Ordering: AFTER the route gate (so unknown_route still wins on an
+	// unmatched path) and BEFORE the body read/decode (so decode_failed stays
+	// reserved for malformed protobuf inside a valid envelope).
+	//
+	// No-body rule: if there is no body, no envelope has been declared and
+	// the check is a no-op. The simplest, safest rule is to only require a
+	// Content-Type when the request actually presents bytes — a no-body
+	// request that lacks Content-Type is accepted. A request that DOES carry
+	// a body but lacks Content-Type is rejected (an empty string is not the
+	// protobuf media type either, so the same comparison handles it). When a
+	// future multi-codec selector lands (issue #44) this comparison becomes
+	// table-driven against the negotiated codec.
+	if hasRequestBody(r) {
+		if !isProtobufContentType(r.Header.Get(headerContentType)) {
+			fail(wireerror.UnsupportedMediaType("request Content-Type is not "+wireerror.MediaTypeProtobuf), "")
+			return
+		}
 	}
 
 	r.Body = http.MaxBytesReader(w, r.Body, s.cfg.MaxBodyBytes)

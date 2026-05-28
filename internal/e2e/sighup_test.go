@@ -82,6 +82,7 @@ func TestReloadBundleFailurePreservesPrevious(t *testing.T) {
 func sendSkewProbe(t *testing.T, h *Harness, version string) (int, string) {
 	t.Helper()
 	req, _ := http.NewRequest(http.MethodPost, h.Proxy.URL+"/v3/echo", bytes.NewReader(PingBytes(t, h.Bundle, "hi", 1)))
+	req.Header.Set("Content-Type", "application/protobuf")
 	req.Header.Set("X-Api-Contract-Version", version)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {

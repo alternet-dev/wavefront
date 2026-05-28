@@ -35,6 +35,7 @@ func TestCodeStatusTableMatchesProtocol(t *testing.T) {
 		{TransformFailedRequest(""), "transform_failed", 422},
 		{TransformFailedResponse(""), "transform_failed", 502},
 		{UnknownRoute(""), "unknown_route", 404},
+		{UnsupportedMediaType(""), "unsupported_media_type", 415},
 		{UpstreamStatus(401, ""), "upstream_status", 401},
 		{UpstreamStatus(403, ""), "upstream_status", 403},
 		{UpstreamStatus(404, ""), "upstream_status", 404},
@@ -60,7 +61,7 @@ func TestContentTypeAlwaysProtobuf(t *testing.T) {
 		UnsupportedContractVersion(""), DecodeFailed(""), RequestBodyTooLarge(""),
 		UpstreamTimeout(""), UpstreamError(""),
 		TransformFailedRequest(""), TransformFailedResponse(""),
-		UnknownRoute(""),
+		UnknownRoute(""), UnsupportedMediaType(""),
 		UpstreamStatus(401, ""), UpstreamStatus(429, ""),
 	} {
 		if got := e.Headers().Get("Content-Type"); got != "application/protobuf" {
@@ -76,7 +77,7 @@ func TestRetryAfterOnlyOnUpstreamTimeout(t *testing.T) {
 	for _, e := range []*Error{
 		UnsupportedContractVersion(""), DecodeFailed(""), RequestBodyTooLarge(""), UpstreamError(""),
 		TransformFailedRequest(""), TransformFailedResponse(""),
-		UnknownRoute(""),
+		UnknownRoute(""), UnsupportedMediaType(""),
 		// upstream_status without WithRetryAfter must not synthesize one.
 		UpstreamStatus(429, ""),
 	} {

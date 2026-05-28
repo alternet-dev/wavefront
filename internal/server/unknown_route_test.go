@@ -178,6 +178,7 @@ func TestKnownRouteStillReaches(t *testing.T) {
 
 	body := pingBytes(t, b, "hi", 1)
 	req, _ := http.NewRequest(http.MethodPost, front.URL+"/v3/echo", strings.NewReader(string(body)))
+	req.Header.Set("Content-Type", "application/protobuf")
 	req.Header.Set("X-Api-Contract-Version", "2024-11")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {

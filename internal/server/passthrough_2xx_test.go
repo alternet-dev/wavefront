@@ -47,6 +47,7 @@ func TestUpstream2xxStatusPreserved(t *testing.T) {
 			defer front.Close()
 
 			req, _ := http.NewRequest(http.MethodPost, front.URL+"/v3/echo", strings.NewReader(string(pingBytes(t, b, "hi", 1))))
+			req.Header.Set("Content-Type", "application/protobuf")
 			req.Header.Set("X-Api-Contract-Version", "2024-11")
 			resp, err := http.DefaultClient.Do(req)
 			if err != nil {
@@ -97,6 +98,7 @@ func TestUpstream204NoBody(t *testing.T) {
 	defer front.Close()
 
 	req, _ := http.NewRequest(http.MethodPost, front.URL+"/v3/echo", strings.NewReader(string(pingBytes(t, b, "hi", 1))))
+	req.Header.Set("Content-Type", "application/protobuf")
 	req.Header.Set("X-Api-Contract-Version", "2024-11")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -139,6 +141,7 @@ func TestUpstream205NoBody(t *testing.T) {
 	defer front.Close()
 
 	req, _ := http.NewRequest(http.MethodPost, front.URL+"/v3/echo", strings.NewReader(string(pingBytes(t, b, "hi", 1))))
+	req.Header.Set("Content-Type", "application/protobuf")
 	req.Header.Set("X-Api-Contract-Version", "2024-11")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -191,6 +194,7 @@ func TestUpstreamOutOfContract2xxIs502(t *testing.T) {
 			defer front.Close()
 
 			req, _ := http.NewRequest(http.MethodPost, front.URL+"/v3/echo", strings.NewReader(string(pingBytes(t, b, "hi", 1))))
+			req.Header.Set("Content-Type", "application/protobuf")
 			req.Header.Set("X-Api-Contract-Version", "2024-11")
 			resp, err := http.DefaultClient.Do(req)
 			if err != nil {
