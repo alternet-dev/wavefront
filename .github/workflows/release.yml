@@ -6,7 +6,7 @@ on:
       - 'v*'
 
 permissions:
-  contents: read
+  contents: write
   packages: write
 
 env:
@@ -107,13 +107,83 @@ jobs:
             $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
             $(printf "$REGISTRY_IMAGE@sha256:%s " *)
 
-  # Create the GitHub Release entry for this tag. The body is the tag's own
+  # Build the wavefront-bundle CLI per-arch on native runners and package
+  # each as a tarball + .sha256. Outputs are uploaded as workflow artifacts
+  # for the gh-release job to attach to the GitHub Release. Native runners
+  # only — no cross-compile, no QEMU. The server binary (cmd/wavefront) is
+  # intentionally omitted: it's distributed exclusively as the multi-arch
+  # container image built above (see issue #73).
+  build-binaries:
+    name: build-binary (${{ matrix.target }})
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            runner: macos-14
+            goos: darwin
+            goarch: arm64
+          - target: x86_64-apple-darwin
+            runner: macos-13
+            goos: darwin
+            goarch: amd64
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-latest
+            goos: linux
+            goarch: amd64
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+            goos: linux
+            goarch: arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build release binary
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+        run: |
+          set -euo pipefail
+          go build -ldflags='-s -w' -trimpath -o wavefront-bundle ./cmd/wavefront-bundle
+          file wavefront-bundle || true
+
+      - name: Package tarball
+        env:
+          REF_NAME: ${{ github.ref_name }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          STAGE="wavefront-bundle-${REF_NAME}-${TARGET}"
+          mkdir -p "dist/${STAGE}"
+          cp wavefront-bundle "dist/${STAGE}/"
+          cp LICENSE-MIT LICENSE-APACHE README.md "dist/${STAGE}/"
+          tar -C dist -czf "dist/${STAGE}.tar.gz" "${STAGE}"
+          shasum -a 256 "dist/${STAGE}.tar.gz" | tee "dist/${STAGE}.tar.gz.sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: binary-${{ matrix.target }}
+          path: |
+            dist/*.tar.gz
+            dist/*.sha256
+          retention-days: 7
+          if-no-files-found: error
+
+  # Create the GitHub Release entry for this tag and attach the per-arch
+  # wavefront-bundle tarballs + .sha256 files. Body is the tag's own
   # annotation message (we write a short release-style summary into every
   # `git tag -a`); pre-1.0 RC/beta tags (any tag containing `-`) are marked
-  # prerelease. Idempotent: a re-run after a partial release does not
-  # duplicate the entry.
+  # prerelease. Idempotent: a re-run after a partial release uploads any
+  # missing/changed binaries to the existing release entry (--clobber)
+  # rather than duplicating or failing.
   gh-release:
-    needs: manifest
+    needs: [manifest, build-binaries]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -122,22 +192,34 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Create release
+      - uses: actions/download-artifact@v4
+        with:
+          path: /tmp/binaries
+          pattern: binary-*
+          merge-multiple: true
+
+      - name: Create or update release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REF_NAME: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            echo "release $GITHUB_REF_NAME already exists; nothing to do"
+          if gh release view "$REF_NAME" >/dev/null 2>&1; then
+            echo "release $REF_NAME already exists; uploading binaries (--clobber)"
+            gh release upload "$REF_NAME" \
+              /tmp/binaries/*.tar.gz /tmp/binaries/*.sha256 \
+              --clobber
             exit 0
           fi
           flags=()
-          [[ "$GITHUB_REF_NAME" == *-* ]] && flags+=(--prerelease)
-          gh release create "$GITHUB_REF_NAME" \
-            --title "$GITHUB_REF_NAME" \
+          [[ "$REF_NAME" == *-* ]] && flags+=(--prerelease)
+          gh release create "$REF_NAME" \
+            --title "$REF_NAME" \
             --notes-from-tag \
             --verify-tag \
-            "${flags[@]}"
+            "${flags[@]}" \
+            /tmp/binaries/*.tar.gz \
+            /tmp/binaries/*.sha256
 
   # Publish the wavefront-bundle CLI formula to the alternet-dev Homebrew tap.
   # The formula is source-built (Homebrew compiles it from this tag), so only
