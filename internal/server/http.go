@@ -230,7 +230,32 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request) {
 		fail(wireerror.UpstreamError("could not read upstream response"), "")
 		return
 	}
-	if uresp.StatusCode < 200 || uresp.StatusCode >= 300 {
+
+	// 2xx fidelity (issue #39): the upstream's exact success status is
+	// preserved on the response, never flattened. Only a bounded subset of
+	// 2xx codes is in contract — everything else is shape drift → 502.
+	//
+	//   200/201/202/203 → status preserved, body = encoded response_message.
+	//   204/205         → status preserved, NO body (wavefront must not
+	//                     encode an empty response_message; the protocol
+	//                     contract is that 204/205 carry no body, period).
+	//   206/207/208/226 → out of contract (no Range, no WebDAV, no delta
+	//                     encoding) → upstream_error (502).
+	//   any non-2xx     → upstream_error (502). The selective-passthrough
+	//                     subset for non-2xx (issue #39) is not yet wired
+	//                     here; until then, every non-2xx collapses to 502.
+	switch uresp.StatusCode {
+	case http.StatusOK, http.StatusCreated, http.StatusAccepted, http.StatusNonAuthoritativeInfo:
+		// fall through to transform + encode below.
+	case http.StatusNoContent, http.StatusResetContent:
+		// No body bytes — write status + the contract-version header and
+		// stop. Do NOT call EncodeResponse on the empty upstream body: the
+		// protocol contract is that 204/205 have no body, and encoding an
+		// empty response_message would violate it.
+		w.Header().Set(headerContractVersion, version)
+		w.WriteHeader(uresp.StatusCode)
+		return
+	default:
 		fail(wireerror.UpstreamError("upstream returned status "+strconv.Itoa(uresp.StatusCode)), "")
 		return
 	}
@@ -250,7 +275,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set(headerContentType, ct)
 	w.Header().Set(headerContractVersion, version)
-	w.WriteHeader(http.StatusOK)
+	w.WriteHeader(uresp.StatusCode)
 	_, _ = w.Write(out)
 }
 
