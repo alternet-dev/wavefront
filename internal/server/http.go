@@ -231,9 +231,8 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 2xx fidelity (issue #39): the upstream's exact success status is
-	// preserved on the response, never flattened. Only a bounded subset of
-	// 2xx codes is in contract — everything else is shape drift → 502.
+	// HTTP status matrix (issue #39): the upstream's status determines how
+	// wavefront shapes the response.
 	//
 	//   200/201/202/203 → status preserved, body = encoded response_message.
 	//   204/205         → status preserved, NO body (wavefront must not
@@ -241,9 +240,22 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request) {
 	//                     contract is that 204/205 carry no body, period).
 	//   206/207/208/226 → out of contract (no Range, no WebDAV, no delta
 	//                     encoding) → upstream_error (502).
-	//   any non-2xx     → upstream_error (502). The selective-passthrough
-	//                     subset for non-2xx (issue #39) is not yet wired
-	//                     here; until then, every non-2xx collapses to 502.
+	//   {401, 403, 404, 405, 409, 410, 422, 429, 451}
+	//                   → upstream_status passthrough: upstream's status is
+	//                     preserved; X-Wavefront-Error: upstream_status; body
+	//                     is the standard wavefront.v0.Error envelope (the
+	//                     upstream's raw body is intentionally NOT relayed —
+	//                     the v0.1 body-type invariant requires every non-
+	//                     success body to be a wavefront.v0.Error proto).
+	//                     For 429, the upstream's Retry-After (if any) is
+	//                     relayed verbatim.
+	//   any other non-2xx → upstream_error (502).
+	//
+	// 404 and 422 are dual-origin: a 404 from wavefront's own route gate is
+	// `unknown_route` (see the route lookup above); a 404 from the upstream
+	// is `upstream_status` here. Likewise 422 is either `transform_failed`
+	// (if a request transform stanza failed earlier) or `upstream_status`
+	// (here). Clients disambiguate via X-Wavefront-Error.
 	switch uresp.StatusCode {
 	case http.StatusOK, http.StatusCreated, http.StatusAccepted, http.StatusNonAuthoritativeInfo:
 		// fall through to transform + encode below.
@@ -254,6 +266,19 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request) {
 		// empty response_message would violate it.
 		w.Header().Set(headerContractVersion, version)
 		w.WriteHeader(uresp.StatusCode)
+		return
+	case http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound,
+		http.StatusMethodNotAllowed, http.StatusConflict, http.StatusGone,
+		http.StatusUnprocessableEntity, http.StatusTooManyRequests,
+		http.StatusUnavailableForLegalReasons:
+		werr := wireerror.UpstreamStatus(uresp.StatusCode, "")
+		// For 429, relay the upstream's Retry-After verbatim if present.
+		// WithRetryAfter("") is a no-op so we don't need to branch on
+		// presence — and we never fabricate a Retry-After ourselves.
+		if uresp.StatusCode == http.StatusTooManyRequests {
+			werr = werr.WithRetryAfter(uresp.Header.Get("Retry-After"))
+		}
+		fail(werr, "")
 		return
 	default:
 		fail(wireerror.UpstreamError("upstream returned status "+strconv.Itoa(uresp.StatusCode)), "")

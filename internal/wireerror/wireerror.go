@@ -16,20 +16,45 @@ const (
 	codeTransformFailed            = "transform_failed"
 	codeInternalError              = "internal_error"
 	codeUnknownRoute               = "unknown_route"
+	codeUpstreamStatus             = "upstream_status"
 )
 
 // Error is a typed, wavefront-originated failure. It satisfies the error
 // interface so it can flow through normal Go error handling.
+//
+// `status` is per-instance rather than per-code because `upstream_status`
+// parameterizes the HTTP status across the bounded passthrough set
+// {401,403,404,405,409,410,422,429,451}. Every other code in the table has a
+// fixed status — passed at construction and never varied.
+//
+// `retryAfter` is the verbatim header value to emit. It is empty for every
+// code except `upstream_timeout` (which fixes it to "0") and `upstream_status`
+// on a 429 whose upstream supplied a Retry-After header.
 type Error struct {
-	code    string
-	message string
-	status  int
+	code       string
+	message    string
+	status     int
+	retryAfter string
 }
 
 func (e *Error) Code() string    { return e.code }
 func (e *Error) Message() string { return e.message }
 func (e *Error) HTTPStatus() int { return e.status }
 func (e *Error) Error() string   { return e.code + ": " + e.message }
+
+// WithRetryAfter returns a shallow copy of e with the given Retry-After
+// header value attached. An empty string is a no-op so callers can pass
+// `uresp.Header.Get("Retry-After")` directly without branching on presence.
+// Used by the upstream 429 passthrough; other codes either set Retry-After
+// at construction (upstream_timeout's fixed "0") or never emit it.
+func (e *Error) WithRetryAfter(v string) *Error {
+	if v == "" {
+		return e
+	}
+	c := *e
+	c.retryAfter = v
+	return &c
+}
 
 // Headers is the standard + extension header set for this failure.
 // Content-Type is always the protobuf media type; Retry-After is set only
@@ -39,8 +64,11 @@ func (e *Error) Error() string   { return e.code + ": " + e.message }
 func (e *Error) Headers() http.Header {
 	h := http.Header{}
 	h.Set("Content-Type", "application/protobuf")
-	if e.code == codeUpstreamTimeout {
+	switch {
+	case e.code == codeUpstreamTimeout:
 		h.Set("Retry-After", "0")
+	case e.retryAfter != "":
+		h.Set("Retry-After", e.retryAfter)
 	}
 	return h
 }
@@ -101,44 +129,72 @@ func msgOr(msg, def string) string {
 // UnsupportedContractVersion — the contract-version header is missing,
 // unknown, or unsupported. 400.
 func UnsupportedContractVersion(msg string) *Error {
-	return &Error{codeUnsupportedContractVersion, msgOr(msg, "unknown or missing contract version"), http.StatusBadRequest}
+	return &Error{
+		code:    codeUnsupportedContractVersion,
+		message: msgOr(msg, "unknown or missing contract version"),
+		status:  http.StatusBadRequest,
+	}
 }
 
 // DecodeFailed — the client body did not decode into the contract's
 // request_message. 400.
 func DecodeFailed(msg string) *Error {
-	return &Error{codeDecodeFailed, msgOr(msg, "request body failed to decode"), http.StatusBadRequest}
+	return &Error{
+		code:    codeDecodeFailed,
+		message: msgOr(msg, "request body failed to decode"),
+		status:  http.StatusBadRequest,
+	}
 }
 
 // RequestBodyTooLarge — the inbound body exceeded WAVEFRONT_MAX_BODY_BYTES.
 // 413.
 func RequestBodyTooLarge(msg string) *Error {
-	return &Error{codeRequestBodyTooLarge, msgOr(msg, "request body exceeds the configured limit"), http.StatusRequestEntityTooLarge}
+	return &Error{
+		code:    codeRequestBodyTooLarge,
+		message: msgOr(msg, "request body exceeds the configured limit"),
+		status:  http.StatusRequestEntityTooLarge,
+	}
 }
 
 // UpstreamTimeout — the upstream exceeded WAVEFRONT_REQUEST_TIMEOUT_MS. 504.
 func UpstreamTimeout(msg string) *Error {
-	return &Error{codeUpstreamTimeout, msgOr(msg, "upstream timed out"), http.StatusGatewayTimeout}
+	return &Error{
+		code:    codeUpstreamTimeout,
+		message: msgOr(msg, "upstream timed out"),
+		status:  http.StatusGatewayTimeout,
+	}
 }
 
 // UpstreamError — the upstream returned a non-2xx, was unreachable, or its
 // reply could not be encoded. 502.
 func UpstreamError(msg string) *Error {
-	return &Error{codeUpstreamError, msgOr(msg, "upstream error"), http.StatusBadGateway}
+	return &Error{
+		code:    codeUpstreamError,
+		message: msgOr(msg, "upstream error"),
+		status:  http.StatusBadGateway,
+	}
 }
 
 // TransformFailedRequest — a request transform verb could not apply: the
 // decoded request is well-formed but unprocessable under this contract's
 // mapping. 422 (RFC 9110 §15.5.21).
 func TransformFailedRequest(msg string) *Error {
-	return &Error{codeTransformFailed, msgOr(msg, "request could not be transformed to the internal contract"), http.StatusUnprocessableEntity}
+	return &Error{
+		code:    codeTransformFailed,
+		message: msgOr(msg, "request could not be transformed to the internal contract"),
+		status:  http.StatusUnprocessableEntity,
+	}
 }
 
 // TransformFailedResponse — a response transform verb could not apply: the
 // live internal shape drifted from the bundle's response stanzas. Same fault
 // class as upstream_error. 502.
 func TransformFailedResponse(msg string) *Error {
-	return &Error{codeTransformFailed, msgOr(msg, "upstream response could not be transformed to the client contract"), http.StatusBadGateway}
+	return &Error{
+		code:    codeTransformFailed,
+		message: msgOr(msg, "upstream response could not be transformed to the client contract"),
+		status:  http.StatusBadGateway,
+	}
 }
 
 // InternalError — an unrecoverable fault inside wavefront itself: a panic in
@@ -147,7 +203,11 @@ func TransformFailedResponse(msg string) *Error {
 // internals to clients; callers pass a short, fixed string and rely on logs
 // for the panic value and stack trace.
 func InternalError(msg string) *Error {
-	return &Error{codeInternalError, msgOr(msg, "internal server error"), http.StatusInternalServerError}
+	return &Error{
+		code:    codeInternalError,
+		message: msgOr(msg, "internal server error"),
+		status:  http.StatusInternalServerError,
+	}
 }
 
 // UnknownRoute — no contract in the bundle binds the inbound request's
@@ -156,5 +216,27 @@ func InternalError(msg string) *Error {
 // envelope (no 405, no `Allow` header), because each contract names exactly
 // one method and the bundle is the only routing source of truth. 404.
 func UnknownRoute(msg string) *Error {
-	return &Error{codeUnknownRoute, msgOr(msg, "no contract binds this request's path and method"), http.StatusNotFound}
+	return &Error{
+		code:    codeUnknownRoute,
+		message: msgOr(msg, "no contract binds this request's path and method"),
+		status:  http.StatusNotFound,
+	}
+}
+
+// UpstreamStatus — the upstream returned a status in the bounded passthrough
+// set {401, 403, 404, 405, 409, 410, 422, 429, 451}. The upstream's status is
+// preserved on the response (so a 401 stays a 401); the body is the standard
+// wavefront.v0.Error envelope so the body type invariant holds. This is the
+// first wire-error code whose HTTP status is parameterized — every other
+// constructor pins a fixed status.
+//
+// For an upstream 429, the caller can attach the upstream's Retry-After value
+// with `.WithRetryAfter(...)`; the header is relayed verbatim. For any other
+// passthrough code, Retry-After is not emitted.
+func UpstreamStatus(httpStatus int, msg string) *Error {
+	return &Error{
+		code:    codeUpstreamStatus,
+		message: msgOr(msg, "upstream returned "+http.StatusText(httpStatus)),
+		status:  httpStatus,
+	}
 }
