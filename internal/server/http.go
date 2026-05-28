@@ -170,7 +170,23 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request) {
 
 	b := s.bundle.Load()
 	if b == nil {
-		fail(wireerror.UpstreamError("no bundle loaded"), "")
+		// The data listener accepted the request before the bundle finished
+		// loading (the boot-time race), so there is no upstream to call yet
+		// — this is a readiness condition, not an upstream failure. Issue
+		// #39 extends the `unavailable` code (originally `/ready`-only) to
+		// the proxy path so the data plane matches what the ops readiness
+		// probe is already saying. Retry-After: 1 second is a short hint
+		// suitable for the boot race; clients honouring it back off briefly
+		// and retry.
+		//
+		// Graceful drain is handled implicitly by http.Server.Shutdown
+		// (Run() in server.go): it stops accepting new connections and
+		// waits for in-flight to complete within shutdownTimeout. No
+		// explicit drain flag is wired here because the bundle pointer is
+		// never cleared on shutdown, so accepted-but-pre-Load requests in
+		// the drain window still find a live bundle — they finish
+		// normally on the way out.
+		fail(wireerror.Unavailable("bundle not loaded").WithRetryAfter("1"), "")
 		return
 	}
 
