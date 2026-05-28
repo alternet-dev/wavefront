@@ -2,6 +2,7 @@ package server_test
 
 import (
 	"bytes"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -159,7 +160,8 @@ func TestRecoverRePanicsErrAbortHandler(t *testing.T) {
 		handler.ServeHTTP(rec, req)
 	}()
 
-	if got != http.ErrAbortHandler {
+	gotErr, ok := got.(error)
+	if !ok || !errors.Is(gotErr, http.ErrAbortHandler) {
 		t.Fatalf("expected ErrAbortHandler to be re-panicked, got %v (%T)", got, got)
 	}
 	if rec.Header().Get("X-Wavefront-Error") != "" {

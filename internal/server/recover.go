@@ -1,6 +1,7 @@
 package server
 
 import (
+	"errors"
 	"log/slog"
 	"net/http"
 	"runtime/debug"
@@ -65,8 +66,11 @@ func (s *Server) Recover(next http.Handler) http.Handler {
 			}
 			// stdlib contract: ErrAbortHandler means "abort the connection
 			// silently." Re-panic so net/http's own machinery handles it —
-			// don't log, don't count, don't write.
-			if rec == http.ErrAbortHandler {
+			// don't log, don't count, don't write. errors.Is (rather than ==)
+			// keeps the linter happy and handles the (theoretical) wrapped
+			// case; the recovered value is any, so the type assertion runs
+			// before the comparison.
+			if recErr, ok := rec.(error); ok && errors.Is(recErr, http.ErrAbortHandler) {
 				panic(rec)
 			}
 			stack := debug.Stack()
