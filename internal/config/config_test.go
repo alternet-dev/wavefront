@@ -343,3 +343,85 @@ func TestBlankOverrideFallsBackToDefault(t *testing.T) {
 		t.Errorf("blank ContractVersionHeader should default, got %q", cfg.ContractVersionHeader)
 	}
 }
+
+func TestOTelDefaultsAreDisabled(t *testing.T) {
+	cfg, err := load(minimal())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.OTelExporterEndpoint != "" {
+		t.Errorf("OTelExporterEndpoint default = %q, want empty", cfg.OTelExporterEndpoint)
+	}
+	if cfg.OTelServiceName != "wavefront" {
+		t.Errorf("OTelServiceName default = %q, want %q", cfg.OTelServiceName, "wavefront")
+	}
+	if cfg.OTelSamplingFraction != 0.0 {
+		t.Errorf("OTelSamplingFraction default = %v, want 0.0", cfg.OTelSamplingFraction)
+	}
+}
+
+func TestOTelOverridesParse(t *testing.T) {
+	p := minimal()
+	p["WAVEFRONT_OTEL_EXPORTER_OTLP_ENDPOINT"] = "http://localhost:4317"
+	p["WAVEFRONT_OTEL_SERVICE_NAME"] = "edge"
+	p["WAVEFRONT_OTEL_SAMPLING_FRACTION"] = "0.25"
+	cfg, err := load(p)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.OTelExporterEndpoint != "http://localhost:4317" {
+		t.Errorf("OTelExporterEndpoint = %q", cfg.OTelExporterEndpoint)
+	}
+	if cfg.OTelServiceName != "edge" {
+		t.Errorf("OTelServiceName = %q", cfg.OTelServiceName)
+	}
+	if cfg.OTelSamplingFraction != 0.25 {
+		t.Errorf("OTelSamplingFraction = %v", cfg.OTelSamplingFraction)
+	}
+}
+
+func TestInvalidOTelExporterEndpointIsError(t *testing.T) {
+	for _, bad := range []string{"://no-scheme", "http://[bad", "not a url at all\n"} {
+		p := minimal()
+		p["WAVEFRONT_OTEL_EXPORTER_OTLP_ENDPOINT"] = bad
+		_, err := load(p)
+		var ie *InvalidError
+		if !errors.As(err, &ie) || ie.Var != "WAVEFRONT_OTEL_EXPORTER_OTLP_ENDPOINT" {
+			t.Errorf("%q: want InvalidError(WAVEFRONT_OTEL_EXPORTER_OTLP_ENDPOINT), got %v", bad, err)
+		}
+	}
+}
+
+func TestInvalidOTelSamplingFractionIsError(t *testing.T) {
+	for _, bad := range []string{"-0.1", "1.1", "2", "nope", "NaN"} {
+		p := minimal()
+		p["WAVEFRONT_OTEL_SAMPLING_FRACTION"] = bad
+		_, err := load(p)
+		var ie *InvalidError
+		if !errors.As(err, &ie) || ie.Var != "WAVEFRONT_OTEL_SAMPLING_FRACTION" {
+			t.Errorf("%q: want InvalidError(WAVEFRONT_OTEL_SAMPLING_FRACTION), got %v", bad, err)
+		}
+	}
+}
+
+func TestOTelSamplingFractionBoundariesAreValid(t *testing.T) {
+	for _, in := range []string{"0", "0.0", "0.5", "1", "1.0"} {
+		p := minimal()
+		p["WAVEFRONT_OTEL_SAMPLING_FRACTION"] = in
+		if _, err := load(p); err != nil {
+			t.Errorf("%q: unexpected error %v", in, err)
+		}
+	}
+}
+
+func TestBlankOTelServiceNameFallsBackToDefault(t *testing.T) {
+	p := minimal()
+	p["WAVEFRONT_OTEL_SERVICE_NAME"] = "   "
+	cfg, err := load(p)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.OTelServiceName != "wavefront" {
+		t.Errorf("blank OTelServiceName should default, got %q", cfg.OTelServiceName)
+	}
+}

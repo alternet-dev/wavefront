@@ -70,6 +70,17 @@ request.
 - Every response (success or error) carries `X-Wavefront-Contract-Version`,
   so an ingress log or client trace pins which version a request resolved
   against without help from the proxy.
+- **OpenTelemetry tracing — opt-in.** Set
+  `WAVEFRONT_OTEL_EXPORTER_OTLP_ENDPOINT` (an OTLP/gRPC endpoint URL,
+  e.g. `http://collector:4317`) and `WAVEFRONT_OTEL_SAMPLING_FRACTION` to a
+  value in `(0.0, 1.0]` to initialize the SDK at boot; the
+  `service.name` resource attribute defaults to `wavefront` and can be
+  overridden with `WAVEFRONT_OTEL_SERVICE_NAME`. With either knob at its
+  default the SDK is not initialized — no exporter goroutine, no per-request
+  overhead — so this surface is safe to leave off in environments that don't
+  consume traces. Inbound tracing headers (`traceparent`, `tracestate`,
+  `baggage`) are forwarded to the upstream regardless of whether the SDK is
+  enabled.
 
 ## Common scenarios
 

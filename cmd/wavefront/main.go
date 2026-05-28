@@ -12,11 +12,16 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/alternet-dev/wavefront/internal/bundle"
 	"github.com/alternet-dev/wavefront/internal/config"
 	"github.com/alternet-dev/wavefront/internal/server"
 )
+
+// otelShutdownTimeout bounds the OTel batch-span-processor flush at process
+// exit. Matches the server's shutdown grace.
+const otelShutdownTimeout = 10 * time.Second
 
 func main() {
 	cfg, err := config.Load()
@@ -37,6 +42,26 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	// OpenTelemetry: opt-in. With either knob unset the SDK is never
+	// initialized and the request path stays on the global no-op tracer
+	// provider — zero per-request overhead.
+	if cfg.OTelExporterEndpoint != "" && cfg.OTelSamplingFraction > 0 {
+		shutdownOTel, err := initOTel(ctx, cfg)
+		if err != nil {
+			// Observability is best-effort: a tracing-init failure must not
+			// keep the proxy from serving.
+			slog.Warn("otel init failed; continuing without tracing", "err", err)
+		} else {
+			defer func() {
+				shutCtx, cancel := context.WithTimeout(context.Background(), otelShutdownTimeout)
+				defer cancel()
+				if err := shutdownOTel(shutCtx); err != nil {
+					slog.Warn("otel shutdown error", "err", err)
+				}
+			}()
+		}
+	}
 
 	hupCh := make(chan os.Signal, 1)
 	signal.Notify(hupCh, syscall.SIGHUP)

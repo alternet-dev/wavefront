@@ -130,6 +130,9 @@ All configuration is environment variables, read once at startup.
 | `WAVEFRONT_READ_TIMEOUT_MS` | `30000` | data-plane `ReadTimeout` (headers + body) |
 | `WAVEFRONT_MAX_BODY_BYTES` | `1048576` | inbound body cap |
 | `WAVEFRONT_LOG_LEVEL` | `info` | structured log level |
+| `WAVEFRONT_OTEL_EXPORTER_OTLP_ENDPOINT` | (unset) | OTLP/gRPC tracing endpoint; unset disables OpenTelemetry |
+| `WAVEFRONT_OTEL_SERVICE_NAME` | `wavefront` | `service.name` resource attribute on spans |
+| `WAVEFRONT_OTEL_SAMPLING_FRACTION` | `0.0` | head-based sampling ratio in `[0.0, 1.0]`; `0.0` disables tracing |
 
 Operational notes:
 

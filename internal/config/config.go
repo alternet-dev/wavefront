@@ -17,12 +17,23 @@
 //	WAVEFRONT_READ_TIMEOUT_MS         — data-plane ReadTimeout (headers+body) in ms (default 30000)
 //	WAVEFRONT_MAX_BODY_BYTES          — maximum request body size in bytes (default 1048576)
 //	WAVEFRONT_LOG_LEVEL               — log level: debug|info|warn|error (default info)
+//
+// OpenTelemetry tracing (off by default; SDK initialized only when both an
+// endpoint is set and the sampling fraction is > 0):
+//
+//	WAVEFRONT_OTEL_EXPORTER_OTLP_ENDPOINT — OTLP gRPC exporter endpoint URL
+//	WAVEFRONT_OTEL_SERVICE_NAME           — service name reported on spans (default wavefront)
+//	WAVEFRONT_OTEL_SAMPLING_FRACTION      — head-based sampling ratio in [0.0, 1.0] (default 0.0)
+//
+// The WAVEFRONT_OTEL_* vars take precedence over the upstream OTEL_* SDK
+// environment defaults, so operators with both set get predictable behavior.
 package config
 
 import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"net"
 	"net/url"
 	"os"
@@ -43,6 +54,15 @@ type Config struct {
 	ReadTimeout           time.Duration
 	MaxBodyBytes          int64
 	LogLevel              slog.Level
+
+	// OTelExporterEndpoint is the OTLP gRPC endpoint (e.g. http://localhost:4317);
+	// empty disables OpenTelemetry tracing.
+	OTelExporterEndpoint string
+	// OTelServiceName is the service.name resource attribute on emitted spans.
+	OTelServiceName string
+	// OTelSamplingFraction is the head-based TraceIDRatio sampler ratio in
+	// [0.0, 1.0]; 0.0 disables OpenTelemetry tracing.
+	OTelSamplingFraction float64
 }
 
 type MissingError struct{ Var string }
@@ -69,9 +89,16 @@ const (
 	defReadHeaderTimeout = 10000
 	defReadTimeout       = 30000
 	defMaxBody           = 1 << 20
+	defOTelServiceNm     = "wavefront"
+	defOTelSampleFrac    = 0.0
 )
 
-var errPositive = errors.New("must be greater than zero")
+var (
+	errPositive       = errors.New("must be greater than zero")
+	errSamplingRange  = errors.New("must be in [0.0, 1.0]")
+	errEndpointScheme = errors.New("scheme must be http or https")
+	errEndpointHost   = errors.New("missing host")
+)
 
 // Lookuper resolves an environment variable: its value and whether it is set.
 // It matches the signature of os.LookupEnv.
@@ -205,6 +232,20 @@ func Load(opts ...Option) (*Config, error) {
 	}
 	cfg.LogLevel = lvl
 
+	if endpoint, ok := nonBlank("WAVEFRONT_OTEL_EXPORTER_OTLP_ENDPOINT"); ok {
+		if eErr := validateOTelEndpoint(endpoint); eErr != nil {
+			return nil, &InvalidError{Var: "WAVEFRONT_OTEL_EXPORTER_OTLP_ENDPOINT", Value: endpoint, Err: eErr}
+		}
+		cfg.OTelExporterEndpoint = endpoint
+	}
+	cfg.OTelServiceName = withDefault("WAVEFRONT_OTEL_SERVICE_NAME", defOTelServiceNm)
+
+	frac, e := parseFractionVar(nonBlank, "WAVEFRONT_OTEL_SAMPLING_FRACTION", defOTelSampleFrac)
+	if e != nil {
+		return nil, e
+	}
+	cfg.OTelSamplingFraction = frac
+
 	return cfg, nil
 }
 
@@ -268,6 +309,35 @@ func validateHostPort(s string) error {
 	}
 	if pn < 1 || pn > 65535 {
 		return fmt.Errorf("port %d out of range", pn)
+	}
+	return nil
+}
+
+func parseFractionVar(nonBlank func(string) (string, bool), key string, def float64) (float64, error) {
+	v, ok := nonBlank(key)
+	if !ok {
+		return def, nil
+	}
+	f, perr := strconv.ParseFloat(v, 64)
+	if perr != nil {
+		return 0, &InvalidError{Var: key, Value: v, Err: perr}
+	}
+	if math.IsNaN(f) || f < 0.0 || f > 1.0 {
+		return 0, &InvalidError{Var: key, Value: v, Err: errSamplingRange}
+	}
+	return f, nil
+}
+
+func validateOTelEndpoint(s string) error {
+	u, err := url.Parse(s)
+	if err != nil {
+		return err
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return errEndpointScheme
+	}
+	if u.Host == "" {
+		return errEndpointHost
 	}
 	return nil
 }
