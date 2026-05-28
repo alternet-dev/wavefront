@@ -79,6 +79,7 @@ func TestPipelineProxiesEndToEnd(t *testing.T) {
 	}
 
 	req, _ := http.NewRequest(http.MethodPost, h.Proxy.URL+"/v3/echo", strings.NewReader(string(reqBytes)))
+	req.Header.Set("Content-Type", "application/protobuf")
 	req.Header.Set("X-Api-Contract-Version", "2026-05-17")
 	req.Header.Set("Authorization", "Bearer t0ken")
 	req.Header.Set("traceparent", "tp-9")

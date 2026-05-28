@@ -15,6 +15,7 @@ func TestUnsupportedContractVersionReturns400(t *testing.T) {
 	h := Spawn(t, SpawnOpts{})
 
 	req, _ := http.NewRequest(http.MethodPost, h.Proxy.URL+"/v3/echo", strings.NewReader("ignored"))
+	req.Header.Set("Content-Type", "application/protobuf")
 	req.Header.Set("X-Api-Contract-Version", "1999-01")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {

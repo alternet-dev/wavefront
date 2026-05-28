@@ -114,6 +114,7 @@ func runSkewScenario(t *testing.T, dir string) {
 	}
 
 	req, _ := http.NewRequest(contract.Method(), h.Proxy.URL+contract.Route(), bytes.NewReader(reqBytes))
+	req.Header.Set("Content-Type", "application/protobuf")
 	req.Header.Set("X-Api-Contract-Version", version)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {

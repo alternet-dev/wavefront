@@ -17,7 +17,15 @@ const (
 	codeInternalError              = "internal_error"
 	codeUnknownRoute               = "unknown_route"
 	codeUpstreamStatus             = "upstream_status"
+	codeUnsupportedMediaType       = "unsupported_media_type"
 )
+
+// MediaTypeProtobuf is the single request and response media type the v0.1
+// codec contract names. Every wire-error envelope has Content-Type set to
+// this value; an inbound request that carries a body must declare it. A
+// future multi-codec selector (issue #44) would replace direct comparison
+// against this constant with a per-codec table.
+const MediaTypeProtobuf = "application/protobuf"
 
 // Error is a typed, wavefront-originated failure. It satisfies the error
 // interface so it can flow through normal Go error handling.
@@ -63,7 +71,7 @@ func (e *Error) WithRetryAfter(v string) *Error {
 // needs request context the error itself does not carry).
 func (e *Error) Headers() http.Header {
 	h := http.Header{}
-	h.Set("Content-Type", "application/protobuf")
+	h.Set("Content-Type", MediaTypeProtobuf)
 	switch {
 	case e.code == codeUpstreamTimeout:
 		h.Set("Retry-After", "0")
@@ -220,6 +228,19 @@ func UnknownRoute(msg string) *Error {
 		code:    codeUnknownRoute,
 		message: msgOr(msg, "no contract binds this request's path and method"),
 		status:  http.StatusNotFound,
+	}
+}
+
+// UnsupportedMediaType — the inbound request declared a Content-Type that is
+// not the contract's protobuf media type. Distinct from `decode_failed`: a
+// wrong envelope is rejected before the body is read, so this code is
+// reserved for the envelope mismatch and `decode_failed` is reserved for a
+// valid envelope whose bytes don't parse. 415 (RFC 9110 §15.5.16).
+func UnsupportedMediaType(msg string) *Error {
+	return &Error{
+		code:    codeUnsupportedMediaType,
+		message: msgOr(msg, "request Content-Type is not "+MediaTypeProtobuf),
+		status:  http.StatusUnsupportedMediaType,
 	}
 }
 

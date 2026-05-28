@@ -77,6 +77,7 @@ overrides:
 	defer fs.Close()
 
 	req, _ := http.NewRequest(http.MethodPost, fs.URL+"/v3/echo", bytes.NewReader(transformPing(t, b)))
+	req.Header.Set("Content-Type", "application/protobuf")
 	req.Header.Set("X-Api-Contract-Version", "2024-11")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -137,6 +138,7 @@ overrides:
 	defer fs.Close()
 
 	req, _ := http.NewRequest(http.MethodPost, fs.URL+"/v3/echo", bytes.NewReader(transformPing(t, b)))
+	req.Header.Set("Content-Type", "application/protobuf")
 	req.Header.Set("X-Api-Contract-Version", "2024-11")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -189,6 +191,7 @@ overrides:
 	}
 
 	req, _ := http.NewRequest(http.MethodPost, fs.URL+"/v3/echo", bytes.NewReader(empty))
+	req.Header.Set("Content-Type", "application/protobuf")
 	req.Header.Set("X-Api-Contract-Version", "2024-11")
 	resp, derr := http.DefaultClient.Do(req)
 	if derr != nil {
