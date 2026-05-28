@@ -18,6 +18,7 @@ const (
 	codeUnknownRoute               = "unknown_route"
 	codeUpstreamStatus             = "upstream_status"
 	codeUnsupportedMediaType       = "unsupported_media_type"
+	codeUnavailable                = "unavailable"
 )
 
 // MediaTypeProtobuf is the single request and response media type the v0.1
@@ -36,8 +37,10 @@ const MediaTypeProtobuf = "application/protobuf"
 // fixed status — passed at construction and never varied.
 //
 // `retryAfter` is the verbatim header value to emit. It is empty for every
-// code except `upstream_timeout` (which fixes it to "0") and `upstream_status`
-// on a 429 whose upstream supplied a Retry-After header.
+// code except `upstream_timeout` (which fixes it to "0"), `upstream_status`
+// on a 429 whose upstream supplied a Retry-After header, and `unavailable`
+// emitted by the proxy bundle-gate (which attaches a short fixed hint so
+// clients back off briefly during boot).
 type Error struct {
 	code       string
 	message    string
@@ -53,8 +56,9 @@ func (e *Error) Error() string   { return e.code + ": " + e.message }
 // WithRetryAfter returns a shallow copy of e with the given Retry-After
 // header value attached. An empty string is a no-op so callers can pass
 // `uresp.Header.Get("Retry-After")` directly without branching on presence.
-// Used by the upstream 429 passthrough; other codes either set Retry-After
-// at construction (upstream_timeout's fixed "0") or never emit it.
+// Used by the upstream 429 passthrough and by the proxy bundle-gate's
+// `unavailable` emission; other codes either set Retry-After at
+// construction (upstream_timeout's fixed "0") or never emit it.
 func (e *Error) WithRetryAfter(v string) *Error {
 	if v == "" {
 		return e
@@ -241,6 +245,24 @@ func UnsupportedMediaType(msg string) *Error {
 		code:    codeUnsupportedMediaType,
 		message: msgOr(msg, "request Content-Type is not "+MediaTypeProtobuf),
 		status:  http.StatusUnsupportedMediaType,
+	}
+}
+
+// Unavailable — the proxy cannot serve right now because the bundle is not
+// loaded yet. 503. Issue #39's matrix extends this code — used on the
+// /ready ops endpoint since v0.1 — to the proxy data path: a request that
+// races bundle-load at boot returns this envelope rather than the
+// misleading `upstream_error` 502 it used to (there is no upstream
+// involved). The caller is expected to attach a short Retry-After hint
+// with `.WithRetryAfter(...)` so well-behaved clients back off briefly and
+// retry. Graceful drain is handled implicitly by http.Server.Shutdown
+// (the bundle pointer is never cleared at shutdown), so accepted requests
+// in the drain window still find a live bundle and finish normally.
+func Unavailable(msg string) *Error {
+	return &Error{
+		code:    codeUnavailable,
+		message: msgOr(msg, "service unavailable"),
+		status:  http.StatusServiceUnavailable,
 	}
 }
 

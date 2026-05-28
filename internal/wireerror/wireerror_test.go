@@ -36,6 +36,7 @@ func TestCodeStatusTableMatchesProtocol(t *testing.T) {
 		{TransformFailedResponse(""), "transform_failed", 502},
 		{UnknownRoute(""), "unknown_route", 404},
 		{UnsupportedMediaType(""), "unsupported_media_type", 415},
+		{Unavailable(""), "unavailable", 503},
 		{UpstreamStatus(401, ""), "upstream_status", 401},
 		{UpstreamStatus(403, ""), "upstream_status", 403},
 		{UpstreamStatus(404, ""), "upstream_status", 404},
@@ -62,6 +63,7 @@ func TestContentTypeAlwaysProtobuf(t *testing.T) {
 		UpstreamTimeout(""), UpstreamError(""),
 		TransformFailedRequest(""), TransformFailedResponse(""),
 		UnknownRoute(""), UnsupportedMediaType(""),
+		Unavailable(""),
 		UpstreamStatus(401, ""), UpstreamStatus(429, ""),
 	} {
 		if got := e.Headers().Get("Content-Type"); got != "application/protobuf" {
@@ -78,12 +80,32 @@ func TestRetryAfterOnlyOnUpstreamTimeout(t *testing.T) {
 		UnsupportedContractVersion(""), DecodeFailed(""), RequestBodyTooLarge(""), UpstreamError(""),
 		TransformFailedRequest(""), TransformFailedResponse(""),
 		UnknownRoute(""), UnsupportedMediaType(""),
+		// unavailable WITHOUT WithRetryAfter must not synthesize one — the
+		// hint is opt-in, just like upstream_status. Callers attach it at the
+		// emit site (the proxy uses "1"; /ready does not).
+		Unavailable(""),
 		// upstream_status without WithRetryAfter must not synthesize one.
 		UpstreamStatus(429, ""),
 	} {
 		if got := e.Headers().Get("Retry-After"); got != "" {
 			t.Errorf("%s: Retry-After should be unset, got %q", e.Code(), got)
 		}
+	}
+}
+
+// TestUnavailableWithRetryAfter pins the proxy-path bootup case (issue #39):
+// when the bundle isn't loaded yet, the proxy emits 503 unavailable with a
+// short Retry-After hint so clients back off briefly and retry.
+func TestUnavailableWithRetryAfter(t *testing.T) {
+	e := Unavailable("bundle not loaded").WithRetryAfter("1")
+	if got := e.Headers().Get("Retry-After"); got != "1" {
+		t.Errorf("Retry-After = %q, want 1", got)
+	}
+	if got := e.HTTPStatus(); got != 503 {
+		t.Errorf("HTTPStatus = %d, want 503", got)
+	}
+	if got := e.Code(); got != "unavailable" {
+		t.Errorf("Code = %q, want unavailable", got)
 	}
 }
 
