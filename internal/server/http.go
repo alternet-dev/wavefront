@@ -17,12 +17,12 @@ import (
 	"github.com/alternet-dev/wavefront/internal/wireerror"
 )
 
-// Wavefront response/extension header names — centralized so the success and
-// error paths can't drift or typo them.
+// Wavefront response header names used by the success path — re-exported
+// from wireerror so the success and error paths cannot drift. The error
+// path goes through wireerror.Write and never references these locally.
 const (
-	headerContentType     = "Content-Type"
-	headerContractVersion = "X-Wavefront-Contract-Version"
-	headerWavefrontError  = "X-Wavefront-Error"
+	headerContentType     = wireerror.HeaderContentType
+	headerContractVersion = wireerror.HeaderContractVersion
 )
 
 // versionUnknown is the contract_version label value (and response-header
@@ -30,7 +30,7 @@ const (
 // pre-negotiate error, or a client header that does not name a known
 // contract. It pins metric cardinality and keeps the response header
 // well-defined.
-const versionUnknown = "unknown"
+const versionUnknown = wireerror.VersionUnknown
 
 // outcomeOK is the structured-log `outcome` value for a request that
 // completed without a wavefront-originated failure.
@@ -232,13 +232,5 @@ func describeResolution(c *bundle.Contract) string {
 
 func (s *Server) writeError(w http.ResponseWriter, werr *wireerror.Error, version, transformOutcome string) {
 	s.metrics.errors.WithLabelValues(werr.Code(), version, transformOutcome).Inc()
-	for k, vs := range werr.Headers() {
-		for _, v := range vs {
-			w.Header().Add(k, v)
-		}
-	}
-	w.Header().Set(headerWavefrontError, werr.Code())
-	w.Header().Set(headerContractVersion, version)
-	w.WriteHeader(werr.HTTPStatus())
-	_, _ = w.Write(werr.ProtoBody())
+	wireerror.Write(w, werr, version)
 }

@@ -98,7 +98,14 @@ func (s *Server) Message(fullName string) (protoreflect.MessageDescriptor, error
 	return b.Message(fullName)
 }
 
-func (s *Server) DataHandler() http.Handler { return http.HandlerFunc(s.proxy) }
+// DataHandler returns the data-plane handler used by Run. It wraps the proxy
+// in the panic-recovery middleware so any panic in the request path becomes
+// a `wavefront.v0.Error` envelope on the wire rather than a dropped
+// connection or process crash. Ops/metrics endpoints (OpsHandler) keep Go's
+// default behavior — a fault in pprof or /metrics surfaces normally.
+func (s *Server) DataHandler() http.Handler {
+	return s.Recover(http.HandlerFunc(s.proxy))
+}
 
 // OpsHandler serves the ops surface: Prometheus /metrics, liveness/readiness
 // probes (/health, /ready), and pprof. It is intentionally bound to the ops
