@@ -4,10 +4,21 @@ import (
 	"bytes"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+// requireProtocGenES skips the test cleanly when protoc-gen-es is not on
+// PATH. CI without Node tooling installed must still go green; the error
+// path is exercised independently by TestRunGenTSClientHandlesMissingProtocGenES.
+func requireProtocGenES(t *testing.T) {
+	t.Helper()
+	if _, err := exec.LookPath("protoc-gen-es"); err != nil {
+		t.Skipf("skipping: protoc-gen-es not on PATH (%v); install: npm install -g @bufbuild/protoc-gen-es", err)
+	}
+}
 
 func writeSampleOpenAPI(t *testing.T) string {
 	t.Helper()
@@ -314,6 +325,7 @@ func writeTwoLayerBundle(t *testing.T) (bundleDir, latest, older string) {
 }
 
 func TestRunGenTSClientDefaultsToLatestVersion(t *testing.T) {
+	requireProtocGenES(t)
 	bundleDir, latest, _ := writeTwoLayerBundle(t)
 	outDir := filepath.Join(t.TempDir(), "client") // missing — must be created
 	var out bytes.Buffer
@@ -326,15 +338,32 @@ func TestRunGenTSClientDefaultsToLatestVersion(t *testing.T) {
 	if !strings.Contains(out.String(), "version="+latest) {
 		t.Errorf("stdout should name the resolved version %q:\n%s", latest, out.String())
 	}
-	if !strings.Contains(out.String(), "scaffolding only") {
-		t.Errorf("stdout should signal scaffolding-only:\n%s", out.String())
+	if !strings.Contains(out.String(), "emitted") || !strings.Contains(out.String(), "message class") {
+		t.Errorf("stdout should report the emitted message-class count:\n%s", out.String())
 	}
 	if _, err := os.Stat(outDir); err != nil {
 		t.Errorf("--out should have been created: %v", err)
 	}
+	// At least one .ts file must have been written under outDir.
+	var sawTS bool
+	if err := filepath.Walk(outDir, func(p string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if !info.IsDir() && strings.HasSuffix(p, ".ts") {
+			sawTS = true
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("walk outDir: %v", err)
+	}
+	if !sawTS {
+		t.Errorf("gen-ts-client: expected at least one .ts file under %s", outDir)
+	}
 }
 
 func TestRunGenTSClientPinsVersion(t *testing.T) {
+	requireProtocGenES(t)
 	bundleDir, _, older := writeTwoLayerBundle(t)
 	outDir := filepath.Join(t.TempDir(), "client")
 	var out bytes.Buffer
@@ -406,6 +435,7 @@ func TestRunGenTSClientRefusesNonEmptyOut(t *testing.T) {
 }
 
 func TestRunGenTSClientAcceptsExistingEmptyOut(t *testing.T) {
+	requireProtocGenES(t)
 	bundleDir, _, _ := writeTwoLayerBundle(t)
 	outDir := t.TempDir() // pre-existing, empty
 	code := runGenTSClient(
@@ -413,6 +443,30 @@ func TestRunGenTSClientAcceptsExistingEmptyOut(t *testing.T) {
 		io.Discard, io.Discard)
 	if code != 0 {
 		t.Fatalf("gen-ts-client into an existing empty --out: exit %d, want 0", code)
+	}
+}
+
+// TestRunGenTSClientHandlesMissingProtocGenES exercises the error path when
+// protoc-gen-es is not on PATH. It runs unconditionally — independent of
+// whether the tool is locally installed — by clearing PATH for the duration
+// of the test. The CLI must exit non-zero and surface the install hint on
+// stderr so the operator knows what to do next.
+func TestRunGenTSClientHandlesMissingProtocGenES(t *testing.T) {
+	t.Setenv("PATH", "")
+	bundleDir, _, _ := writeTwoLayerBundle(t)
+	outDir := filepath.Join(t.TempDir(), "client")
+	var errOut bytes.Buffer
+	code := runGenTSClient(
+		[]string{"--bundle", bundleDir, "--out", outDir},
+		&errOut, io.Discard)
+	if code == 0 {
+		t.Fatal("gen-ts-client with no protoc-gen-es on PATH: want non-zero exit code")
+	}
+	msg := errOut.String()
+	for _, want := range []string{"protoc-gen-es", "not found", "npm install"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("stderr should mention %q:\n%s", want, msg)
+		}
 	}
 }
 
