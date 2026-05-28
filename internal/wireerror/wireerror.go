@@ -15,6 +15,7 @@ const (
 	codeUpstreamError              = "upstream_error"
 	codeTransformFailed            = "transform_failed"
 	codeInternalError              = "internal_error"
+	codeUnknownRoute               = "unknown_route"
 )
 
 // Error is a typed, wavefront-originated failure. It satisfies the error
@@ -147,4 +148,13 @@ func TransformFailedResponse(msg string) *Error {
 // for the panic value and stack trace.
 func InternalError(msg string) *Error {
 	return &Error{codeInternalError, msgOr(msg, "internal server error"), http.StatusInternalServerError}
+}
+
+// UnknownRoute — no contract in the bundle binds the inbound request's
+// (path, method). Wrong-method folds into this code: a request whose path
+// matches a registered route but whose method differs returns the same
+// envelope (no 405, no `Allow` header), because each contract names exactly
+// one method and the bundle is the only routing source of truth. 404.
+func UnknownRoute(msg string) *Error {
+	return &Error{codeUnknownRoute, msgOr(msg, "no contract binds this request's path and method"), http.StatusNotFound}
 }

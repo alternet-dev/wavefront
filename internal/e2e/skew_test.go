@@ -113,7 +113,7 @@ func runSkewScenario(t *testing.T, dir string) {
 		t.Fatalf("marshal request proto: %v", err)
 	}
 
-	req, _ := http.NewRequest(http.MethodPost, h.Proxy.URL, bytes.NewReader(reqBytes))
+	req, _ := http.NewRequest(contract.Method(), h.Proxy.URL+contract.Route(), bytes.NewReader(reqBytes))
 	req.Header.Set("X-Api-Contract-Version", version)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {

@@ -15,7 +15,7 @@ func TestMetricsErrorsLabeledByCode(t *testing.T) {
 	h := Spawn(t, SpawnOpts{})
 
 	// Trigger unsupported_contract_version to populate the counter.
-	req, _ := http.NewRequest(http.MethodPost, h.Proxy.URL, strings.NewReader("ignored"))
+	req, _ := http.NewRequest(http.MethodPost, h.Proxy.URL+"/v3/echo", strings.NewReader("ignored"))
 	req.Header.Set("X-Api-Contract-Version", "1999-01")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -53,7 +53,7 @@ func TestMetricsRequestsCounterIncrements(t *testing.T) {
 
 	const n = 3
 	for i := 0; i < n; i++ {
-		req, _ := http.NewRequest(http.MethodPost, h.Proxy.URL, bytes.NewReader(PingBytes(t, h.Bundle, "hi", 1)))
+		req, _ := http.NewRequest(http.MethodPost, h.Proxy.URL+"/v3/echo", bytes.NewReader(PingBytes(t, h.Bundle, "hi", 1)))
 		req.Header.Set("X-Api-Contract-Version", "2024-11")
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
@@ -85,7 +85,7 @@ func TestMetricsRequestsLabelsUnknownOnNegotiationFailure(t *testing.T) {
 	// with arbitrary client-supplied header values.
 	h := Spawn(t, SpawnOpts{})
 
-	req, _ := http.NewRequest(http.MethodPost, h.Proxy.URL, strings.NewReader(""))
+	req, _ := http.NewRequest(http.MethodPost, h.Proxy.URL+"/v3/echo", strings.NewReader(""))
 	req.Header.Set("X-Api-Contract-Version", "9999-99")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {

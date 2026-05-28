@@ -82,7 +82,21 @@ func forwardClientHeaders(dst, src http.Header) {
 
 func (s *Server) proxy(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
+	// version is the bundle-known contract version (or versionUnknown until
+	// negotiate succeeds). It labels the metrics and the structured log line —
+	// staying inside that bounded set keeps Prometheus cardinality finite.
+	//
+	// responseVersion is what we echo in X-Wavefront-Contract-Version. On the
+	// success path it's the negotiated version; on a pre-negotiate error path
+	// it's the raw client-supplied header value (or versionUnknown when the
+	// client sent none) so the client can correlate the error with the value
+	// it sent. Only the response header echoes the raw value — the metric and
+	// log keep the bounded version to protect cardinality.
 	version := versionUnknown
+	responseVersion := versionUnknown
+	if v := r.Header.Get(s.cfg.ContractVersionHeader); v != "" {
+		responseVersion = v
+	}
 	var route, target string
 	resolutionKind := ""
 	outcome := outcomeOK
@@ -90,7 +104,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request) {
 
 	fail := func(werr *wireerror.Error, transformOutcome string) {
 		outcome = werr.Code()
-		s.writeError(w, werr, version, transformOutcome)
+		s.writeError(w, werr, version, responseVersion, transformOutcome)
 	}
 
 	defer func() {
@@ -121,6 +135,23 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// First-pass routing gate: the inbound (path, method) must match a
+	// contract registered in the bundle. If it does not — unknown path, or
+	// known path with a wrong method — emit the unknown_route 404 envelope
+	// and stop. The check runs before negotiation: we have not yet validated
+	// the contract-version header, so the metric label and the structured
+	// log's `contract_version` stay `versionUnknown` (cardinality stays
+	// bounded). The response header, however, echoes the raw client-sent
+	// value via `responseVersion` so the caller can correlate the failure
+	// with what it sent; absent any client header, it falls back to
+	// `unknown`. Wrong-method folds into the same 404 (no 405, no `Allow`
+	// header) because each contract names exactly one method and the
+	// bundle is the only routing source of truth.
+	if _, ok := b.LookupRoute(r.URL.Path, r.Method); !ok {
+		fail(wireerror.UnknownRoute("no contract binds "+r.Method+" "+r.URL.Path), "")
+		return
+	}
+
 	r.Body = http.MaxBytesReader(w, r.Body, s.cfg.MaxBodyBytes)
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
@@ -138,7 +169,10 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request) {
 		fail(werr, "")
 		return
 	}
+	// Negotiation resolved a real version: from here on, both the metric
+	// label and the response header carry the same bundle-known value.
 	version = c.ContractVersion()
+	responseVersion = version
 	route = c.Route()
 	resolutionKind = describeResolution(c)
 
@@ -230,7 +264,14 @@ func describeResolution(c *bundle.Contract) string {
 	return "route"
 }
 
-func (s *Server) writeError(w http.ResponseWriter, werr *wireerror.Error, version, transformOutcome string) {
-	s.metrics.errors.WithLabelValues(werr.Code(), version, transformOutcome).Inc()
-	wireerror.Write(w, werr, version)
+// writeError emits a wavefront-originated failure and increments the error
+// counter. `metricVersion` is the bundle-known version (or versionUnknown)
+// that labels the wavefront_errors_total counter — keeping it bounded
+// protects Prometheus cardinality. `respVersion` is the value echoed in the
+// X-Wavefront-Contract-Version response header: on pre-negotiate errors it
+// carries the raw client-sent value (or versionUnknown when the client sent
+// none) so a caller can correlate the failure with what it sent.
+func (s *Server) writeError(w http.ResponseWriter, werr *wireerror.Error, metricVersion, respVersion, transformOutcome string) {
+	s.metrics.errors.WithLabelValues(werr.Code(), metricVersion, transformOutcome).Inc()
+	wireerror.Write(w, werr, respVersion)
 }

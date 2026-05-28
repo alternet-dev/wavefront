@@ -517,6 +517,102 @@ overrides:
 	}
 }
 
+// TestLookupRoute covers the bundle's route-membership check used by the
+// proxy as the first-pass routing gate. Path-method pairs that any contract
+// binds must hit (and return a non-nil *Contract); everything else (unknown
+// path, known path with wrong method, case-sensitive variants) must miss
+// (and return nil). The test deliberately exercises the wrong-method case:
+// each contract names exactly one method, so a path bound to GET must miss
+// when queried for POST.
+func TestLookupRoute(t *testing.T) {
+	mk := func(cv, route, method string) string {
+		return "version: 1\ncontracts:\n  - contract_version: \"" + cv + "\"\n" +
+			"    route: " + route + "\n    method: " + method + "\n" +
+			"    request_message: acme.v1.Ping\n    response_message: acme.v1.Pong\n"
+	}
+	dir := t.TempDir()
+	for _, l := range []struct{ name, cv, route, method string }{
+		{"2024-11", "2024-11", "/v3/echo", "POST"},
+		{"2025-01", "2025-01", "/v3/items", "GET"},
+	} {
+		ld := filepath.Join(dir, l.name)
+		mustMkdir(t, ld)
+		mustWrite(t, filepath.Join(ld, fileDescriptors), fdsBytes(t))
+		mustWrite(t, filepath.Join(ld, fileOpenAPI), []byte(validOpenAPI))
+		mustWrite(t, filepath.Join(ld, fileVersions), []byte(mk(l.cv, l.route, l.method)))
+	}
+	b, err := Load(dir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	cases := []struct {
+		path, method string
+		want         bool
+	}{
+		{"/v3/echo", "POST", true},
+		{"/v3/items", "GET", true},
+		// Wrong method on a known path — must miss. v0.5 folds this into
+		// unknown_route at the proxy boundary.
+		{"/v3/echo", "GET", false},
+		{"/v3/items", "POST", false},
+		{"/v3/items", "DELETE", false},
+		// Entirely unknown path.
+		{"/nope", "GET", false},
+		{"/", "GET", false},
+		// Case sensitivity: methods are normalized at load time to upper-case;
+		// the proxy receives them already uppercase from net/http, so a
+		// lowercase query must miss (defensive — should never happen at
+		// runtime).
+		{"/v3/echo", "post", false},
+		{"/V3/ECHO", "POST", false},
+	}
+	for _, c := range cases {
+		got, ok := b.LookupRoute(c.path, c.method)
+		if ok != c.want {
+			t.Errorf("LookupRoute(%q, %q) ok = %v, want %v", c.path, c.method, ok, c.want)
+		}
+		if c.want && got == nil {
+			t.Errorf("LookupRoute(%q, %q): want non-nil contract on hit, got nil", c.path, c.method)
+		}
+		if !c.want && got != nil {
+			t.Errorf("LookupRoute(%q, %q): want nil contract on miss, got %+v", c.path, c.method, got)
+		}
+	}
+}
+
+// TestLookupRouteMultipleContractsSamePath exercises the documented case
+// where two contracts in different layers bind the same (route, method)
+// under different contract_version values. LookupRoute must return one of
+// them; which one is the version-negotiation layer's problem, not this
+// layer's, so the test only checks that the returned contract is one of
+// the two known matches.
+func TestLookupRouteMultipleContractsSamePath(t *testing.T) {
+	mk := func(cv string) string {
+		return "version: 1\ncontracts:\n  - contract_version: \"" + cv + "\"\n" +
+			"    route: /v3/items\n    method: GET\n" +
+			"    request_message: acme.v1.Ping\n    response_message: acme.v1.Pong\n"
+	}
+	dir := t.TempDir()
+	for _, cv := range []string{"2024-11", "2025-01"} {
+		ld := filepath.Join(dir, cv)
+		mustMkdir(t, ld)
+		mustWrite(t, filepath.Join(ld, fileDescriptors), fdsBytes(t))
+		mustWrite(t, filepath.Join(ld, fileOpenAPI), []byte(validOpenAPI))
+		mustWrite(t, filepath.Join(ld, fileVersions), []byte(mk(cv)))
+	}
+	b, err := Load(dir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	got, ok := b.LookupRoute("/v3/items", "GET")
+	if !ok || got == nil {
+		t.Fatalf("LookupRoute hit expected, got ok=%v contract=%v", ok, got)
+	}
+	if got.ContractVersion() != "2024-11" && got.ContractVersion() != "2025-01" {
+		t.Errorf("LookupRoute returned a contract not among the two known matches: %q", got.ContractVersion())
+	}
+}
+
 func TestLoadMultipleLayers(t *testing.T) {
 	mk := func(cv, route string) string {
 		return "version: 1\ncontracts:\n  - contract_version: \"" + cv + "\"\n" +

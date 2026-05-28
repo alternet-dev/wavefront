@@ -240,6 +240,69 @@ func TestRecoverSkipsEnvelopeAfterResponseStarted(t *testing.T) {
 	}
 }
 
+// When the client sent an X-Api-Contract-Version on the request, the
+// panic envelope must echo that raw value in X-Wavefront-Contract-Version
+// — not the `unknown` sentinel — so the caller can correlate the failure
+// with the version it asked for. This mirrors the pre-negotiate error
+// path on the proxy handler; the recover middleware sees the request
+// from a different angle but must adopt the same split (raw header on
+// the wire, bounded `unknown` on the metric label).
+func TestRecoverEchoesContractVersionHeader(t *testing.T) {
+	var logbuf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logbuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	s := server.New(baseCfg("http://unused"))
+	s.SetLogger(logger)
+
+	handler := s.Recover(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
+		panic("boom")
+	}))
+
+	ts := httptest.NewServer(handler)
+	defer ts.Close()
+
+	const clientVersion = "2024-11"
+	req, err := http.NewRequest(http.MethodGet, ts.URL+"/anything", nil)
+	if err != nil {
+		t.Fatalf("build request: %v", err)
+	}
+	req.Header.Set("X-Api-Contract-Version", clientVersion)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Errorf("status=%d want 500", resp.StatusCode)
+	}
+	// The raw client-sent value must surface on the response header — NOT
+	// the `unknown` sentinel — so the caller can correlate the failure
+	// with the version it asked for.
+	if got := resp.Header.Get("X-Wavefront-Contract-Version"); got != clientVersion {
+		t.Errorf("X-Wavefront-Contract-Version=%q want %q (raw client value, not unknown)", got, clientVersion)
+	}
+	if got := resp.Header.Get("X-Wavefront-Error"); got != "internal_error" {
+		t.Errorf("X-Wavefront-Error=%q want internal_error", got)
+	}
+	if got := resp.Header.Get("Content-Type"); got != "application/protobuf" {
+		t.Errorf("Content-Type=%q want application/protobuf", got)
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	md := wavefrontErrorMD(t)
+	m := dynamicpb.NewMessage(md)
+	if err := proto.Unmarshal(body, m); err != nil {
+		t.Fatalf("response body is not wavefront.v0.Error: %v (raw=%q)", err, body)
+	}
+	if got := m.Get(md.Fields().ByName("code")).String(); got != "internal_error" {
+		t.Errorf("decoded code=%q want internal_error", got)
+	}
+}
+
 func TestRecoverPassesThroughNormalResponse(t *testing.T) {
 	// The middleware must be a no-op for a handler that returns normally —
 	// it must not flush headers prematurely or interfere with the response.

@@ -47,7 +47,7 @@ overrides:
 		},
 	})
 
-	req, _ := http.NewRequest(http.MethodPost, h.Proxy.URL, bytes.NewReader(PingBytes(t, h.Bundle, "hi", 7)))
+	req, _ := http.NewRequest(http.MethodPost, h.Proxy.URL+"/v3/echo", bytes.NewReader(PingBytes(t, h.Bundle, "hi", 7)))
 	req.Header.Set("X-Api-Contract-Version", "2024-11")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -80,7 +80,7 @@ func TestNoOverridePassesThrough(t *testing.T) {
 		},
 	})
 
-	req, _ := http.NewRequest(http.MethodPost, h.Proxy.URL, bytes.NewReader(PingBytes(t, h.Bundle, "hi", 7)))
+	req, _ := http.NewRequest(http.MethodPost, h.Proxy.URL+"/v3/echo", bytes.NewReader(PingBytes(t, h.Bundle, "hi", 7)))
 	req.Header.Set("X-Api-Contract-Version", "2024-11")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -144,7 +144,7 @@ overrides:
 		t.Fatalf("marshal PingV2: %v", err)
 	}
 
-	req, _ := http.NewRequest(http.MethodPost, h.Proxy.URL, bytes.NewReader(raw))
+	req, _ := http.NewRequest(http.MethodPost, h.Proxy.URL+"/v3/echo", bytes.NewReader(raw))
 	req.Header.Set("X-Api-Contract-Version", "2024-12")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {

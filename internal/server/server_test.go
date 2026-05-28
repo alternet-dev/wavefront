@@ -141,7 +141,7 @@ func TestProxySuccessForwardsAndTranslates(t *testing.T) {
 	front := httptest.NewServer(s.DataHandler())
 	defer front.Close()
 
-	req, _ := http.NewRequest(http.MethodPost, front.URL+"/anything", strings.NewReader(string(pingBytes(t, b, "hi", 7))))
+	req, _ := http.NewRequest(http.MethodPost, front.URL+"/v3/echo", strings.NewReader(string(pingBytes(t, b, "hi", 7))))
 	req.Header.Set("X-Api-Contract-Version", "2024-11")
 	req.Header.Set("Authorization", "Bearer abc")
 	req.Header.Set("traceparent", "tp-1")
@@ -181,7 +181,7 @@ func TestBodyTooLargeIs413(t *testing.T) {
 	front := httptest.NewServer(s.DataHandler())
 	defer front.Close()
 
-	req, _ := http.NewRequest(http.MethodPost, front.URL+"/x", strings.NewReader("way more than four bytes"))
+	req, _ := http.NewRequest(http.MethodPost, front.URL+"/v3/echo", strings.NewReader("way more than four bytes"))
 	req.Header.Set("X-Api-Contract-Version", "2024-11")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -194,6 +194,13 @@ func TestBodyTooLargeIs413(t *testing.T) {
 	if resp.Header.Get("X-Wavefront-Error") != "request_body_too_large" {
 		t.Errorf("X-Wavefront-Error = %q", resp.Header.Get("X-Wavefront-Error"))
 	}
+	// request_body_too_large fires before negotiate (MaxBytesReader is
+	// installed and consulted before the negotiate.Resolve call). The
+	// response header echoes the raw client-sent value so callers can
+	// correlate the failure with the version they intended.
+	if got := resp.Header.Get("X-Wavefront-Contract-Version"); got != "2024-11" {
+		t.Errorf("X-Wavefront-Contract-Version = %q, want %q (raw client value echoed)", got, "2024-11")
+	}
 }
 
 func TestUnknownContractVersionIs400(t *testing.T) {
@@ -203,7 +210,7 @@ func TestUnknownContractVersionIs400(t *testing.T) {
 	front := httptest.NewServer(s.DataHandler())
 	defer front.Close()
 
-	req, _ := http.NewRequest(http.MethodPost, front.URL+"/x", strings.NewReader("ignored"))
+	req, _ := http.NewRequest(http.MethodPost, front.URL+"/v3/echo", strings.NewReader("ignored"))
 	req.Header.Set("X-Api-Contract-Version", "2099-01")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -218,6 +225,12 @@ func TestUnknownContractVersionIs400(t *testing.T) {
 	}
 	if resp.Header.Get("Content-Type") != "application/protobuf" {
 		t.Errorf("Content-Type = %q", resp.Header.Get("Content-Type"))
+	}
+	// unsupported_contract_version is the canonical pre-negotiate failure
+	// where echoing the raw client value pays off — the response now tells
+	// the caller exactly which version wavefront received and rejected.
+	if got := resp.Header.Get("X-Wavefront-Contract-Version"); got != "2099-01" {
+		t.Errorf("X-Wavefront-Contract-Version = %q, want %q (raw client value echoed)", got, "2099-01")
 	}
 	if body, _ := io.ReadAll(resp.Body); len(body) == 0 {
 		t.Error("error body (wavefront.v0.Error) should be non-empty")
@@ -239,7 +252,7 @@ func TestUpstreamTimeoutIs504(t *testing.T) {
 	front := httptest.NewServer(s.DataHandler())
 	defer front.Close()
 
-	req, _ := http.NewRequest(http.MethodPost, front.URL+"/x", strings.NewReader(string(pingBytes(t, b, "hi", 1))))
+	req, _ := http.NewRequest(http.MethodPost, front.URL+"/v3/echo", strings.NewReader(string(pingBytes(t, b, "hi", 1))))
 	req.Header.Set("X-Api-Contract-Version", "2024-11")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -270,7 +283,7 @@ func TestUpstreamNon2xxIs502(t *testing.T) {
 	front := httptest.NewServer(s.DataHandler())
 	defer front.Close()
 
-	req, _ := http.NewRequest(http.MethodPost, front.URL+"/x", strings.NewReader(string(pingBytes(t, b, "hi", 1))))
+	req, _ := http.NewRequest(http.MethodPost, front.URL+"/v3/echo", strings.NewReader(string(pingBytes(t, b, "hi", 1))))
 	req.Header.Set("X-Api-Contract-Version", "2024-11")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {

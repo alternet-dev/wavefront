@@ -33,15 +33,19 @@ Each layer's `versions.yaml` is the **binding** — one contract, no transforms:
 version: 1                              # bundle-schema version
 contracts:
   - contract_version: "2024-11"         # the contract a client speaks
-    route: /v3/me/session               # internal path this maps to (path remap only)
-    method: GET                         # internal HTTP method
+    route: /v3/me/session               # path this contract binds (client URL + upstream URL)
+    method: GET                         # HTTP method this contract binds
     request_message:  acme.v2024_11.SessionRequest   # FQ proto: decode the body into this
     response_message: acme.v2024_11.SessionResponse  # FQ proto: encode the reply from this
 ```
 
 `route`, `method`, `request_message`, `response_message` are the binding.
-Cardinality is **1:1** — exactly one upstream call per inbound request;
-`route` is a path remap, never fan-out.
+Cardinality is **1:1** — exactly one upstream call per inbound request, and
+the inbound `(URL.Path, Method)` must match a contract's `(route, method)`
+verbatim. A request that doesn't match any binding — unknown path, or known
+path with a wrong method — returns `unknown_route` 404 (see the error
+contract table). Each contract names exactly one method, so wrong-method
+folds into the same 404 (no 405, no `Allow` header).
 
 The operator-owned `resolution.yaml` at the bundle root overrides how a
 version resolves — a `transform` shim, or a `route` to a named backend:
@@ -160,6 +164,7 @@ from a backend domain error) return:
 | `transform_failed` | 422 | `Content-Type` | a request transform verb can't apply — well-formed request, unprocessable under this contract's mapping |
 | `transform_failed` | 502 | `Content-Type` | a response transform verb can't apply — live internal shape drifted from the bundle's response stanzas |
 | `internal_error` | 500 | `Content-Type` | a panic in the request path or other unrecoverable fault inside wavefront itself; the recovered panic value and stack are logged, never sent on the wire |
+| `unknown_route` | 404 | `Content-Type` | no contract binds the inbound request's `(path, method)`; wrong-method folds in (no 405, no `Allow` header) because each contract names exactly one method |
 
 No client library is shipped: a client checks the HTTP status; structured
 handling (reading the header or decoding `wavefront.v0.Error`) is the

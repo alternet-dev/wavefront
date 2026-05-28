@@ -20,7 +20,7 @@ func TestUpstreamTimeoutReturns504(t *testing.T) {
 		ConfigOverride: func(c *config.Config) { c.RequestTimeout = 40 * time.Millisecond },
 	})
 
-	req, _ := http.NewRequest(http.MethodPost, h.Proxy.URL+"/x", bytes.NewReader(PingBytes(t, h.Bundle, "hi", 1)))
+	req, _ := http.NewRequest(http.MethodPost, h.Proxy.URL+"/v3/echo", bytes.NewReader(PingBytes(t, h.Bundle, "hi", 1)))
 	req.Header.Set("X-Api-Contract-Version", "2024-11")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -40,12 +40,15 @@ func TestUpstreamTimeoutReturns504(t *testing.T) {
 
 func TestRequestBodyTooLargeReturns413(t *testing.T) {
 	// Claim: an inbound body exceeding WAVEFRONT_MAX_BODY_BYTES returns the
-	// typed request_body_too_large error (HTTP 413).
+	// typed request_body_too_large error (HTTP 413). The response header
+	// echoes the raw client-sent contract-version value so the caller can
+	// correlate the rejection with what it sent (even though the failure
+	// is pre-negotiate).
 	h := Spawn(t, SpawnOpts{
 		ConfigOverride: func(c *config.Config) { c.MaxBodyBytes = 8 },
 	})
 
-	req, _ := http.NewRequest(http.MethodPost, h.Proxy.URL+"/x", strings.NewReader("far more than eight bytes of body"))
+	req, _ := http.NewRequest(http.MethodPost, h.Proxy.URL+"/v3/echo", strings.NewReader("far more than eight bytes of body"))
 	req.Header.Set("X-Api-Contract-Version", "2024-11")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -57,6 +60,9 @@ func TestRequestBodyTooLargeReturns413(t *testing.T) {
 	}
 	if resp.Header.Get("X-Wavefront-Error") != "request_body_too_large" {
 		t.Errorf("X-Wavefront-Error = %q", resp.Header.Get("X-Wavefront-Error"))
+	}
+	if got := resp.Header.Get("X-Wavefront-Contract-Version"); got != "2024-11" {
+		t.Errorf("X-Wavefront-Contract-Version = %q, want %q (raw client value echoed)", got, "2024-11")
 	}
 }
 
@@ -72,7 +78,7 @@ func TestUpstreamUnreachableReturns502(t *testing.T) {
 		},
 	})
 
-	req, _ := http.NewRequest(http.MethodPost, h.Proxy.URL+"/x", bytes.NewReader(PingBytes(t, h.Bundle, "hi", 1)))
+	req, _ := http.NewRequest(http.MethodPost, h.Proxy.URL+"/v3/echo", bytes.NewReader(PingBytes(t, h.Bundle, "hi", 1)))
 	req.Header.Set("X-Api-Contract-Version", "2024-11")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -102,7 +108,7 @@ overrides:
 `,
 	})
 
-	req, _ := http.NewRequest(http.MethodPost, h.Proxy.URL, bytes.NewReader(PingBytes(t, h.Bundle, "hi", 7)))
+	req, _ := http.NewRequest(http.MethodPost, h.Proxy.URL+"/v3/echo", bytes.NewReader(PingBytes(t, h.Bundle, "hi", 7)))
 	req.Header.Set("X-Api-Contract-Version", "2024-11")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -136,7 +142,7 @@ overrides:
 `,
 	})
 
-	req, _ := http.NewRequest(http.MethodPost, h.Proxy.URL, bytes.NewReader(PingTextOnly(t, h.Bundle, "hi")))
+	req, _ := http.NewRequest(http.MethodPost, h.Proxy.URL+"/v3/echo", bytes.NewReader(PingTextOnly(t, h.Bundle, "hi")))
 	req.Header.Set("X-Api-Contract-Version", "2024-11")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
