@@ -35,6 +35,15 @@ func TestCodeStatusTableMatchesProtocol(t *testing.T) {
 		{TransformFailedRequest(""), "transform_failed", 422},
 		{TransformFailedResponse(""), "transform_failed", 502},
 		{UnknownRoute(""), "unknown_route", 404},
+		{UpstreamStatus(401, ""), "upstream_status", 401},
+		{UpstreamStatus(403, ""), "upstream_status", 403},
+		{UpstreamStatus(404, ""), "upstream_status", 404},
+		{UpstreamStatus(405, ""), "upstream_status", 405},
+		{UpstreamStatus(409, ""), "upstream_status", 409},
+		{UpstreamStatus(410, ""), "upstream_status", 410},
+		{UpstreamStatus(422, ""), "upstream_status", 422},
+		{UpstreamStatus(429, ""), "upstream_status", 429},
+		{UpstreamStatus(451, ""), "upstream_status", 451},
 	}
 	for _, c := range cases {
 		if c.err.Code() != c.code {
@@ -52,6 +61,7 @@ func TestContentTypeAlwaysProtobuf(t *testing.T) {
 		UpstreamTimeout(""), UpstreamError(""),
 		TransformFailedRequest(""), TransformFailedResponse(""),
 		UnknownRoute(""),
+		UpstreamStatus(401, ""), UpstreamStatus(429, ""),
 	} {
 		if got := e.Headers().Get("Content-Type"); got != "application/protobuf" {
 			t.Errorf("%s: Content-Type = %q, want application/protobuf", e.Code(), got)
@@ -67,10 +77,29 @@ func TestRetryAfterOnlyOnUpstreamTimeout(t *testing.T) {
 		UnsupportedContractVersion(""), DecodeFailed(""), RequestBodyTooLarge(""), UpstreamError(""),
 		TransformFailedRequest(""), TransformFailedResponse(""),
 		UnknownRoute(""),
+		// upstream_status without WithRetryAfter must not synthesize one.
+		UpstreamStatus(429, ""),
 	} {
 		if got := e.Headers().Get("Retry-After"); got != "" {
 			t.Errorf("%s: Retry-After should be unset, got %q", e.Code(), got)
 		}
+	}
+}
+
+// TestUpstreamStatusWithRetryAfter verifies the optional Retry-After plumbing
+// used for the upstream 429 passthrough: when the upstream supplies a
+// Retry-After value, wavefront must relay it verbatim on the wire-error
+// envelope; otherwise no Retry-After is fabricated.
+func TestUpstreamStatusWithRetryAfter(t *testing.T) {
+	e := UpstreamStatus(429, "").WithRetryAfter("60")
+	if got := e.Headers().Get("Retry-After"); got != "60" {
+		t.Errorf("Retry-After = %q, want 60", got)
+	}
+	// WithRetryAfter("") is a no-op so callers can pass through whatever
+	// uresp.Header.Get returned without branching.
+	e2 := UpstreamStatus(429, "").WithRetryAfter("")
+	if got := e2.Headers().Get("Retry-After"); got != "" {
+		t.Errorf("empty Retry-After should remain unset, got %q", got)
 	}
 }
 
