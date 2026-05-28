@@ -129,14 +129,30 @@ func (c *Contract) Target() string              { return c.target }
 func (c *Contract) TransformTarget() string     { return c.transformTarget }
 func (c *Contract) Chain() []*Contract          { return c.chain }
 
+// Bundle holds the resolved view of a loaded bundle directory. Internally a
+// flat list of contracts: a layer holds one or more contracts sharing a
+// contract_version and distinguished by (route, method). The list
+// preserves the load order (sorted-layer × layer's versions.yaml order)
+// so iteration is deterministic, and the byVersion index gives O(1)
+// per-version lookups that LookupRoute, Versions, and resolveChains all
+// rely on.
 type Bundle struct {
-	contracts map[string]*Contract
+	contracts []*Contract
+	byVersion map[string][]*Contract
 	files     *protoregistry.Files
 }
 
+// Contract returns the first contract in the bundle whose contract_version
+// is version. A single-route layer has one contract per version, so this
+// is unambiguous. A multi-route layer has many contracts per version (one
+// per route); Contract returns the first by load order — callers that
+// need a specific (version, route, method) binding use LookupRoute first.
 func (b *Bundle) Contract(version string) (*Contract, bool) {
-	c, ok := b.contracts[version]
-	return c, ok
+	cs, ok := b.byVersion[version]
+	if !ok || len(cs) == 0 {
+		return nil, false
+	}
+	return cs[0], true
 }
 
 // LookupRoute returns the first contract in the bundle that binds
@@ -170,8 +186,8 @@ func (b *Bundle) LookupRoute(path, method string) (*Contract, bool) {
 // highest contract version — which is the default target for downstream
 // per-bundle codegen (gen-ts-client and friends).
 func (b *Bundle) Versions() []string {
-	out := make([]string, 0, len(b.contracts))
-	for cv := range b.contracts {
+	out := make([]string, 0, len(b.byVersion))
+	for cv := range b.byVersion {
 		out = append(out, cv)
 	}
 	sort.Strings(out)
@@ -361,7 +377,18 @@ func Load(dir string) (*Bundle, error) {
 		return nil, merr
 	}
 
-	contracts := make(map[string]*Contract)
+	// contracts is the flat in-order list; byVersion is the per-version
+	// index. A single-route layer has one entry per version; a multi-route
+	// layer contributes many entries with the same contract_version,
+	// distinguished by (route, method).
+	var contracts []*Contract
+	byVersion := make(map[string][]*Contract)
+	// seen detects true duplicates: same version AND same (route, method).
+	// A multi-route layer with the same (route, method) listed twice — or
+	// two layers each claiming the same (version, route, method) — is
+	// invalid.
+	type key struct{ version, route, method string }
+	seen := make(map[key]bool)
 	for _, l := range loaded {
 		if len(l.yb.Contracts) == 0 {
 			return nil, &ValidationError{Reason: "layer has no contracts"}
@@ -371,9 +398,11 @@ func Load(dir string) (*Bundle, error) {
 			if verr != nil {
 				return nil, verr
 			}
-			if _, dup := contracts[c.contractVersion]; dup {
-				return nil, &ValidationError{Contract: c.contractVersion, Field: "contract_version", Reason: "duplicate across layers"}
+			k := key{c.contractVersion, c.route, c.method}
+			if seen[k] {
+				return nil, &ValidationError{Contract: c.contractVersion, Field: "contract_version", Reason: "duplicate (version, route, method) across layers"}
 			}
+			seen[k] = true
 			var reqMsg, respMsg protoreflect.MessageDescriptor
 			for _, pair := range []struct {
 				name string
@@ -407,29 +436,38 @@ func Load(dir string) (*Bundle, error) {
 					c.target = strings.TrimSpace(ov.Route.Target)
 				}
 			}
-			contracts[c.contractVersion] = c
+			contracts = append(contracts, c)
+			byVersion[c.contractVersion] = append(byVersion[c.contractVersion], c)
 		}
 	}
 
 	// Validate that every resolution override names a known contract version.
 	for cv := range resolutionMap {
-		if _, known := contracts[cv]; !known {
+		if _, known := byVersion[cv]; !known {
 			return nil, &ValidationError{Contract: cv, Field: "contract_version", Reason: "resolution override names an unknown contract version"}
 		}
 	}
 
-	if cerr := resolveChains(contracts); cerr != nil {
+	if cerr := resolveChains(contracts, byVersion); cerr != nil {
 		return nil, cerr
 	}
 
-	return &Bundle{contracts: contracts, files: files}, nil
+	return &Bundle{contracts: contracts, byVersion: byVersion, files: files}, nil
 }
 
 // resolveChains walks each contract's transform.target links into an ordered
 // chain ([the contract, its target, ...] ending at a terminal — a contract
 // with no transform.target). A target naming an unknown version, or a cycle,
 // is a hard error. The resolved chain is stored on each Contract.
-func resolveChains(contracts map[string]*Contract) error {
+//
+// Cross-version chain lookup: when a multi-route layer has many
+// contracts per version, transform.target = v2 from contract C on
+// (version=v1, route=R, method=M) resolves to the contract on
+// (version=v2, route=R, method=M) — same (route, method) at the new
+// version. For single-route layers each version has exactly one contract,
+// so any (route, method) match is trivially the right one. A v2 layer
+// that does not bind C's (route, method) is a hard error.
+func resolveChains(contracts []*Contract, byVersion map[string][]*Contract) error {
 	for _, c := range contracts {
 		var chain []*Contract
 		seen := map[string]bool{}
@@ -443,9 +481,22 @@ func resolveChains(contracts map[string]*Contract) error {
 			if cur.transformTarget == "" {
 				break
 			}
-			next, ok := contracts[cur.transformTarget]
+			candidates, ok := byVersion[cur.transformTarget]
 			if !ok {
 				return &ValidationError{Contract: cur.contractVersion, Field: "transform.target", Reason: "transform target names an unknown version"}
+			}
+			// Find the candidate that binds the same (route, method) as
+			// the source contract. Single-route layers always have
+			// exactly one candidate and it matches by construction.
+			var next *Contract
+			for _, cand := range candidates {
+				if cand.route == c.route && cand.method == c.method {
+					next = cand
+					break
+				}
+			}
+			if next == nil {
+				return &ValidationError{Contract: cur.contractVersion, Field: "transform.target", Reason: "transform target version does not bind (" + c.route + ", " + c.method + ")"}
 			}
 			cur = next
 		}

@@ -18,7 +18,7 @@ bundle/
   <contract-version>/        # one immutable layer per version
     descriptors.binpb        #   proto FileDescriptorSet — this version's message shapes
     openapi.json             #   the frozen OpenAPI surface the version was cut from
-    versions.yaml            #   the route binding (a single contract)
+    versions.yaml            #   the route bindings (one or more contracts)
 ```
 
 A layer is emitted once and never rewritten — that immutability is the
@@ -27,7 +27,8 @@ version routes to the default backend with its body untouched.
 
 ## Layer manifest and resolution
 
-Each layer's `versions.yaml` is the **binding** — one contract, no transforms:
+Each layer's `versions.yaml` is a list of **bindings** — one entry per
+`(route, method)` the layer's contract version covers, no transforms:
 
 ```yaml
 version: 1                              # bundle-schema version
@@ -37,7 +38,17 @@ contracts:
     method: GET                         # HTTP method this contract binds
     request_message:  acme.v2024_11.SessionRequest   # FQ proto: decode the body into this
     response_message: acme.v2024_11.SessionResponse  # FQ proto: encode the reply from this
+  - contract_version: "2024-11"         # same version, additional route bound at this layer
+    route: /v3/items
+    method: POST
+    request_message:  acme.v2024_11.CreateItemRequest
+    response_message: acme.v2024_11.Item
 ```
+
+A layer may bind one route or many; all entries within a layer share the
+same `contract_version` and differ by `(route, method)`. Two contracts
+within or across layers binding the same `(contract_version, route,
+method)` is invalid — the binding would be ambiguous.
 
 `route`, `method`, `request_message`, `response_message` are the binding.
 Cardinality is **1:1** — exactly one upstream call per inbound request, and

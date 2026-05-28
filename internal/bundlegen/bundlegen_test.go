@@ -164,16 +164,20 @@ func TestAddHardErrors(t *testing.T) {
 			"requestBody":{"content":{"application/json":{"schema":{"$ref":"#/components/schemas/A"}}}},
 			"responses":{"200":{"content":{"application/json":{"schema":{"$ref":"#/components/schemas/A"}}}}}}}},
 			"components":{"schemas":{"A":{"type":"object","properties":{"x":{"oneOf":[{"type":"string"}]}}}}}}`,
+		"allOf": `{"openapi":"3.0.0","info":{"version":"1"},"paths":{"/x":{"post":{
+			"requestBody":{"content":{"application/json":{"schema":{"$ref":"#/components/schemas/A"}}}},
+			"responses":{"200":{"content":{"application/json":{"schema":{"$ref":"#/components/schemas/A"}}}}}}}},
+			"components":{"schemas":{"A":{"type":"object","properties":{"x":{"allOf":[{"type":"string"}]}}}}}}`,
+		"anyOf": `{"openapi":"3.0.0","info":{"version":"1"},"paths":{"/x":{"post":{
+			"requestBody":{"content":{"application/json":{"schema":{"$ref":"#/components/schemas/A"}}}},
+			"responses":{"200":{"content":{"application/json":{"schema":{"$ref":"#/components/schemas/A"}}}}}}}},
+			"components":{"schemas":{"A":{"type":"object","properties":{"x":{"anyOf":[{"type":"string"}]}}}}}}`,
 		"additionalProperties": `{"openapi":"3.0.0","info":{"version":"1"},"paths":{"/x":{"post":{
 			"requestBody":{"content":{"application/json":{"schema":{"$ref":"#/components/schemas/A"}}}},
 			"responses":{"200":{"content":{"application/json":{"schema":{"$ref":"#/components/schemas/A"}}}}}}}},
 			"components":{"schemas":{"A":{"type":"object","additionalProperties":true,"properties":{"x":{"type":"string"}}}}}}`,
 		"no requestBody": `{"openapi":"3.0.0","info":{"version":"1"},"paths":{"/x":{"post":{
 			"responses":{"200":{"content":{"application/json":{"schema":{"$ref":"#/components/schemas/A"}}}}}}}},
-			"components":{"schemas":{"A":{"type":"object","properties":{"x":{"type":"string"}}}}}}`,
-		"two operations": `{"openapi":"3.0.0","info":{"version":"1"},"paths":{
-			"/x":{"post":{"requestBody":{"content":{"application/json":{"schema":{"$ref":"#/components/schemas/A"}}}},"responses":{"200":{"content":{"application/json":{"schema":{"$ref":"#/components/schemas/A"}}}}}}},
-			"/y":{"post":{"requestBody":{"content":{"application/json":{"schema":{"$ref":"#/components/schemas/A"}}}},"responses":{"200":{"content":{"application/json":{"schema":{"$ref":"#/components/schemas/A"}}}}}}}},
 			"components":{"schemas":{"A":{"type":"object","properties":{"x":{"type":"string"}}}}}}`,
 		"inline non-ref schema": `{"openapi":"3.0.0","info":{"version":"1"},"paths":{"/x":{"post":{
 			"requestBody":{"content":{"application/json":{"schema":{"type":"object","properties":{"x":{"type":"string"}}}}}},

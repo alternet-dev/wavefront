@@ -10,9 +10,9 @@ import (
 )
 
 // seedSingleLayerBundle writes a one-layer bundle into t.TempDir() by running
-// Add against a small inline OpenAPI doc. The shared test helper across this
-// package's existing tests uses the same in-process Add path, so the produced
-// descriptors.binpb matches what the runtime would see at boot.
+// Add against a small inline OpenAPI doc. The shared test helper across
+// this package's existing tests uses the same in-process Add path, so the
+// produced descriptors.binpb matches what the runtime would see at boot.
 func seedSingleLayerBundle(t *testing.T) (bundleDir, version string) {
 	t.Helper()
 	const doc = `{"openapi":"3.0.0","info":{"title":"t","version":"2026-05-17"},
