@@ -79,6 +79,27 @@ func (e *MessageNotFoundError) Error() string {
 	return fmt.Sprintf("contract %q binding message %q not found in descriptors", e.Contract, e.Message)
 }
 
+// PackageCollisionError is raised at boot when two or more version layers each
+// uniquely contribute proto files into the same proto package. The runtime
+// resolves messages by their fully-qualified name against one merged
+// FileDescriptorSet, so a package owned by multiple layers would have
+// undefined resolution. The disjoint-package guarantee is normally upheld by
+// the wavefront.gen.v<version> namespacing convention; this typed error is
+// the defense-in-depth check that fails fast at boot if the convention is
+// ever violated. Layers is sorted lexically for deterministic messages.
+//
+// When more than one package collides, Load reports only the
+// lexically-first colliding package — the operator fixes one at a time and
+// re-runs, surfacing the next collision on the next boot.
+type PackageCollisionError struct {
+	Package string
+	Layers  []string
+}
+
+func (e *PackageCollisionError) Error() string {
+	return fmt.Sprintf("bundle layers %v share proto package %q; per-version proto packages are required (e.g., wavefront.gen.v<version>)", e.Layers, e.Package)
+}
+
 // --- model ---
 
 // Contract is one resolved binding. Fields are unexported with accessors
@@ -294,6 +315,7 @@ func Load(dir string) (*Bundle, error) {
 	}
 
 	type layer struct {
+		name string
 		fdps []*descriptorpb.FileDescriptorProto
 		yb   *yamlBundle
 	}
@@ -315,13 +337,25 @@ func Load(dir string) (*Bundle, error) {
 		if yb.Version != 1 {
 			return nil, &UnsupportedVersionError{Version: yb.Version}
 		}
-		loaded = append(loaded, layer{fdps: fdps, yb: yb})
+		loaded = append(loaded, layer{name: name, fdps: fdps, yb: yb})
 	}
 
+	// Defense-in-depth: no two version layers may uniquely contribute files
+	// into the same proto package. The runtime resolves message names
+	// against a single merged FileDescriptorSet; a package owned by two
+	// layers would have ambiguous resolution. The wavefront.gen.v<version>
+	// namespacing convention normally guarantees disjointness; this
+	// explicit check fails fast at boot if the convention is ever violated.
+	perLayerNames := make([]string, len(loaded))
 	allFDPs := make([][]*descriptorpb.FileDescriptorProto, len(loaded))
 	for i, l := range loaded {
+		perLayerNames[i] = l.name
 		allFDPs[i] = l.fdps
 	}
+	if cerr := checkPackageCollisions(perLayerNames, allFDPs); cerr != nil {
+		return nil, cerr
+	}
+
 	files, merr := mergeDescriptors(allFDPs)
 	if merr != nil {
 		return nil, merr
@@ -453,6 +487,126 @@ func loadLayerDescriptors(path string) ([]*descriptorpb.FileDescriptorProto, err
 		return nil, &ParseError{File: fileDescriptors, Err: err}
 	}
 	return fds.File, nil
+}
+
+// checkPackageCollisions enforces the per-version proto-package convention
+// at boot. It rejects bundles in which two or more version layers each
+// uniquely contribute proto files into the same package.
+//
+// A shared dependency (a file present bit-identically in every layer that
+// includes it) is not a collision: that's the same dedup path mergeDescriptors
+// takes, and the resulting merged registry has one entry for that file.
+// Only files that are unique to a single layer (file name absent from other
+// layers' FDS, OR present with bit-identical bytes only in this same layer)
+// contribute package ownership.
+//
+// On multi-package collision, only the lexically-first colliding package is
+// reported — operators fix one at a time and re-boot, surfacing the next.
+func checkPackageCollisions(layerNames []string, perLayer [][]*descriptorpb.FileDescriptorProto) error {
+	if len(layerNames) != len(perLayer) {
+		// Programmer error; the call site builds these in lockstep.
+		return fmt.Errorf("checkPackageCollisions: %d layer names but %d FDS slices", len(layerNames), len(perLayer))
+	}
+	// fileLayers records the set of layers that contribute each file
+	// (file name → set of layer names that include a file with that
+	// name in their FDS). Bit-identical contributions across layers
+	// indicate a shared dependency, not per-layer ownership.
+	type contribution struct {
+		layers map[string]struct{}
+		bytes  map[string]struct{} // deterministic-marshalled wire bytes
+	}
+	fileContribs := map[string]*contribution{}
+	for i, fdps := range perLayer {
+		layerName := layerNames[i]
+		for _, f := range fdps {
+			b, err := proto.MarshalOptions{Deterministic: true}.Marshal(f)
+			if err != nil {
+				return &ParseError{File: fileDescriptors, Err: err}
+			}
+			c := fileContribs[f.GetName()]
+			if c == nil {
+				c = &contribution{
+					layers: map[string]struct{}{},
+					bytes:  map[string]struct{}{},
+				}
+				fileContribs[f.GetName()] = c
+			}
+			c.layers[layerName] = struct{}{}
+			c.bytes[string(b)] = struct{}{}
+		}
+	}
+
+	// packageOwners maps each proto package to the set of layers that
+	// uniquely own a file in that package. A file with bit-identical
+	// contributions across layers (a shared dep) contributes no
+	// ownership; a file that differs across layers will be caught by
+	// mergeDescriptors as a hard inconsistency. The package-collision
+	// check only fires when two layers each contribute a DIFFERENT file
+	// into the same package.
+	packageOwners := map[string]map[string]struct{}{}
+	for fileName, c := range fileContribs {
+		if len(c.layers) > 1 && len(c.bytes) == 1 {
+			// Shared dep: same file, same bytes, in every contributing
+			// layer. Don't attribute package ownership.
+			continue
+		}
+		if len(c.bytes) > 1 {
+			// Same file name, different bytes across layers.
+			// mergeDescriptors will reject this; let it produce its
+			// own targeted error and don't conflate it with a package
+			// collision.
+			continue
+		}
+		// Exactly one layer contributes this file. Look up the
+		// package from that layer's FDS.
+		var pkg string
+		for i, fdps := range perLayer {
+			if _, ok := c.layers[layerNames[i]]; !ok {
+				continue
+			}
+			for _, f := range fdps {
+				if f.GetName() == fileName {
+					pkg = f.GetPackage()
+					break
+				}
+			}
+			break
+		}
+		if pkg == "" {
+			// Files without a package (the proto default package) are
+			// not produced by the wavefront codegen path and would not
+			// be referenced by any contract binding. Skip them rather
+			// than flagging the empty-package case as a collision.
+			continue
+		}
+		owners := packageOwners[pkg]
+		if owners == nil {
+			owners = map[string]struct{}{}
+			packageOwners[pkg] = owners
+		}
+		for layer := range c.layers {
+			owners[layer] = struct{}{}
+		}
+	}
+
+	// Pick the lexically-first colliding package for a deterministic error.
+	var colliding []string
+	for pkg, owners := range packageOwners {
+		if len(owners) > 1 {
+			colliding = append(colliding, pkg)
+		}
+	}
+	if len(colliding) == 0 {
+		return nil
+	}
+	sort.Strings(colliding)
+	pkg := colliding[0]
+	layers := make([]string, 0, len(packageOwners[pkg]))
+	for layer := range packageOwners[pkg] {
+		layers = append(layers, layer)
+	}
+	sort.Strings(layers)
+	return &PackageCollisionError{Package: pkg, Layers: layers}
 }
 
 // mergeDescriptors combines every layer's FileDescriptorProtos into one
