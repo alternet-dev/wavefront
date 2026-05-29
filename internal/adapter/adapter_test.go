@@ -57,6 +57,9 @@ func testFiles(t *testing.T) *protoregistry.Files {
 		MessageType: []*descriptorpb.DescriptorProto{
 			{Name: proto.String("Ping"), Field: []*descriptorpb.FieldDescriptorProto{str("text", 1), i32("n", 2)}},
 			{Name: proto.String("Pong"), Field: []*descriptorpb.FieldDescriptorProto{str("text", 1), tsField}},
+			// Empty mirrors the generator's synthetic zero-field message bound
+			// to bodyless operations: no fields, used to detect the bodyless case.
+			{Name: proto.String("Empty")},
 		},
 	}
 	fds := &descriptorpb.FileDescriptorSet{File: []*descriptorpb.FileDescriptorProto{tsFDP, acme}}
@@ -134,6 +137,47 @@ func TestDecodeRequestInvalidProtobuf(t *testing.T) {
 	_, werr := a.DecodeRequest(tb{"POST", "/x", "acme.v1.Ping", "acme.v1.Pong"}, []byte("\xde\xad\xbe\xef not proto"))
 	if werr == nil || werr.Code() != "decode_failed" {
 		t.Fatalf("want decode_failed, got %v", werr)
+	}
+}
+
+// TestDecodeRequestEmptyMessageSendsNoBody: a zero-field request_message is
+// the generator's synthetic Empty bound to a bodyless operation. The upstream
+// call must carry no body and no Content-Type — the inbound bytes are not
+// decoded, so the upstream GET/path-only POST is clean (never `{}`).
+func TestDecodeRequestEmptyMessageSendsNoBody(t *testing.T) {
+	a := NewProtoJSON(testResolver{testFiles(t)})
+
+	call, werr := a.DecodeRequest(tb{"GET", "/v3/items/{id}", "acme.v1.Empty", "acme.v1.Pong"}, nil)
+	if werr != nil {
+		t.Fatalf("DecodeRequest: %v", werr)
+	}
+	if call.Method != "GET" || call.Path != "/v3/items/{id}" {
+		t.Errorf("method/path = %q %q", call.Method, call.Path)
+	}
+	if len(call.Body) != 0 {
+		t.Errorf("Body = %q, want empty (bodyless upstream call must not send {})", call.Body)
+	}
+	if call.ContentType != "" {
+		t.Errorf("ContentType = %q, want empty (no body declares no envelope)", call.ContentType)
+	}
+}
+
+// TestEncodeResponseEmptyMessageReturnsNoBody: a zero-field response_message is
+// the synthetic Empty (e.g. an operation whose only declared response is 204).
+// EncodeResponse must not attempt to unmarshal the absent upstream body; it
+// returns no body.
+func TestEncodeResponseEmptyMessageReturnsNoBody(t *testing.T) {
+	a := NewProtoJSON(testResolver{testFiles(t)})
+
+	out, ct, werr := a.EncodeResponse(tb{"DELETE", "/v3/items/{id}", "acme.v1.Empty", "acme.v1.Empty"}, nil)
+	if werr != nil {
+		t.Fatalf("EncodeResponse: %v", werr)
+	}
+	if len(out) != 0 {
+		t.Errorf("out = %q, want empty", out)
+	}
+	if ct != "application/protobuf" {
+		t.Errorf("contentType = %q, want application/protobuf", ct)
 	}
 }
 

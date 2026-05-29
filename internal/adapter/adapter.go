@@ -60,6 +60,14 @@ func (p *ProtoJSON) DecodeRequest(b Binding, in []byte) (UpstreamCall, *wireerro
 	if err != nil {
 		return UpstreamCall{}, wireerror.DecodeFailed("request_message " + b.RequestMessage() + " is not resolvable")
 	}
+	// A zero-field message is the generator's synthetic Empty, bound to a
+	// bodyless operation (no requestBody). The generator never emits a
+	// zero-field message for a real schema, so this uniquely identifies the
+	// bodyless case: the upstream call carries no body and no Content-Type, so
+	// the upstream GET/path-only POST is clean rather than sending `{}`.
+	if md.Fields().Len() == 0 {
+		return UpstreamCall{Method: b.Method(), Path: b.Route()}, nil
+	}
 	msg := dynamicpb.NewMessage(md)
 	if err := proto.Unmarshal(in, msg); err != nil {
 		return UpstreamCall{}, wireerror.DecodeFailed("request body is not valid protobuf for " + b.RequestMessage())
@@ -80,6 +88,12 @@ func (p *ProtoJSON) EncodeResponse(b Binding, upstreamJSON []byte) ([]byte, stri
 	md, err := p.resolver.Message(b.ResponseMessage())
 	if err != nil {
 		return nil, "", wireerror.UpstreamError("response_message " + b.ResponseMessage() + " is not resolvable")
+	}
+	// A zero-field message is the synthetic Empty, bound to a bodyless response
+	// (e.g. an operation whose only declared response is 204). Encode no body
+	// rather than unmarshalling an absent/empty upstream JSON body.
+	if md.Fields().Len() == 0 {
+		return nil, "application/protobuf", nil
 	}
 	msg := dynamicpb.NewMessage(md)
 	if err := protojson.Unmarshal(upstreamJSON, msg); err != nil {
