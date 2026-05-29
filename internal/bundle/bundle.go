@@ -171,9 +171,40 @@ func (b *Bundle) Contract(version string) (*Contract, bool) {
 // Multiple contracts may legally bind the same (route, method) across
 // different `contract_version` values. LookupRoute returns the first match
 // in bundle order; selecting between same-(route, method) contracts is the
-// version-negotiation layer's job, not this layer's.
+// version-negotiation layer's job — see Lookup for the keyed (path, method,
+// version) form callers reach for once a version is in hand.
 func (b *Bundle) LookupRoute(path, method string) (*Contract, bool) {
 	for _, c := range b.contracts {
+		if c.route == path && c.method == method {
+			return c, true
+		}
+	}
+	return nil, false
+}
+
+// Lookup returns the contract that matches (path, method, version) — the
+// full resolution key used by the proxy once the inbound contract-version
+// header has been read. It is the only correct dispatch for a multi-route
+// bundle: Contract(version) would return whichever contract for that
+// version happens to be first in load order, hiding the per-route binding.
+//
+// On miss, ok is false. Misses come in three flavours, all collapsed into
+// the same (nil, false) result here; the caller (negotiate.Resolve) maps
+// them onto the right wire-error:
+//   - version is absent from the bundle,
+//   - version is present but does not bind this (path, method),
+//   - path/method is unknown to every version (this case is normally
+//     handled before negotiate by the proxy's route gate using LookupRoute).
+//
+// For a single-route bundle every version has exactly one contract, so
+// Lookup(c.Route(), c.Method(), c.ContractVersion()) trivially returns c —
+// the degenerate case continues to work without special-casing.
+func (b *Bundle) Lookup(path, method, version string) (*Contract, bool) {
+	cs, ok := b.byVersion[version]
+	if !ok {
+		return nil, false
+	}
+	for _, c := range cs {
 		if c.route == path && c.method == method {
 			return c, true
 		}

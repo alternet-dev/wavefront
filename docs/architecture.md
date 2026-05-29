@@ -7,8 +7,9 @@ Implementation shape — package layout and the request path.
 - **bundle** (`internal/bundle/`) — loads + validates the descriptor bundle: a
   directory of immutable per-version layers plus the operator-owned
   `resolution.yaml`. Read-only; loaded once at boot; fail-fast on invalid.
-- **negotiate** (`internal/negotiate/`) — resolves the selector (contract
-  version) from the request; maps to a transform profile or a typed error.
+- **negotiate** (`internal/negotiate/`) — resolves the contract serving a
+  request from its `(URL.Path, Method, X-Api-Contract-Version)` against the
+  loaded bundle; maps to a transform profile or a typed error.
 - **adapter** (`internal/adapter/`) — codec pairs. Decode inbound external
   bytes to a neutral value tree; encode the response back. `protobuf` first.
 - **transform** (`internal/transform/`) — applies the declarative mapping
@@ -19,10 +20,11 @@ Implementation shape — package layout and the request path.
 
 ## Request path
 
-`server` accepts → `negotiate` resolves version → `adapter` decodes →
-`transform` maps request → `server` calls the resolved upstream → `transform`
-maps response → `adapter` encodes → `server` responds. On any failure, a typed
-error is encoded in the client's contract version.
+`server` accepts → route gate (path+method) → `negotiate` resolves the
+contract on (path, method, contract-version) → `adapter` decodes → `transform`
+maps request → `server` calls the resolved upstream → `transform` maps response
+→ `adapter` encodes → `server` responds. On any failure, a typed error is
+encoded in the client's contract version.
 
 ## Concurrency model
 
