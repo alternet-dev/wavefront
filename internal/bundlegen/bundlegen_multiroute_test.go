@@ -199,6 +199,103 @@ func TestAddMultiRouteIsDeterministic(t *testing.T) {
 	}
 }
 
+// bodylessOpenAPI exercises #105: operations with no requestBody (a GET
+// read and a path-only POST) and a bodyless response (HTTP 204 on the
+// DELETE). Each bodyless side must bind the synthetic Empty message
+// rather than hard-erroring. Item is a normal bodied response shared by
+// the two reads.
+const bodylessOpenAPI = `{
+  "openapi": "3.0.0",
+  "info": {"title": "acme", "version": "2026-09-01"},
+  "paths": {
+    "/v3/items/{id}": {
+      "get": {
+        "operationId": "getItem",
+        "responses": {"200": {"content": {"application/json": {"schema": {"$ref": "#/components/schemas/Item"}}}}}
+      },
+      "delete": {
+        "operationId": "deleteItem",
+        "responses": {"204": {"description": "deleted"}}
+      }
+    },
+    "/v3/items/{id}/touch": {
+      "post": {
+        "operationId": "touchItem",
+        "responses": {"200": {"content": {"application/json": {"schema": {"$ref": "#/components/schemas/Item"}}}}}
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "Item": {"type": "object", "properties": {
+        "id": {"type": "string"},
+        "name": {"type": "string"}
+      }}
+    }
+  }
+}`
+
+// TestAddBodylessOperationsSynthesizeEmpty walks an OpenAPI whose reads
+// have no requestBody and whose DELETE returns 204 (no body). Every
+// bodyless side binds the synthetic wavefront.gen.v<ver>.Empty message —
+// a zero-field proto message emitted once into the descriptor set —
+// rather than rejecting the operation. (#105)
+func TestAddBodylessOperationsSynthesizeEmpty(t *testing.T) {
+	in := writeOpenAPI(t, bodylessOpenAPI)
+	out := t.TempDir()
+	if err := bundlegen.Add(in, out, false); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+
+	b, err := bundle.Load(out)
+	if err != nil {
+		t.Fatalf("generated bundle did not load: %v", err)
+	}
+
+	const pkg = "wavefront.gen.v2026_09_01"
+
+	// Every bodyless side binds Empty; the bodied reads bind Item.
+	want := []struct {
+		route, method   string
+		reqSuf, respSuf string
+	}{
+		{"/v3/items/{id}", "DELETE", ".Empty", ".Empty"},
+		{"/v3/items/{id}", "GET", ".Empty", ".Item"},
+		{"/v3/items/{id}/touch", "POST", ".Empty", ".Item"},
+	}
+	for _, w := range want {
+		c, ok := b.LookupRoute(w.route, w.method)
+		if !ok {
+			t.Errorf("LookupRoute(%q, %q): not found", w.route, w.method)
+			continue
+		}
+		if !strings.HasSuffix(c.RequestMessage(), w.reqSuf) {
+			t.Errorf("LookupRoute(%q, %q).RequestMessage() = %q, want suffix %q",
+				w.route, w.method, c.RequestMessage(), w.reqSuf)
+		}
+		if !strings.HasSuffix(c.ResponseMessage(), w.respSuf) {
+			t.Errorf("LookupRoute(%q, %q).ResponseMessage() = %q, want suffix %q",
+				w.route, w.method, c.ResponseMessage(), w.respSuf)
+		}
+	}
+
+	// Empty resolves to a zero-field message. bundle.Load would have
+	// rejected a descriptor set with two messages named Empty, so a clean
+	// load plus this resolve confirms it was emitted exactly once.
+	em, err := b.Message(pkg + ".Empty")
+	if err != nil {
+		t.Fatalf("descriptor missing synthetic Empty: %v", err)
+	}
+	if n := em.Fields().Len(); n != 0 {
+		t.Errorf("Empty has %d fields, want 0", n)
+	}
+
+	// The bodied schema is still present alongside the synthetic one.
+	if _, err := b.Message(pkg + ".Item"); err != nil {
+		t.Errorf("descriptor missing Item: %v", err)
+	}
+}
+
 // TestAddEmptyOpenAPIIsAHardError: an OpenAPI doc with zero operations
 // can't emit a layer with no contracts (versions.yaml.contracts must be
 // non-empty per the bundle schema).

@@ -206,22 +206,34 @@ func protoPackage(version string) string {
 // deterministic wire bytes of a FileDescriptorSet that holds one
 // FileDescriptorProto for the package.
 func buildDescriptors(doc openAPI, roots []string, pkg, version string) ([]byte, error) {
-	needed, err := collectSchemas(doc, roots)
+	// The synthetic Empty message has no OpenAPI component, so split it out
+	// before walking the document and inject it directly below.
+	realRoots, needEmpty := partitionEmpty(roots)
+	needed, err := collectSchemas(doc, realRoots)
 	if err != nil {
 		return nil, err
 	}
 
 	// Sort schema names so descriptor message order is stable: the
 	// byte-reproducibility invariant the consumer's buf-breaking gate
-	// relies on.
-	names := make([]string, 0, len(needed))
+	// relies on. The synthetic Empty is sorted in alongside the real ones
+	// (skipped if a real component already claims the name).
+	names := make([]string, 0, len(needed)+1)
 	for n := range needed {
 		names = append(names, n)
+	}
+	if _, claimed := needed[emptyMessageName]; needEmpty && !claimed {
+		names = append(names, emptyMessageName)
 	}
 	sort.Strings(names)
 
 	msgs := make([]*descriptorpb.DescriptorProto, 0, len(names))
 	for _, n := range names {
+		if needed[n] == nil {
+			// Synthetic zero-field Empty message.
+			msgs = append(msgs, &descriptorpb.DescriptorProto{Name: proto.String(n)})
+			continue
+		}
 		dp, derr := buildMessage(n, needed[n], pkg)
 		if derr != nil {
 			return nil, derr
@@ -395,17 +407,28 @@ func allOperations(doc openAPI) ([]foundOperation, error) {
 	return ops, nil
 }
 
+// emptyMessageName is the synthetic message bound by a bodyless side of an
+// operation — a GET/path-only POST with no requestBody, or a response with
+// no 200 body (e.g. an HTTP 204). One zero-field `Empty` message is emitted
+// per layer into the version's package and shared by every bodyless side.
+const emptyMessageName = "Empty"
+
+// refSchemaName resolves the component-schema name a side of an operation
+// binds to. A bodyless side — no requestBody on the request side, or no 200
+// response on the response side — binds the synthetic Empty message; the
+// fail-loud rejection of inline (non-$ref) schemas still applies to bodied
+// sides.
 func refSchemaName(op operation, request bool) (string, error) {
 	var mt map[string]mediaType
 	if request {
 		if op.RequestBody == nil {
-			return "", fmt.Errorf("operation has no requestBody schema (bodyless operations are not yet supported)")
+			return emptyMessageName, nil
 		}
 		mt = op.RequestBody.Content
 	} else {
 		resp, ok := op.Responses["200"]
 		if !ok {
-			return "", fmt.Errorf("operation has no 200 response schema")
+			return emptyMessageName, nil
 		}
 		mt = resp.Content
 	}
@@ -417,6 +440,23 @@ func refSchemaName(op operation, request bool) (string, error) {
 		return "", fmt.Errorf("request/response schema must be a $ref to #/components/schemas (inline schemas are unsupported)")
 	}
 	return refName(m.Schema.Ref), nil
+}
+
+// partitionEmpty splits roots into the real component-schema names (which
+// collectSchemas resolves from the OpenAPI document) and a flag reporting
+// whether the synthetic Empty message is referenced. Empty has no OpenAPI
+// component backing it, so it must be excluded from the collectSchemas walk
+// and injected at descriptor-build time instead.
+func partitionEmpty(roots []string) (real []string, needEmpty bool) {
+	real = make([]string, 0, len(roots))
+	for _, r := range roots {
+		if r == emptyMessageName {
+			needEmpty = true
+			continue
+		}
+		real = append(real, r)
+	}
+	return real, needEmpty
 }
 
 func refName(ref string) string {
