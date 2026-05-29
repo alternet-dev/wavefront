@@ -109,8 +109,14 @@ request.
 | Spike of `transform_failed` (422) on one version | a request stanza can't apply to live payloads | inspect that version's `resolution.yaml` entry; the source field is absent or unparseable |
 | Spike of `transform_failed` (502) on one version | the live upstream shape drifted from that version's response stanzas | regenerate the bundle or update the version's response stanzas to the new shape |
 | Spike of `upstream_timeout` (504) | upstream slow | raise `WAVEFRONT_REQUEST_TIMEOUT_MS` or fix the upstream |
-| Spike of `upstream_error` (502) on one named target only | one backend is unreachable or 5xx-ing | other versions are unaffected; investigate that backend |
+| Spike of `upstream_error` (502) on one named target only | one backend is unreachable, 3xx-redirecting, or returning a status outside the bounded passthrough set | other versions are unaffected; investigate that backend |
 | Spike of `request_body_too_large` (413) | clients sending bodies > `WAVEFRONT_MAX_BODY_BYTES` | raise the cap or fix the client |
+| Spike of `upstream_status` (401 / 403 / 404 / 405 / 409 / 410 / 422 / 429 / 451) | upstream returning a domain-status code in the bounded passthrough set | wavefront relays it as-is so the client sees the real outcome; investigate the upstream, not wavefront |
+| Spike of `unsupported_media_type` (415) | clients sending bodies without `Content-Type: application/protobuf` | check the client; the request envelope is the codec's media type |
+| Spike of `unknown_route` (404) | client URL `(path, method)` not bound by any contract in the bundle | check the bundle's bindings; wrong-method folds here on purpose (no `Allow` header) |
+| Spike of `internal_error` (500) | a handler panic recovered by middleware | check logs for the panic stack — this is always a bug |
+| `unavailable` (503) on the proxy path at boot | request arrived before the bundle finished loading | `Retry-After: 1` hint; legitimate boot race, brief and self-healing |
+| Non-zero `wavefront_stdlib_boundary_total` | clients hitting `net/http`'s boundary (408 slow header / 431 oversized headers / 417 bad `Expect`) before the wavefront handler runs | tune `WAVEFRONT_READ_HEADER_TIMEOUT_MS` or check client behaviour; these are out-of-envelope by design |
 
 ## Failure modes
 
@@ -123,7 +129,13 @@ request.
 | Unknown / missing contract version | `unsupported_contract_version` (400) |
 | Client body fails to decode into `request_message` | `decode_failed` (400) |
 | Client body exceeds `WAVEFRONT_MAX_BODY_BYTES` | `request_body_too_large` (413) |
+| Client body's `Content-Type` is not `application/protobuf` | `unsupported_media_type` (415) |
+| Request URL `(path, method)` not bound by any contract | `unknown_route` (404) |
 | Request transform verb can't apply | `transform_failed` (422) |
 | Response transform verb can't apply | `transform_failed` (502) |
-| Upstream non-2xx, unreachable, or reply un-encodable | `upstream_error` (502) |
+| Upstream non-2xx in the bounded passthrough set | `upstream_status` (401 / 403 / 404 / 405 / 409 / 410 / 422 / 429 / 451) — preserved verbatim; `Retry-After` relayed for 429 |
+| Upstream non-2xx outside the set, 3xx, unreachable, or reply un-encodable | `upstream_error` (502) |
 | Upstream exceeds `WAVEFRONT_REQUEST_TIMEOUT_MS` | `upstream_timeout` (504) |
+| Bundle not yet loaded when a request arrives on the proxy path | `unavailable` (503) with a `Retry-After: 1` hint |
+| Recovered handler panic | `internal_error` (500) |
+| Slow header / oversized headers / non-`100-continue` `Expect:` | net/http stdlib boundary: `408 / 431 / 417` with `Content-Type: text/plain`; counted via `wavefront_stdlib_boundary_total`; deliberately out-of-envelope per the [error contract](protocol.md#error-contract) |

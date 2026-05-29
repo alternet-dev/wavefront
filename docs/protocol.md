@@ -25,6 +25,12 @@ A layer is emitted once and never rewritten — that immutability is the
 anti-corruption guarantee. `resolution.yaml` is optional; absent, every
 version routes to the default backend with its body untouched.
 
+Per-version proto packages are version-namespaced (the `wavefront.gen.v<version>`
+convention) so layers are disjoint by construction. `bundle.Load` additionally
+fails fast at boot if two layers contribute files into the same proto package —
+a defense-in-depth check against the namespacing convention being violated, so
+the merged `FileDescriptorSet` always has unambiguous name resolution.
+
 ## Layer manifest and resolution
 
 Each layer's `versions.yaml` is the **binding** — one contract, no transforms:
@@ -158,17 +164,85 @@ from a backend domain error) return:
 |---|---|---|---|
 | `unsupported_contract_version` | 400 | `Content-Type` | version header missing / unknown / unsupported |
 | `decode_failed` | 400 | `Content-Type` | client body fails to decode into `request_message` |
+| `unsupported_media_type` | 415 | `Content-Type` | request `Content-Type` is not `application/protobuf`; the wrong envelope is rejected before the body is read, separating it from `decode_failed` |
 | `request_body_too_large` | 413 | `Content-Type` | inbound body exceeds `WAVEFRONT_MAX_BODY_BYTES` |
 | `upstream_timeout` | 504 | `Content-Type`, `Retry-After` | upstream exceeds `WAVEFRONT_REQUEST_TIMEOUT_MS` |
-| `upstream_error` | 502 | `Content-Type` | upstream non-2xx / unreachable / reply un-encodable |
+| `upstream_error` | 502 | `Content-Type` | upstream unreachable / reply un-encodable / a non-2xx outside the passthrough set / a 3xx (redirects are not followed) |
+| `upstream_status` | 401 / 403 / 404 / 405 / 409 / 410 / 422 / 429 / 451 | `Content-Type`; `Retry-After` preserved verbatim for 429 | upstream returned a status in the bounded passthrough set — the status is relayed, the body stays the `wavefront.v0.Error` envelope so the body-type invariant holds |
 | `transform_failed` | 422 | `Content-Type` | a request transform verb can't apply — well-formed request, unprocessable under this contract's mapping |
 | `transform_failed` | 502 | `Content-Type` | a response transform verb can't apply — live internal shape drifted from the bundle's response stanzas |
 | `internal_error` | 500 | `Content-Type` | a panic in the request path or other unrecoverable fault inside wavefront itself; the recovered panic value and stack are logged, never sent on the wire |
 | `unknown_route` | 404 | `Content-Type` | no contract binds the inbound request's `(path, method)`; wrong-method folds in (no 405, no `Allow` header) because each contract names exactly one method |
+| `unavailable` | 503 | `Content-Type`, `Retry-After` | the proxy path received a request before the bundle finished loading at boot; a short `Retry-After` hint is attached so clients back off briefly |
 
 No client library is shipped: a client checks the HTTP status; structured
 handling (reading the header or decoding `wavefront.v0.Error`) is the
 consumer's own choice.
+
+### Selective upstream passthrough
+
+Two rules govern how upstream responses reach the client.
+
+**Non-2xx passthrough.** When the upstream returns a status in the bounded set
+`{401, 403, 404, 405, 409, 410, 422, 429, 451}`, the upstream's status is
+relayed with `X-Wavefront-Error: upstream_status` and a
+`wavefront.v0.Error{code: "upstream_status"}` body — the body type is invariant,
+the upstream's raw body is not relayed. For `429`, the upstream's `Retry-After`
+(if any) is preserved verbatim. Every other non-2xx, and every `3xx`, collapses
+to `upstream_error` (502). Upstream redirects are not followed
+(`http.Client.CheckRedirect` returns `http.ErrUseLastResponse`), so a `3xx`
+reaches the proxy as a final response and folds into the same 502. `304` is
+not part of the passthrough set — conditional requests are not part of the
+v0.x contract.
+
+**2xx fidelity.** `200` / `201` / `202` / `203` flow through verbatim with the
+encoded `response_message` body. `204` and `205` flow through with **no body** —
+wavefront does not encode an empty `response_message`. Out-of-contract 2xx
+codes (`206`, `207`, `208`, `226`) are shape drift and collapse to
+`upstream_error` (502).
+
+### Disambiguating shared statuses
+
+The same HTTP status can fire for different reasons; `X-Wavefront-Error` is
+the discriminator.
+
+| HTTP | Wavefront-originated | Upstream-originated |
+|---|---|---|
+| 404 | `unknown_route` — no contract binds `(path, method)` | `upstream_status` — upstream returned 404 |
+| 422 | `transform_failed` — a request transform verb couldn't apply | `upstream_status` — upstream returned 422 |
+
+A client that branches on HTTP status alone will conflate these; one that
+reads `X-Wavefront-Error` separates wavefront-originated from
+upstream-originated cases.
+
+### Stdlib-boundary statuses
+
+A small set of statuses is emitted by Go's `net/http` request reader **before**
+any wavefront handler runs, with `Content-Type: text/plain` and **no**
+`X-Wavefront-Error` header. They are deliberately out-of-envelope: replacing
+them would mean reimplementing parts of the stdlib request reader. Clients
+distinguish them from wire-error responses by the absence of the
+`X-Wavefront-Error` header.
+
+| HTTP | Cause |
+|---|---|
+| 408 Request Timeout | slow client failed to send headers within `WAVEFRONT_READ_HEADER_TIMEOUT_MS` |
+| 431 Request Header Fields Too Large | request headers exceed `net/http`'s default `MaxHeaderBytes` |
+| 417 Expectation Failed | non-`100-continue` `Expect:` header |
+
+Occurrences are surfaced as the unlabelled Prometheus counter
+`wavefront_stdlib_boundary_total` so operators see the count without sniffing
+responses; intercepting and re-enveloping these is tracked as future work in
+[#91](https://github.com/alternet-dev/wavefront/issues/91).
+
+### Response header invariant
+
+`X-Wavefront-Contract-Version` is set on every response, success or error. On
+pre-negotiate failures (route-gate miss, panic recovery, `unsupported_media_type`,
+`unavailable`), wavefront echoes the raw client `X-Api-Contract-Version`
+header value, or the literal `unknown` if the client sent none. Only this
+response header echoes raw values — the metric label and structured log line
+stay at bundle-known versions so the Prometheus cardinality stays bounded.
 
 ## Forward compatibility
 
