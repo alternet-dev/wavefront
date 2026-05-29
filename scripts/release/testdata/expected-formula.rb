@@ -9,10 +9,6 @@ class WavefrontBundle < Formula
       url "https://github.com/alternet-dev/wavefront/releases/download/v0.5.0/wavefront-bundle-v0.5.0-aarch64-apple-darwin.tar.gz"
       sha256 "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
     end
-    on_intel do
-      url "https://github.com/alternet-dev/wavefront/releases/download/v0.5.0/wavefront-bundle-v0.5.0-x86_64-apple-darwin.tar.gz"
-      sha256 "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-    end
   end
 
   on_linux do
