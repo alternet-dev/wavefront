@@ -704,9 +704,9 @@ func TestLoadMultipleLayers(t *testing.T) {
 }
 
 // Versions exposes the loaded contract versions in lexical-ascending order.
-// Downstream tooling (gen-ts-client, etc.) needs a stable list to pick the
-// latest layer (the lexically-highest version) and to render a "available:
-// ..." hint when a caller pins an unknown version.
+// Downstream tooling needs a stable list to pick the latest layer (the
+// lexically-highest version) and to render a "available: ..." hint when a
+// caller pins an unknown version.
 func TestVersionsReturnsAllContractsLexicalAscending(t *testing.T) {
 	mk := func(cv, route string) string {
 		return "version: 1\ncontracts:\n  - contract_version: \"" + cv + "\"\n" +

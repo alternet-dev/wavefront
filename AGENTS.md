@@ -21,9 +21,10 @@ source of truth — verify a claim against it.
 2. [docs/concepts.md](docs/concepts.md) — first principles + vocabulary
 3. [docs/protocol.md](docs/protocol.md) — bundle schema + wire contract
 4. [docs/embedding.md](docs/embedding.md) — how a consumer integrates
-5. [docs/architecture.md](docs/architecture.md) — implementation shape
-6. [docs/operations.md](docs/operations.md) — running it
-7. Source: `cmd/wavefront/main.go` → `internal/server/` →
+5. [docs/client.md](docs/client.md) — multi-language client integration
+6. [docs/architecture.md](docs/architecture.md) — implementation shape
+7. [docs/operations.md](docs/operations.md) — running it
+8. Source: `cmd/wavefront/main.go` → `internal/server/` →
    `internal/bundle/` + `internal/transform/` → `internal/adapter/` (codec pairs)
 
 ## Key invariants

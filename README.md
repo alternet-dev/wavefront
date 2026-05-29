@@ -167,8 +167,9 @@ The bundle schema and transform vocabulary are detailed in
 1. [docs/concepts.md](docs/concepts.md) — first principles + vocabulary
 2. [docs/protocol.md](docs/protocol.md) — bundle schema + wire contract
 3. [docs/embedding.md](docs/embedding.md) — how a consumer integrates
-4. [docs/architecture.md](docs/architecture.md) — implementation shape
-5. [docs/operations.md](docs/operations.md) — running it
+4. [docs/client.md](docs/client.md) — multi-language client integration
+5. [docs/architecture.md](docs/architecture.md) — implementation shape
+6. [docs/operations.md](docs/operations.md) — running it
 
 LLM agents: start with [AGENTS.md](AGENTS.md).
 
