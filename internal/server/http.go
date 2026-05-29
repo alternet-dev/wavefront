@@ -191,17 +191,19 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// First-pass routing gate: the inbound (path, method) must match a
-	// contract registered in the bundle. If it does not — unknown path, or
-	// known path with a wrong method — emit the unknown_route 404 envelope
-	// and stop. The check runs before negotiation: we have not yet validated
-	// the contract-version header, so the metric label and the structured
-	// log's `contract_version` stay `versionUnknown` (cardinality stays
-	// bounded). The response header, however, echoes the raw client-sent
-	// value via `responseVersion` so the caller can correlate the failure
-	// with what it sent; absent any client header, it falls back to
-	// `unknown`. Wrong-method folds into the same 404 (no 405, no `Allow`
-	// header) because each contract names exactly one method and the
-	// bundle is the only routing source of truth.
+	// contract registered in the bundle at SOME version. The matched
+	// contract is intentionally discarded — a multi-route bundle may bind
+	// the same (path, method) at multiple contract_versions, and the
+	// version-aware dispatch happens below in negotiate.Resolve once the
+	// client's contract-version header is in scope. The gate's only job is
+	// to fail-fast on an unbound (path, method) before any body read or
+	// negotiation work; the metric label and structured log's
+	// `contract_version` stay `versionUnknown` (bounded cardinality), while
+	// the response header echoes the raw client value via `responseVersion`
+	// so a caller can correlate the failure with what it sent. Wrong-method
+	// folds into the same 404 (no 405, no `Allow` header) because each
+	// contract names exactly one method and the bundle is the only routing
+	// source of truth.
 	if _, ok := b.LookupRoute(r.URL.Path, r.Method); !ok {
 		fail(wireerror.UnknownRoute("no contract binds "+r.Method+" "+r.URL.Path), "")
 		return
@@ -263,7 +265,16 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	c, werr := negotiate.Resolve(b, r.Header.Get(s.cfg.ContractVersionHeader))
+	// Full (path, method, version) negotiation. The route gate above has
+	// confirmed (path, method) matches SOME contract in the bundle; this
+	// call adds the version filter, picking the one contract whose
+	// (route, method, contract_version) matches all three. For a
+	// multi-route bundle this is the only correct dispatch — Contract(v)
+	// alone would return the first contract for that version in load
+	// order, hiding the per-route binding. For a single-route bundle the
+	// degenerate case (one contract per version) reduces to the same
+	// behaviour with no special-casing.
+	c, werr := negotiate.Resolve(b, r.URL.Path, r.Method, r.Header.Get(s.cfg.ContractVersionHeader))
 	if werr != nil {
 		fail(werr, "")
 		return

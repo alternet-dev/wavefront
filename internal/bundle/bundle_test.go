@@ -884,3 +884,83 @@ func TestLoadSingleLayerCannotCollide(t *testing.T) {
 		t.Fatalf("single-layer bundle must not collide: %v", err)
 	}
 }
+
+// TestLookup is the (path, method, version) keyed lookup the proxy/negotiate
+// layer uses to dispatch multi-route bundles. It must:
+//   - return the contract that matches all three (no first-by-load-order
+//     fallback like Contract(version) does for a multi-route bundle),
+//   - miss when the version is absent from the bundle,
+//   - miss when the version is present but does NOT bind (path, method).
+func TestLookup(t *testing.T) {
+	// Multi-route single-version layer: 2024-11 binds POST /a and GET /b.
+	// A second layer 2025-03 binds only GET /a.
+	mk := func(cv string, ops []struct{ route, method string }) string {
+		s := "version: 1\ncontracts:\n"
+		for _, op := range ops {
+			s += "  - contract_version: \"" + cv + "\"\n" +
+				"    route: " + op.route + "\n    method: " + op.method + "\n" +
+				"    request_message: acme.v1.Ping\n    response_message: acme.v1.Pong\n"
+		}
+		return s
+	}
+	dir := t.TempDir()
+	layers := []struct {
+		name, cv string
+		ops      []struct{ route, method string }
+	}{
+		{"2024-11", "2024-11", []struct{ route, method string }{{"/a", "POST"}, {"/b", "GET"}}},
+		{"2025-03", "2025-03", []struct{ route, method string }{{"/a", "GET"}}},
+	}
+	for _, l := range layers {
+		ld := filepath.Join(dir, l.name)
+		mustMkdir(t, ld)
+		mustWrite(t, filepath.Join(ld, fileDescriptors), fdsBytes(t))
+		mustWrite(t, filepath.Join(ld, fileOpenAPI), []byte(validOpenAPI))
+		mustWrite(t, filepath.Join(ld, fileVersions), []byte(mk(l.cv, l.ops)))
+	}
+	b, err := Load(dir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	cases := []struct {
+		name                string
+		path, method, ver   string
+		wantOK              bool
+		wantRoute, wantMthd string
+		wantContractVersion string
+	}{
+		// Multi-route: dispatch by (path, method) within version 2024-11.
+		{"multi-route POST /a @ 2024-11", "/a", "POST", "2024-11", true, "/a", "POST", "2024-11"},
+		{"multi-route GET /b @ 2024-11", "/b", "GET", "2024-11", true, "/b", "GET", "2024-11"},
+		// Same (path, method) at a different version: distinct contract.
+		{"GET /a @ 2025-03", "/a", "GET", "2025-03", true, "/a", "GET", "2025-03"},
+		// Version present but does not bind this (path, method): miss.
+		{"2024-11 does not bind GET /a", "/a", "GET", "2024-11", false, "", "", ""},
+		{"2025-03 does not bind POST /a", "/a", "POST", "2025-03", false, "", "", ""},
+		{"2025-03 does not bind GET /b", "/b", "GET", "2025-03", false, "", "", ""},
+		// Version absent: miss.
+		{"unknown version", "/a", "POST", "1999-01", false, "", "", ""},
+		// Path absent: miss (no version binds /nope).
+		{"unknown path", "/nope", "GET", "2024-11", false, "", "", ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, ok := b.Lookup(c.path, c.method, c.ver)
+			if ok != c.wantOK {
+				t.Fatalf("Lookup(%q, %q, %q) ok = %v, want %v", c.path, c.method, c.ver, ok, c.wantOK)
+			}
+			if !c.wantOK {
+				if got != nil {
+					t.Errorf("Lookup miss must return nil contract, got %+v", got)
+				}
+				return
+			}
+			if got.Route() != c.wantRoute || got.Method() != c.wantMthd || got.ContractVersion() != c.wantContractVersion {
+				t.Errorf("Lookup returned (%q, %q, %q), want (%q, %q, %q)",
+					got.Route(), got.Method(), got.ContractVersion(),
+					c.wantRoute, c.wantMthd, c.wantContractVersion)
+			}
+		})
+	}
+}
