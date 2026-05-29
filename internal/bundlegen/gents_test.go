@@ -25,7 +25,7 @@ func seedSingleLayerBundle(t *testing.T) (bundleDir, version string) {
 	if err := os.WriteFile(src, []byte(doc), 0o600); err != nil {
 		t.Fatalf("write openapi: %v", err)
 	}
-	if err := Add(src, bundleDir); err != nil {
+	if err := Add(src, bundleDir, false); err != nil {
 		t.Fatalf("seed bundle: %v", err)
 	}
 	return bundleDir, "2026-05-17"

@@ -71,7 +71,7 @@ const multiOpOpenAPI = `{
 func TestAddMultiRouteProducesAllContracts(t *testing.T) {
 	in := writeOpenAPI(t, multiOpOpenAPI)
 	out := t.TempDir()
-	if err := bundlegen.Add(in, out); err != nil {
+	if err := bundlegen.Add(in, out, false); err != nil {
 		t.Fatalf("Add: %v", err)
 	}
 
@@ -184,10 +184,10 @@ func TestAddMultiRouteProducesAllContracts(t *testing.T) {
 func TestAddMultiRouteIsDeterministic(t *testing.T) {
 	in := writeOpenAPI(t, multiOpOpenAPI)
 	o1, o2 := t.TempDir(), t.TempDir()
-	if err := bundlegen.Add(in, o1); err != nil {
+	if err := bundlegen.Add(in, o1, false); err != nil {
 		t.Fatalf("add1: %v", err)
 	}
-	if err := bundlegen.Add(in, o2); err != nil {
+	if err := bundlegen.Add(in, o2, false); err != nil {
 		t.Fatalf("add2: %v", err)
 	}
 	for _, f := range []string{"descriptors.binpb", "versions.yaml", "openapi.json"} {
@@ -205,7 +205,7 @@ func TestAddMultiRouteIsDeterministic(t *testing.T) {
 func TestAddEmptyOpenAPIIsAHardError(t *testing.T) {
 	const empty = `{"openapi":"3.0.0","info":{"version":"1"},"paths":{},"components":{"schemas":{}}}`
 	in := writeOpenAPI(t, empty)
-	if err := bundlegen.Add(in, t.TempDir()); err == nil {
+	if err := bundlegen.Add(in, t.TempDir(), false); err == nil {
 		t.Fatal("expected a hard error on a zero-operation OpenAPI, got nil")
 	}
 }
@@ -216,7 +216,7 @@ func TestAddEmptyOpenAPIIsAHardError(t *testing.T) {
 func TestAddDedupesSharedSchemas(t *testing.T) {
 	in := writeOpenAPI(t, multiOpOpenAPI)
 	out := t.TempDir()
-	if err := bundlegen.Add(in, out); err != nil {
+	if err := bundlegen.Add(in, out, false); err != nil {
 		t.Fatalf("Add: %v", err)
 	}
 	b, err := bundle.Load(out)
@@ -241,7 +241,7 @@ func TestAddDedupesSharedSchemas(t *testing.T) {
 func TestAddVersionsYAMLIsSorted(t *testing.T) {
 	in := writeOpenAPI(t, multiOpOpenAPI)
 	out := t.TempDir()
-	if err := bundlegen.Add(in, out); err != nil {
+	if err := bundlegen.Add(in, out, false); err != nil {
 		t.Fatalf("Add: %v", err)
 	}
 	raw, err := os.ReadFile(filepath.Join(out, "2026-05-17", "versions.yaml"))

@@ -57,14 +57,19 @@ version at once**, each resolved onto a live backend. The bundle is
 a directory of immutable per-version **layers**: cutting a new version is
 **pure addition** — `wavefront-bundle add` emits a fresh layer and never
 touches an existing one, so a frozen version's external shapes can never be
-corrupted. A layer routes to its backend unchanged by default; when the
-internal surface moves on, the operator re-points an older version with a
-`transform` shim in `resolution.yaml`, and shims **chain** across versions to
-reach the live backend. Retention is **consumer-side and explicit**: the
-consumer declares the still-supported versions by which layers it keeps,
-takes a retired one out with `wavefront-bundle remove` / `retire`, and gates
-the result with `wavefront-bundle verify` — never automatic. `wavefront`
-infers none of this; lifecycle is wholly a generation/consumer concern.
+corrupted. During pre-commit iteration, when the OpenAPI for the
+in-progress version is still being refined, `wavefront-bundle add --force`
+opts into overwriting a same-`info.version` layer dir; once a layer is
+committed and consumers depend on it, the default refuses any re-add as a
+guard against accidental clobbering. A layer routes to its backend
+unchanged by default; when the internal surface moves on, the operator
+re-points an older version with a `transform` shim in `resolution.yaml`,
+and shims **chain** across versions to reach the live backend. Retention
+is **consumer-side and explicit**: the consumer declares the
+still-supported versions by which layers it keeps, takes a retired one out
+with `wavefront-bundle remove` / `retire`, and gates the result with
+`wavefront-bundle verify` — never automatic. `wavefront` infers none of
+this; lifecycle is wholly a generation/consumer concern.
 
 ## Auth model
 

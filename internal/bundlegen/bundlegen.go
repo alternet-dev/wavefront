@@ -117,9 +117,15 @@ func readOpenAPI(src string) ([]byte, error) {
 // set is the union of every referenced request/response schema across all
 // operations (deduped). The fail-loud doctrine applies: any unsupported
 // construct in any walked operation rejects the whole bundle, not just
-// that operation. It refuses to overwrite an existing layer: a frozen
-// version is never rewritten.
-func Add(openapiSrc, bundleDir string) error {
+// that operation.
+//
+// By default, Add refuses to overwrite an existing layer: a frozen version
+// is never rewritten. When force is true, an existing same-version layer
+// dir is replaced wholesale — the pre-commit-iteration escape hatch for a
+// caller still refining the OpenAPI. Once a layer is committed and
+// consumers depend on it, the default (force=false) guards against
+// accidental clobbering.
+func Add(openapiSrc, bundleDir string, force bool) error {
 	raw, doc, version, err := loadAndPrevalidate(openapiSrc)
 	if err != nil {
 		return err
@@ -163,7 +169,7 @@ func Add(openapiSrc, bundleDir string) error {
 	}
 
 	versions := renderVersionsYAML(version, entries)
-	return writeLayer(bundleDir, version, raw, descBytes, versions)
+	return writeLayer(bundleDir, version, raw, descBytes, versions, force)
 }
 
 // loadAndPrevalidate fetches/reads the OpenAPI source, parses it, and
@@ -267,13 +273,34 @@ func renderVersionsYAML(version string, entries []contractEntry) string {
 	return b.String()
 }
 
-// writeLayer emits one layer's three files into bundleDir/<version>/. It
-// refuses to overwrite a pre-existing layer: a frozen version is never
-// rewritten.
-func writeLayer(bundleDir, version string, openapiRaw, descBytes []byte, versions string) error {
+// writeLayer emits one layer's three files into bundleDir/<version>/. By
+// default it refuses to overwrite a pre-existing layer: a frozen version
+// is never rewritten. When force is true, an existing same-version layer
+// dir is removed before the new one is written — the pre-commit-iteration
+// escape hatch.
+//
+// The forced removal goes through a defensive sanity check: the deletion
+// target must be exactly one path segment under bundleDir and must be a
+// directory. The check is belt-and-suspenders against a bug or future
+// caller that passes an unexpected version string; safeLayerName upstream
+// already rejects path separators and "." / "..", but os.RemoveAll is
+// destructive enough that one extra guard is worth the line.
+func writeLayer(bundleDir, version string, openapiRaw, descBytes []byte, versions string, force bool) error {
 	layerDir := filepath.Join(bundleDir, version)
-	if _, err := os.Stat(layerDir); err == nil {
-		return fmt.Errorf("version %q already exists in the bundle; frozen versions are immutable", version)
+	info, err := os.Stat(layerDir)
+	if err == nil {
+		if !force {
+			return fmt.Errorf("version %q already exists in the bundle; frozen versions are immutable", version)
+		}
+		if !info.IsDir() {
+			return fmt.Errorf("refusing to overwrite %s: not a directory", layerDir)
+		}
+		if filepath.Dir(layerDir) != filepath.Clean(bundleDir) {
+			return fmt.Errorf("refusing to overwrite %s: not a direct child of bundle dir %s", layerDir, bundleDir)
+		}
+		if err := os.RemoveAll(layerDir); err != nil {
+			return fmt.Errorf("remove existing layer %s: %w", layerDir, err)
+		}
 	} else if !os.IsNotExist(err) {
 		return fmt.Errorf("stat %s: %w", layerDir, err)
 	}

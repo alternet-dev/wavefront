@@ -41,7 +41,7 @@ func generatedBundleDir(t *testing.T) string {
 		t.Fatalf("write openapi: %v", err)
 	}
 	out := t.TempDir()
-	if err := bundlegen.Add(in, out); err != nil {
+	if err := bundlegen.Add(in, out, false); err != nil {
 		t.Fatalf("bundlegen.Add: %v", err)
 	}
 	return out

@@ -5,7 +5,7 @@
 //
 // Usage:
 //
-//	wavefront-bundle add --openapi <file|url> --bundle <dir>
+//	wavefront-bundle add --openapi <file|url> --bundle <dir> [--force]
 //	wavefront-bundle remove --version <id> --bundle <dir>
 //	wavefront-bundle retire --version <id> --bundle <dir>
 //	wavefront-bundle verify --bundle <dir>
@@ -59,6 +59,7 @@ func runAdd(args []string, errOut io.Writer) int {
 	fs.SetOutput(errOut)
 	openapi := fs.String("openapi", "", "source OpenAPI JSON: a file path or an http(s):// URL")
 	bundleDir := fs.String("bundle", "", "bundle directory to add the layer into")
+	force := fs.Bool("force", false, "overwrite an existing same-info.version layer dir (pre-commit iteration escape hatch; default refuses for frozen-layer safety)")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
@@ -66,10 +67,10 @@ func runAdd(args []string, errOut io.Writer) int {
 		return 2
 	}
 	if *openapi == "" || *bundleDir == "" {
-		fmt.Fprintln(errOut, "usage: wavefront-bundle add --openapi <file|url> --bundle <dir>")
+		fmt.Fprintln(errOut, "usage: wavefront-bundle add --openapi <file|url> --bundle <dir> [--force]")
 		return 2
 	}
-	if err := bundlegen.Add(*openapi, *bundleDir); err != nil {
+	if err := bundlegen.Add(*openapi, *bundleDir, *force); err != nil {
 		fmt.Fprintln(errOut, "wavefront-bundle add:", err)
 		return 1
 	}
