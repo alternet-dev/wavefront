@@ -215,7 +215,7 @@ func (b *Bundle) Lookup(path, method, version string) (*Contract, bool) {
 // Versions returns the contract versions present in the bundle, sorted
 // lexically ascending. The last element is the "latest" layer — the
 // highest contract version — which is the default target for downstream
-// per-bundle codegen (gen-ts-client and friends).
+// tooling that needs a stable "newest first" ordering.
 func (b *Bundle) Versions() []string {
 	out := make([]string, 0, len(b.byVersion))
 	for cv := range b.byVersion {
