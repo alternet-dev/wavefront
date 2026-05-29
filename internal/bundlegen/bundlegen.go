@@ -447,16 +447,16 @@ func refSchemaName(op operation, request bool) (string, error) {
 // whether the synthetic Empty message is referenced. Empty has no OpenAPI
 // component backing it, so it must be excluded from the collectSchemas walk
 // and injected at descriptor-build time instead.
-func partitionEmpty(roots []string) (real []string, needEmpty bool) {
-	real = make([]string, 0, len(roots))
+func partitionEmpty(roots []string) (kept []string, needEmpty bool) {
+	kept = make([]string, 0, len(roots))
 	for _, r := range roots {
 		if r == emptyMessageName {
 			needEmpty = true
 			continue
 		}
-		real = append(real, r)
+		kept = append(kept, r)
 	}
-	return real, needEmpty
+	return kept, needEmpty
 }
 
 func refName(ref string) string {
