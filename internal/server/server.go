@@ -9,8 +9,10 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	httppprof "net/http/pprof"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -44,6 +46,9 @@ type Server struct {
 	client  *http.Client
 	metrics *metrics
 	logger  *slog.Logger
+	// connStateMap tracks per-connection observability state for the
+	// stdlib-boundary detection. See stdlib_boundary.go for the model.
+	connStateMap sync.Map
 }
 
 func New(cfg *config.Config) *Server {
@@ -110,13 +115,24 @@ func (s *Server) Message(fullName string) (protoreflect.MessageDescriptor, error
 	return b.Message(fullName)
 }
 
-// DataHandler returns the data-plane handler used by Run. It wraps the proxy
-// in the panic-recovery middleware so any panic in the request path becomes
-// a `wavefront.v0.Error` envelope on the wire rather than a dropped
-// connection or process crash. Ops/metrics endpoints (OpsHandler) keep Go's
-// default behavior — a fault in pprof or /metrics surfaces normally.
+// DataHandler returns the data-plane handler used by Run. The chain is
+// `markHandlerSeen → Recover → proxy`:
+//
+//   - markHandlerSeen records that the wavefront handler entered, so the
+//     ConnState callback knows a later StateClosed is NOT a stdlib-boundary
+//     failure. It wraps Recover (not the other way around) so a recovered
+//     panic still counts as a handler run — the resulting wavefront-shaped
+//     500 envelope is not a stdlib boundary.
+//   - Recover converts any panic in the request path into a typed
+//     `wavefront.v0.Error` envelope rather than crashing the process or
+//     dropping the connection.
+//   - proxy is the negotiate → decode → upstream → encode pipeline.
+//
+// Ops/metrics endpoints (OpsHandler) keep Go's default behavior — a fault in
+// pprof or /metrics surfaces normally and the stdlib-boundary detector is
+// not wired on that listener.
 func (s *Server) DataHandler() http.Handler {
-	return s.Recover(http.HandlerFunc(s.proxy))
+	return s.markHandlerSeen(s.Recover(http.HandlerFunc(s.proxy)))
 }
 
 // OpsHandler serves the ops surface: Prometheus /metrics, liveness/readiness
@@ -164,6 +180,25 @@ func (s *Server) Run(ctx context.Context) error {
 		IdleTimeout:       srvIdleTimeout,
 		// WriteTimeout intentionally unset — see the timeout consts.
 	}
+	// Wire ConnContext + ConnState on the data plane so the
+	// wavefront_stdlib_boundary_total counter observes responses net/http
+	// emitted before the wavefront handler ran. The ops listener is
+	// deliberately NOT wired — its responses are wavefront-served and a
+	// boundary counter on /metrics traffic would be meaningless.
+	s.WireDataServer(data)
+	// Open the data-plane listener explicitly so we can wrap it before
+	// handing it to Serve. Wrapping AT the listener (rather than re-wrapping
+	// inside net/http) is the only way to make the conn that lands in
+	// ConnContext / ConnState a *sniffingConn — net/http stores whatever
+	// Accept returned as `c.rwc` and writes responses through it, which is
+	// exactly what we want to sniff. http.Server.ListenAndServe does not
+	// expose a hook to wrap the listener, so we replicate its
+	// `net.Listen("tcp", Addr) + Serve` shape here.
+	dataLn, err := net.Listen("tcp", s.cfg.ListenAddr)
+	if err != nil {
+		return err
+	}
+	dataLn = s.WrapDataListener(dataLn)
 	ops := &http.Server{
 		Addr:              s.cfg.MetricsAddr,
 		Handler:           s.OpsHandler(),
@@ -174,7 +209,7 @@ func (s *Server) Run(ctx context.Context) error {
 	}
 
 	errc := make(chan error, 2)
-	go func() { errc <- data.ListenAndServe() }()
+	go func() { errc <- data.Serve(dataLn) }()
 	go func() { errc <- ops.ListenAndServe() }()
 
 	select {
