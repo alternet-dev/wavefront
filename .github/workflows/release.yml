@@ -207,11 +207,19 @@ jobs:
               --clobber
             exit 0
           fi
+          # Extract the tag annotation verbatim and pass it as the release body.
+          # `--notes-from-tag` proved unreliable here; reading %(contents)
+          # ourselves is explicit. The checkout fetches all history
+          # (fetch-depth: 0) but the annotated tag object is fetched again so
+          # %(contents) reads the annotation message, not the commit it points
+          # at (an unannotated/commit-only fetch yields the commit subject).
+          git fetch --tags --force
+          git tag -l --format='%(contents)' "$REF_NAME" > /tmp/release-notes.md
           flags=()
           [[ "$REF_NAME" == *-* ]] && flags+=(--prerelease)
           gh release create "$REF_NAME" \
             --title "$REF_NAME" \
-            --notes-from-tag \
+            --notes-file /tmp/release-notes.md \
             --verify-tag \
             "${flags[@]}" \
             /tmp/binaries/*.tar.gz \
