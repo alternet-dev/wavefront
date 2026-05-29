@@ -34,8 +34,11 @@ fetch_sha() {
   curl --fail --silent --show-error --location "$url" | awk '{print $1}'
 }
 
+# Intel-Mac (x86_64-apple-darwin) is intentionally not built — see the
+# matrix comment in .github/workflows/release.yml. Intel-Mac users on
+# Homebrew will get a "no available formula" message; they can use the
+# x86_64-unknown-linux-gnu binary via Rosetta or build from source.
 SHA_DARWIN_ARM=$(fetch_sha aarch64-apple-darwin)
-SHA_DARWIN_X86=$(fetch_sha x86_64-apple-darwin)
 SHA_LINUX_X86=$(fetch_sha x86_64-unknown-linux-gnu)
 SHA_LINUX_ARM=$(fetch_sha aarch64-unknown-linux-gnu)
 
@@ -50,10 +53,6 @@ class WavefrontBundle < Formula
     on_arm do
       url "${BASE_URL}/wavefront-bundle-${REF_NAME}-aarch64-apple-darwin.tar.gz"
       sha256 "${SHA_DARWIN_ARM}"
-    end
-    on_intel do
-      url "${BASE_URL}/wavefront-bundle-${REF_NAME}-x86_64-apple-darwin.tar.gz"
-      sha256 "${SHA_DARWIN_X86}"
     end
   end
 

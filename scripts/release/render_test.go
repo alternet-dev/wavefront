@@ -30,7 +30,6 @@ func TestRenderHomebrewFormulaMatchesGolden(t *testing.T) {
 	cmd := exec.Command("bash", script, "v0.5.0", "alternet-dev/wavefront")
 	cmd.Env = append(os.Environ(),
 		"WAVEFRONT_SHA_OVERRIDE_AARCH64_APPLE_DARWIN="+strings.Repeat("a", 64),
-		"WAVEFRONT_SHA_OVERRIDE_X86_64_APPLE_DARWIN="+strings.Repeat("b", 64),
 		"WAVEFRONT_SHA_OVERRIDE_X86_64_UNKNOWN_LINUX_GNU="+strings.Repeat("c", 64),
 		"WAVEFRONT_SHA_OVERRIDE_AARCH64_UNKNOWN_LINUX_GNU="+strings.Repeat("d", 64),
 	)
