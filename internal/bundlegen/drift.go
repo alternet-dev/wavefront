@@ -263,19 +263,36 @@ func operationSchemas(doc openAPI) (req, resp *schema, err error) {
 	if err != nil {
 		return nil, nil, fmt.Errorf("response: %w", err)
 	}
-	schemas, err := collectSchemas(doc, []string{reqName, respName})
+	// The synthetic Empty message has no OpenAPI component to walk; a
+	// bodyless side diffs as an object with no properties.
+	realRoots, _ := partitionEmpty([]string{reqName, respName})
+	schemas, err := collectSchemas(doc, realRoots)
 	if err != nil {
 		return nil, nil, err
 	}
-	req, ok := schemas[reqName]
-	if !ok || req == nil {
-		return nil, nil, fmt.Errorf("request schema %q not found", reqName)
+	req, err = resolveOperationSchema(schemas, reqName)
+	if err != nil {
+		return nil, nil, fmt.Errorf("request %w", err)
 	}
-	resp, ok = schemas[respName]
-	if !ok || resp == nil {
-		return nil, nil, fmt.Errorf("response schema %q not found", respName)
+	resp, err = resolveOperationSchema(schemas, respName)
+	if err != nil {
+		return nil, nil, fmt.Errorf("response %w", err)
 	}
 	return req, resp, nil
+}
+
+// resolveOperationSchema returns the collected schema for name, or a fresh
+// empty object for the synthetic Empty message — which collectSchemas does
+// not produce because it has no OpenAPI component to walk from.
+func resolveOperationSchema(schemas map[string]*schema, name string) (*schema, error) {
+	if name == emptyMessageName {
+		return &schema{Type: "object", Properties: map[string]*schema{}}, nil
+	}
+	s, ok := schemas[name]
+	if !ok || s == nil {
+		return nil, fmt.Errorf("schema %q not found", name)
+	}
+	return s, nil
 }
 
 // draftDirection diffs one direction of a transform: a `from` shape that
