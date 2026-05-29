@@ -321,7 +321,12 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	forwardClientHeaders(ureq.Header, r.Header)
-	ureq.Header.Set(headerContentType, call.ContentType)
+	// A bodyless upstream call (synthetic Empty request_message) declares no
+	// envelope: leave Content-Type unset so the upstream GET/path-only POST is
+	// clean. Content-Type is hop-by-hop here, so no client value leaks through.
+	if call.ContentType != "" {
+		ureq.Header.Set(headerContentType, call.ContentType)
+	}
 
 	uresp, err := s.client.Do(ureq)
 	if err != nil {
