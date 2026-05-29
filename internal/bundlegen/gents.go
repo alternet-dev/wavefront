@@ -191,7 +191,7 @@ func emitMessageClasses(bundleDir, outDir, version string) ([]string, error) {
 	}
 
 	// file_to_generate lists the .proto files the plugin should emit code
-	// for. We list every file in the descriptor set — the v0.1 bundle is
+	// for. We list every file in the descriptor set — the bundle is
 	// self-contained per layer, so every file is a "first-party" file the
 	// caller wants typed.
 	fileToGenerate := make([]string, 0, len(fds.File))

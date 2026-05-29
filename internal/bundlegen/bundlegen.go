@@ -1,11 +1,18 @@
 // Package bundlegen is the OpenAPI → bundle generator. It is deliberately a
-// constrained, fail-loud subset: exactly one operation (single-version
-// passthrough), request/response must be $ref'd component object schemas,
-// scalars + arrays + $ref + nullable→proto3-optional are supported, and any
-// unsupported construct (allOf/oneOf/anyOf/additionalProperties/untyped/
-// inline) is a hard error rather than a lossy bundle. Output is
-// byte-reproducible (sorted, deterministic marshal) for the consumer's
-// buf-breaking story.
+// constrained, fail-loud subset: request/response must be $ref'd component
+// object schemas, scalars + arrays + $ref + nullable→proto3-optional are
+// supported, and any unsupported construct
+// (allOf/oneOf/anyOf/additionalProperties/untyped/inline) is a hard error
+// rather than a lossy bundle. Output is byte-reproducible (sorted,
+// deterministic marshal) for the consumer's buf-breaking story.
+//
+// Add emits one immutable layer per call. It walks every
+// paths.<path>.<method> operation in the input OpenAPI document, sorted by
+// (path, method) ascending for byte-reproducibility, and emits one
+// contract per operation sharing the same contract_version. The
+// descriptor set is the union of every referenced request/response
+// schema, deduped. A document with a single operation is the degenerate
+// case — one operation, one contract.
 package bundlegen
 
 import (
@@ -103,57 +110,115 @@ func readOpenAPI(src string) ([]byte, error) {
 
 // Add reads the OpenAPI doc from openapiSrc — a local file path or an
 // http(s):// URL (fetched at build time; the bytes are passed through into
-// the committed bundle, so a URL fetch stays point-in-time) — and emits a new
-// immutable layer into bundleDir/<version>/, where <version> is the doc's
-// info.version. It refuses to overwrite an existing layer: a frozen version
-// is never rewritten.
+// the committed bundle, so a URL fetch stays point-in-time) — and emits a
+// new immutable layer into bundleDir/<version>/, where <version> is the
+// doc's info.version. Every paths.<path>.<method> operation becomes one
+// contract; all contracts share the same contract_version. The descriptor
+// set is the union of every referenced request/response schema across all
+// operations (deduped). The fail-loud doctrine applies: any unsupported
+// construct in any walked operation rejects the whole bundle, not just
+// that operation. It refuses to overwrite an existing layer: a frozen
+// version is never rewritten.
 func Add(openapiSrc, bundleDir string) error {
-	raw, err := readOpenAPI(openapiSrc)
+	raw, doc, version, err := loadAndPrevalidate(openapiSrc)
 	if err != nil {
-		return fmt.Errorf("read openapi: %w", err)
+		return err
 	}
-	var doc openAPI
-	if err := json.Unmarshal(raw, &doc); err != nil {
-		return fmt.Errorf("parse openapi: %w", err)
+
+	ops, err := allOperations(doc)
+	if err != nil {
+		return err
 	}
-	version := strings.TrimSpace(doc.Info.Version)
+	if len(ops) == 0 {
+		return fmt.Errorf("openapi has no operations; a bundle layer must contain at least one contract")
+	}
+
+	// Collect (request, response) schema names per operation; build the
+	// roots slice in (path, method) order so collectSchemas walks
+	// deterministically.
+	pkg := protoPackage(version)
+	roots := make([]string, 0, 2*len(ops))
+	entries := make([]contractEntry, 0, len(ops))
+	for _, o := range ops {
+		reqName, rerr := refSchemaName(o.op, true)
+		if rerr != nil {
+			return fmt.Errorf("%s %s: %w", strings.ToUpper(o.method), o.route, rerr)
+		}
+		respName, rerr := refSchemaName(o.op, false)
+		if rerr != nil {
+			return fmt.Errorf("%s %s: %w", strings.ToUpper(o.method), o.route, rerr)
+		}
+		roots = append(roots, reqName, respName)
+		entries = append(entries, contractEntry{
+			Route:           o.route,
+			Method:          strings.ToUpper(o.method),
+			RequestMessage:  pkg + "." + reqName,
+			ResponseMessage: pkg + "." + respName,
+		})
+	}
+
+	descBytes, err := buildDescriptors(doc, roots, pkg, version)
+	if err != nil {
+		return err
+	}
+
+	versions := renderVersionsYAML(version, entries)
+	return writeLayer(bundleDir, version, raw, descBytes, versions)
+}
+
+// loadAndPrevalidate fetches/reads the OpenAPI source, parses it, and
+// validates info.version is present and usable as a layer directory name.
+// It returns the raw bytes (passed through verbatim into the committed
+// bundle), the parsed doc, and the trimmed contract version.
+func loadAndPrevalidate(openapiSrc string) (raw []byte, doc openAPI, version string, err error) {
+	raw, err = readOpenAPI(openapiSrc)
+	if err != nil {
+		return nil, openAPI{}, "", fmt.Errorf("read openapi: %w", err)
+	}
+	if err = json.Unmarshal(raw, &doc); err != nil {
+		return nil, openAPI{}, "", fmt.Errorf("parse openapi: %w", err)
+	}
+	version = strings.TrimSpace(doc.Info.Version)
 	if version == "" {
-		return fmt.Errorf("openapi info.version is required (it is the contract version)")
+		return nil, openAPI{}, "", fmt.Errorf("openapi info.version is required (it is the contract version)")
 	}
 	if !safeLayerName(version) {
-		return fmt.Errorf("contract version %q is not a usable directory name", version)
+		return nil, openAPI{}, "", fmt.Errorf("contract version %q is not a usable directory name", version)
+	}
+	return raw, doc, version, nil
+}
+
+// protoPackage is the proto package convention: one package per contract
+// version, so the bundle's package-collision check across layers is
+// honoured.
+func protoPackage(version string) string {
+	return "wavefront.gen.v" + sanitize(version)
+}
+
+// buildDescriptors walks every schema reachable from roots, validates each
+// touched schema against the fail-loud doctrine, and returns the
+// deterministic wire bytes of a FileDescriptorSet that holds one
+// FileDescriptorProto for the package.
+func buildDescriptors(doc openAPI, roots []string, pkg, version string) ([]byte, error) {
+	needed, err := collectSchemas(doc, roots)
+	if err != nil {
+		return nil, err
 	}
 
-	route, method, op, err := singleOperation(doc)
-	if err != nil {
-		return err
-	}
-	reqName, err := refSchemaName(op, true)
-	if err != nil {
-		return err
-	}
-	respName, err := refSchemaName(op, false)
-	if err != nil {
-		return err
-	}
-
-	pkg := "wavefront.gen.v" + sanitize(version)
-	needed, err := collectSchemas(doc, []string{reqName, respName})
-	if err != nil {
-		return err
-	}
-
+	// Sort schema names so descriptor message order is stable: the
+	// byte-reproducibility invariant the consumer's buf-breaking gate
+	// relies on.
 	names := make([]string, 0, len(needed))
 	for n := range needed {
 		names = append(names, n)
 	}
 	sort.Strings(names)
 
-	var msgs []*descriptorpb.DescriptorProto
+	msgs := make([]*descriptorpb.DescriptorProto, 0, len(names))
 	for _, n := range names {
 		dp, derr := buildMessage(n, needed[n], pkg)
 		if derr != nil {
-			return derr
+			return nil, derr
 		}
 		msgs = append(msgs, dp)
 	}
@@ -166,22 +231,46 @@ func Add(openapiSrc, bundleDir string) error {
 	}
 	fds := &descriptorpb.FileDescriptorSet{File: []*descriptorpb.FileDescriptorProto{fdp}}
 	if _, err := protodesc.NewFiles(fds); err != nil {
-		return fmt.Errorf("generated descriptors are invalid: %w", err)
+		return nil, fmt.Errorf("generated descriptors are invalid: %w", err)
 	}
 	descBytes, err := proto.MarshalOptions{Deterministic: true}.Marshal(fds)
 	if err != nil {
-		return fmt.Errorf("marshal descriptors: %w", err)
+		return nil, fmt.Errorf("marshal descriptors: %w", err)
 	}
+	return descBytes, nil
+}
 
-	versions := fmt.Sprintf(`version: 1
-contracts:
-  - contract_version: "%s"
-    route: %s
-    method: %s
-    request_message: %s.%s
-    response_message: %s.%s
-`, version, route, strings.ToUpper(method), pkg, reqName, pkg, respName)
+// contractEntry is one row in versions.yaml.contracts. Fields are written
+// in struct-declaration order so the marshalled output is stable.
+type contractEntry struct {
+	Route           string
+	Method          string
+	RequestMessage  string
+	ResponseMessage string
+}
 
+// renderVersionsYAML emits the versions.yaml body for one layer. The
+// printf-style template (rather than yaml.Marshal) keeps key order under
+// the generator's control — yaml.Marshal of a struct preserves struct field
+// order but yaml.Marshal of a map does not, and this same shape has to be
+// byte-reproducible run-to-run.
+func renderVersionsYAML(version string, entries []contractEntry) string {
+	var b strings.Builder
+	b.WriteString("version: 1\ncontracts:\n")
+	for _, e := range entries {
+		fmt.Fprintf(&b, "  - contract_version: %q\n", version)
+		fmt.Fprintf(&b, "    route: %s\n", e.Route)
+		fmt.Fprintf(&b, "    method: %s\n", e.Method)
+		fmt.Fprintf(&b, "    request_message: %s\n", e.RequestMessage)
+		fmt.Fprintf(&b, "    response_message: %s\n", e.ResponseMessage)
+	}
+	return b.String()
+}
+
+// writeLayer emits one layer's three files into bundleDir/<version>/. It
+// refuses to overwrite a pre-existing layer: a frozen version is never
+// rewritten.
+func writeLayer(bundleDir, version string, openapiRaw, descBytes []byte, versions string) error {
 	layerDir := filepath.Join(bundleDir, version)
 	if _, err := os.Stat(layerDir); err == nil {
 		return fmt.Errorf("version %q already exists in the bundle; frozen versions are immutable", version)
@@ -194,7 +283,7 @@ contracts:
 	if err := os.WriteFile(filepath.Join(layerDir, "descriptors.binpb"), descBytes, 0o644); err != nil {
 		return err
 	}
-	if err := os.WriteFile(filepath.Join(layerDir, "openapi.json"), raw, 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(layerDir, "openapi.json"), openapiRaw, 0o644); err != nil {
 		return err
 	}
 	return os.WriteFile(filepath.Join(layerDir, "versions.yaml"), []byte(versions), 0o644)
@@ -244,12 +333,20 @@ func safeLayerName(name string) bool {
 	return true
 }
 
-func singleOperation(doc openAPI) (route, method string, op operation, err error) {
-	type found struct {
-		route, method string
-		op            operation
-	}
-	var ops []found
+// foundOperation is one walked operation: its path, lowercased method, and
+// parsed operation body.
+type foundOperation struct {
+	route, method string
+	op            operation
+}
+
+// allOperations walks every paths.<path>.<method> entry in doc, parses each
+// operation body, and returns the result sorted by (route, method)
+// ascending. The sort is the byte-reproducibility invariant: the
+// FileDescriptorSet's message order and versions.yaml's contract order
+// depend on a stable input order.
+func allOperations(doc openAPI) ([]foundOperation, error) {
+	var ops []foundOperation
 	for p, item := range doc.Paths {
 		for m, rawOp := range item {
 			if !httpMethods[strings.ToLower(m)] {
@@ -257,37 +354,40 @@ func singleOperation(doc openAPI) (route, method string, op operation, err error
 			}
 			var o operation
 			if e := json.Unmarshal(rawOp, &o); e != nil {
-				return "", "", operation{}, fmt.Errorf("parse operation %s %s: %w", m, p, e)
+				return nil, fmt.Errorf("parse operation %s %s: %w", m, p, e)
 			}
-			ops = append(ops, found{p, m, o})
+			ops = append(ops, foundOperation{p, strings.ToLower(m), o})
 		}
 	}
-	if len(ops) != 1 {
-		return "", "", operation{}, fmt.Errorf("v0.1 generator supports exactly one operation, found %d (multi-route is v0.2)", len(ops))
-	}
-	return ops[0].route, ops[0].method, ops[0].op, nil
+	sort.Slice(ops, func(i, j int) bool {
+		if ops[i].route != ops[j].route {
+			return ops[i].route < ops[j].route
+		}
+		return ops[i].method < ops[j].method
+	})
+	return ops, nil
 }
 
 func refSchemaName(op operation, request bool) (string, error) {
 	var mt map[string]mediaType
 	if request {
 		if op.RequestBody == nil {
-			return "", fmt.Errorf("v0.1 requires a requestBody schema (bodyless operations are v0.2)")
+			return "", fmt.Errorf("operation has no requestBody schema (bodyless operations are not yet supported)")
 		}
 		mt = op.RequestBody.Content
 	} else {
 		resp, ok := op.Responses["200"]
 		if !ok {
-			return "", fmt.Errorf("v0.1 requires a 200 response schema")
+			return "", fmt.Errorf("operation has no 200 response schema")
 		}
 		mt = resp.Content
 	}
 	m, ok := mt["application/json"]
 	if !ok || m.Schema == nil {
-		return "", fmt.Errorf("v0.1 requires an application/json schema")
+		return "", fmt.Errorf("operation has no application/json schema")
 	}
 	if m.Schema.Ref == "" {
-		return "", fmt.Errorf("v0.1 requires the request/response schema to be a $ref to #/components/schemas (inline schemas are unsupported)")
+		return "", fmt.Errorf("request/response schema must be a $ref to #/components/schemas (inline schemas are unsupported)")
 	}
 	return refName(m.Schema.Ref), nil
 }
@@ -344,13 +444,13 @@ func collectSchemas(doc openAPI, roots []string) (map[string]*schema, error) {
 func rejectUnsupported(sc *schema) error {
 	switch {
 	case len(sc.AllOf) > 0:
-		return fmt.Errorf("allOf is unsupported in v0.1")
+		return fmt.Errorf("allOf is unsupported")
 	case len(sc.OneOf) > 0:
-		return fmt.Errorf("oneOf is unsupported in v0.1")
+		return fmt.Errorf("oneOf is unsupported")
 	case len(sc.AnyOf) > 0:
-		return fmt.Errorf("anyOf is unsupported in v0.1")
+		return fmt.Errorf("anyOf is unsupported")
 	case sc.AdditionalProperties != nil:
-		return fmt.Errorf("additionalProperties is unsupported in v0.1")
+		return fmt.Errorf("additionalProperties is unsupported")
 	}
 	return nil
 }
@@ -434,15 +534,15 @@ func buildField(pname string, num int32, sc *schema, pkg string) (*descriptorpb.
 		case "number":
 			f.Type = descriptorpb.FieldDescriptorProto_TYPE_DOUBLE.Enum()
 		default:
-			return nil, false, fmt.Errorf("array item type %q is unsupported in v0.1", sc.Items.Type)
+			return nil, false, fmt.Errorf("array item type %q is unsupported", sc.Items.Type)
 		}
 		return f, false, nil
 	case "object":
-		return nil, false, fmt.Errorf("inline object properties are unsupported in v0.1 (use a $ref)")
+		return nil, false, fmt.Errorf("inline object properties are unsupported (use a $ref)")
 	case "":
 		return nil, false, fmt.Errorf("property has no type and no $ref")
 	default:
-		return nil, false, fmt.Errorf("type %q is unsupported in v0.1", sc.Type)
+		return nil, false, fmt.Errorf("type %q is unsupported", sc.Type)
 	}
 
 	return f, sc.Nullable, nil

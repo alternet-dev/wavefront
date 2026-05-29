@@ -213,7 +213,11 @@ contracts:
 	}
 }
 
-func TestDuplicateContractVersionRejected(t *testing.T) {
+func TestDuplicateRouteMethodInLayerRejected(t *testing.T) {
+	// Two contracts in the same layer with the same (version, route, method)
+	// is a true duplicate — the binding is ambiguous. Multi-route layers
+	// (different routes at the same contract_version) are legal and covered
+	// by TestMultiRouteLayerLoads.
 	y := `version: 1
 contracts:
   - contract_version: "2024-11"
@@ -222,7 +226,7 @@ contracts:
     request_message: acme.v1.Ping
     response_message: acme.v1.Pong
   - contract_version: "2024-11"
-    route: /b
+    route: /a
     method: GET
     request_message: acme.v1.Ping
     response_message: acme.v1.Pong
@@ -232,6 +236,39 @@ contracts:
 	var ve *ValidationError
 	if !errors.As(err, &ve) {
 		t.Fatalf("want ValidationError(duplicate), got %v", err)
+	}
+}
+
+func TestMultiRouteLayerLoads(t *testing.T) {
+	// A multi-route layer — many contracts sharing a contract_version,
+	// distinguished by (route, method) — must load cleanly: LookupRoute
+	// resolves each binding.
+	y := `version: 1
+contracts:
+  - contract_version: "2024-11"
+    route: /a
+    method: GET
+    request_message: acme.v1.Ping
+    response_message: acme.v1.Pong
+  - contract_version: "2024-11"
+    route: /b
+    method: POST
+    request_message: acme.v1.Ping
+    response_message: acme.v1.Pong
+`
+	dir := writeBundle(t, fdsBytes(t), validOpenAPI, y)
+	b, err := Load(dir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if _, ok := b.LookupRoute("/a", "GET"); !ok {
+		t.Error(`LookupRoute("/a", "GET"): not found in multi-route layer`)
+	}
+	if _, ok := b.LookupRoute("/b", "POST"); !ok {
+		t.Error(`LookupRoute("/b", "POST"): not found in multi-route layer`)
+	}
+	if vs := b.Versions(); len(vs) != 1 || vs[0] != "2024-11" {
+		t.Errorf("Versions() = %v, want [2024-11]", vs)
 	}
 }
 
@@ -252,8 +289,12 @@ contracts:
 	}
 }
 
-func TestCrossLayerDuplicateContractVersionRejected(t *testing.T) {
-	// Both layers declare the same contract_version; Load must reject it.
+func TestCrossLayerDuplicateRouteMethodRejected(t *testing.T) {
+	// Two layers each bind the same (contract_version, route, method) —
+	// a true duplicate that makes the binding ambiguous. Load must reject
+	// it. Two layers may share a contract_version on different (route,
+	// method) bindings, but identical (version, route, method) across
+	// layers is invalid.
 	mk := func(cv, route string) string {
 		return "version: 1\ncontracts:\n  - contract_version: \"" + cv + "\"\n" +
 			"    route: " + route + "\n    method: GET\n" +
@@ -262,7 +303,7 @@ func TestCrossLayerDuplicateContractVersionRejected(t *testing.T) {
 	dir := t.TempDir()
 	for _, l := range []struct{ name, cv, route string }{
 		{"2024-11", "2024-11", "/a"},
-		{"2026-05", "2024-11", "/b"}, // same contract_version as the first layer
+		{"2026-05", "2024-11", "/a"}, // same (version, route, method) as the first layer
 	} {
 		ld := filepath.Join(dir, l.name)
 		mustMkdir(t, ld)

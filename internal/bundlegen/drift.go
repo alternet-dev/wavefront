@@ -242,13 +242,19 @@ func parseOpenAPIDoc(data []byte) (openAPI, error) {
 }
 
 // operationSchemas resolves the request and response component schemas of
-// an OpenAPI document with exactly one operation (the same shape
-// `bundlegen.Add` already requires).
+// an OpenAPI document with exactly one operation. draft-shim diffs a
+// single from/to pair; multi-route inputs would make the diff ambiguous
+// (which route's request schema is being compared?). This is a draft-shim
+// constraint, not a general bundlegen one.
 func operationSchemas(doc openAPI) (req, resp *schema, err error) {
-	_, _, op, err := singleOperation(doc)
+	ops, err := allOperations(doc)
 	if err != nil {
 		return nil, nil, err
 	}
+	if len(ops) != 1 {
+		return nil, nil, fmt.Errorf("draft-shim requires an OpenAPI document with exactly one operation, found %d", len(ops))
+	}
+	op := ops[0].op
 	reqName, err := refSchemaName(op, true)
 	if err != nil {
 		return nil, nil, fmt.Errorf("request: %w", err)
