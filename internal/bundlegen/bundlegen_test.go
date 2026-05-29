@@ -60,7 +60,7 @@ func TestAddFromURL(t *testing.T) {
 	defer srv.Close()
 
 	out := t.TempDir()
-	if err := bundlegen.Add(srv.URL+"/openapi.json", out); err != nil {
+	if err := bundlegen.Add(srv.URL+"/openapi.json", out, false); err != nil {
 		t.Fatalf("Add from URL: %v", err)
 	}
 	b, err := bundle.Load(out)
@@ -77,7 +77,7 @@ func TestAddFromURLNon200(t *testing.T) {
 		w.WriteHeader(http.StatusInternalServerError)
 	}))
 	defer srv.Close()
-	if err := bundlegen.Add(srv.URL, t.TempDir()); err == nil {
+	if err := bundlegen.Add(srv.URL, t.TempDir(), false); err == nil {
 		t.Fatal("expected a hard error on non-200 OpenAPI fetch, got nil")
 	}
 }
@@ -85,7 +85,7 @@ func TestAddFromURLNon200(t *testing.T) {
 func TestAddProducesLoadableLayer(t *testing.T) {
 	in := writeOpenAPI(t, sampleOpenAPI)
 	out := t.TempDir()
-	if err := bundlegen.Add(in, out); err != nil {
+	if err := bundlegen.Add(in, out, false); err != nil {
 		t.Fatalf("Add: %v", err)
 	}
 	layerDir := filepath.Join(out, "2026-05-17")
@@ -145,10 +145,10 @@ func TestAddProducesLoadableLayer(t *testing.T) {
 func TestAddIsDeterministic(t *testing.T) {
 	in := writeOpenAPI(t, sampleOpenAPI)
 	o1, o2 := t.TempDir(), t.TempDir()
-	if err := bundlegen.Add(in, o1); err != nil {
+	if err := bundlegen.Add(in, o1, false); err != nil {
 		t.Fatalf("add1: %v", err)
 	}
-	if err := bundlegen.Add(in, o2); err != nil {
+	if err := bundlegen.Add(in, o2, false); err != nil {
 		t.Fatalf("add2: %v", err)
 	}
 	a, _ := os.ReadFile(filepath.Join(o1, "2026-05-17", "descriptors.binpb"))
@@ -195,7 +195,7 @@ func TestAddHardErrors(t *testing.T) {
 	for name, body := range cases {
 		t.Run(name, func(t *testing.T) {
 			in := writeOpenAPI(t, body)
-			if err := bundlegen.Add(in, t.TempDir()); err == nil {
+			if err := bundlegen.Add(in, t.TempDir(), false); err == nil {
 				t.Fatalf("%s: expected a hard error, got nil", name)
 			}
 		})
@@ -262,11 +262,102 @@ func TestRemoveRefusesAnUnknownVersion(t *testing.T) {
 func TestAddRefusesToOverwriteAnExistingVersion(t *testing.T) {
 	in := writeOpenAPI(t, sampleOpenAPI)
 	bundleDir := t.TempDir()
-	if err := bundlegen.Add(in, bundleDir); err != nil {
+	if err := bundlegen.Add(in, bundleDir, false); err != nil {
 		t.Fatalf("first Add: %v", err)
 	}
-	if err := bundlegen.Add(in, bundleDir); err == nil {
+	if err := bundlegen.Add(in, bundleDir, false); err == nil {
 		t.Fatal("second Add of the same version: expected a hard error, got nil")
+	}
+}
+
+// twoRouteOpenAPI is a one-route variant of the multi-route fixture; the
+// force-overwrite tests need a second OpenAPI shape that resolves to the
+// same info.version so a re-add with --force visibly replaces the layer
+// contents.
+const sampleOpenAPIExtraRoute = `{
+  "openapi": "3.0.0",
+  "info": {"title": "acme", "version": "2026-05-17"},
+  "paths": {
+    "/v3/echo": {
+      "post": {
+        "operationId": "echo",
+        "requestBody": {"content": {"application/json": {"schema": {"$ref": "#/components/schemas/EchoRequest"}}}},
+        "responses": {"200": {"content": {"application/json": {"schema": {"$ref": "#/components/schemas/EchoReply"}}}}}
+      }
+    },
+    "/v3/ping": {
+      "post": {
+        "operationId": "ping",
+        "requestBody": {"content": {"application/json": {"schema": {"$ref": "#/components/schemas/EchoRequest"}}}},
+        "responses": {"200": {"content": {"application/json": {"schema": {"$ref": "#/components/schemas/EchoReply"}}}}}
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "EchoRequest": {"type": "object", "properties": {
+        "text": {"type": "string"}
+      }},
+      "EchoReply": {"type": "object", "properties": {
+        "text": {"type": "string"}
+      }}
+    }
+  }
+}`
+
+// TestAddForceOverwritesExistingVersion is the inverse of
+// TestAddRefusesToOverwriteAnExistingVersion: with force=true, a second
+// Add against the same info.version replaces the existing layer dir,
+// and the new content is what's on disk.
+func TestAddForceOverwritesExistingVersion(t *testing.T) {
+	in1 := writeOpenAPI(t, sampleOpenAPI)
+	in2 := writeOpenAPI(t, sampleOpenAPIExtraRoute)
+	bundleDir := t.TempDir()
+	if err := bundlegen.Add(in1, bundleDir, false); err != nil {
+		t.Fatalf("first Add: %v", err)
+	}
+	// Pre-condition: the single-route version is on disk.
+	versionsPath := filepath.Join(bundleDir, "2026-05-17", "versions.yaml")
+	pre, err := os.ReadFile(versionsPath)
+	if err != nil {
+		t.Fatalf("read versions.yaml after first add: %v", err)
+	}
+	if strings.Contains(string(pre), "/v3/ping") {
+		t.Fatalf("pre-condition violated: first add already contains /v3/ping:\n%s", pre)
+	}
+
+	// Force-overwrite with the two-route OpenAPI.
+	if err := bundlegen.Add(in2, bundleDir, true); err != nil {
+		t.Fatalf("second Add with force=true: %v", err)
+	}
+	post, err := os.ReadFile(versionsPath)
+	if err != nil {
+		t.Fatalf("read versions.yaml after force re-add: %v", err)
+	}
+	if !strings.Contains(string(post), "/v3/ping") {
+		t.Errorf("force re-add did not replace the layer; /v3/ping missing from versions.yaml:\n%s", post)
+	}
+	if !strings.Contains(string(post), "/v3/echo") {
+		t.Errorf("force re-add lost the original route /v3/echo:\n%s", post)
+	}
+
+	// The bundle must still load cleanly after a force overwrite.
+	if _, err := bundle.Load(bundleDir); err != nil {
+		t.Errorf("bundle did not load after force re-add: %v", err)
+	}
+}
+
+// TestAddForceIsANoOpWhenLayerAbsent confirms force=true on a fresh
+// bundle (no existing layer) behaves like a regular add: the force is
+// a no-op when there's nothing to overwrite.
+func TestAddForceIsANoOpWhenLayerAbsent(t *testing.T) {
+	in := writeOpenAPI(t, sampleOpenAPI)
+	bundleDir := t.TempDir()
+	if err := bundlegen.Add(in, bundleDir, true); err != nil {
+		t.Fatalf("Add with force=true on a fresh bundle: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(bundleDir, "2026-05-17", "versions.yaml")); err != nil {
+		t.Fatalf("force-add on a fresh bundle did not produce a layer: %v", err)
 	}
 }
 

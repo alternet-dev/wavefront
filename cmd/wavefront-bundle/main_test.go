@@ -46,6 +46,88 @@ func TestRunAddCreatesALayer(t *testing.T) {
 	}
 }
 
+// TestRunAddRefusesReAddWithoutForce confirms the default behaviour: a
+// second add against the same info.version is a hard error.
+func TestRunAddRefusesReAddWithoutForce(t *testing.T) {
+	in := writeSampleOpenAPI(t)
+	bundleDir := t.TempDir()
+	if code := run([]string{"add", "--openapi", in, "--bundle", bundleDir}, io.Discard); code != 0 {
+		t.Fatalf("first add: exit %d, want 0", code)
+	}
+	if code := run([]string{"add", "--openapi", in, "--bundle", bundleDir}, io.Discard); code == 0 {
+		t.Fatal("second add without --force: want non-zero exit code")
+	}
+}
+
+// writeSampleOpenAPIExtraRoute writes a same-info.version OpenAPI with an
+// extra route so a re-add with --force visibly changes the layer contents.
+func writeSampleOpenAPIExtraRoute(t *testing.T) string {
+	t.Helper()
+	const doc = `{"openapi":"3.0.0","info":{"title":"t","version":"2026-05-17"},
+"paths":{
+"/v3/echo":{"post":{
+"requestBody":{"content":{"application/json":{"schema":{"$ref":"#/components/schemas/Req"}}}},
+"responses":{"200":{"content":{"application/json":{"schema":{"$ref":"#/components/schemas/Req"}}}}}}},
+"/v3/ping":{"post":{
+"requestBody":{"content":{"application/json":{"schema":{"$ref":"#/components/schemas/Req"}}}},
+"responses":{"200":{"content":{"application/json":{"schema":{"$ref":"#/components/schemas/Req"}}}}}}}
+},
+"components":{"schemas":{"Req":{"type":"object","properties":{"text":{"type":"string"}}}}}}`
+	p := filepath.Join(t.TempDir(), "openapi-extra.json")
+	if err := os.WriteFile(p, []byte(doc), 0o600); err != nil {
+		t.Fatalf("write openapi: %v", err)
+	}
+	return p
+}
+
+// TestRunAddForceOverwritesExistingLayer drives the CLI: emit a layer,
+// re-run with --force against a same-info.version OpenAPI that carries a
+// new route, and verify the layer dir now reflects the new content.
+func TestRunAddForceOverwritesExistingLayer(t *testing.T) {
+	in1 := writeSampleOpenAPI(t)
+	in2 := writeSampleOpenAPIExtraRoute(t)
+	bundleDir := t.TempDir()
+	if code := run([]string{"add", "--openapi", in1, "--bundle", bundleDir}, io.Discard); code != 0 {
+		t.Fatalf("first add: exit %d, want 0", code)
+	}
+	versionsPath := filepath.Join(bundleDir, "2026-05-17", "versions.yaml")
+	pre, err := os.ReadFile(versionsPath)
+	if err != nil {
+		t.Fatalf("read versions.yaml after first add: %v", err)
+	}
+	if strings.Contains(string(pre), "/v3/ping") {
+		t.Fatalf("pre-condition violated: first add already contains /v3/ping:\n%s", pre)
+	}
+
+	if code := run([]string{"add", "--force", "--openapi", in2, "--bundle", bundleDir}, io.Discard); code != 0 {
+		t.Fatalf("add --force: exit %d, want 0", code)
+	}
+	post, err := os.ReadFile(versionsPath)
+	if err != nil {
+		t.Fatalf("read versions.yaml after force re-add: %v", err)
+	}
+	if !strings.Contains(string(post), "/v3/ping") {
+		t.Errorf("force re-add did not replace the layer; /v3/ping missing from versions.yaml:\n%s", post)
+	}
+	if !strings.Contains(string(post), "/v3/echo") {
+		t.Errorf("force re-add lost the original route /v3/echo:\n%s", post)
+	}
+}
+
+// TestRunAddForceOnFreshBundle confirms --force is a no-op when there is
+// no existing layer to overwrite: the add succeeds like a regular one.
+func TestRunAddForceOnFreshBundle(t *testing.T) {
+	in := writeSampleOpenAPI(t)
+	bundleDir := t.TempDir()
+	code := run([]string{"add", "--force", "--openapi", in, "--bundle", bundleDir}, io.Discard)
+	if code != 0 {
+		t.Fatalf("add --force on a fresh bundle: exit %d, want 0", code)
+	}
+	if _, err := os.Stat(filepath.Join(bundleDir, "2026-05-17", "versions.yaml")); err != nil {
+		t.Fatalf("force-add on a fresh bundle did not produce a layer: %v", err)
+	}
+}
+
 func TestRunUnknownSubcommand(t *testing.T) {
 	if code := run([]string{"frobnicate"}, io.Discard); code == 0 {
 		t.Fatal("unknown subcommand: want non-zero exit code")

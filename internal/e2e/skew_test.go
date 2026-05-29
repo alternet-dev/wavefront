@@ -64,7 +64,7 @@ func runSkewScenario(t *testing.T, dir string) {
 
 	bundleDir := t.TempDir()
 	oldOpenAPI := filepath.Join(dir, "old", "openapi.json")
-	if err := bundlegen.Add(oldOpenAPI, bundleDir); err != nil {
+	if err := bundlegen.Add(oldOpenAPI, bundleDir, false); err != nil {
 		t.Fatalf("bundlegen.Add(%s): %v", oldOpenAPI, err)
 	}
 	if res, err := os.ReadFile(filepath.Join(dir, "resolution.yaml")); err == nil {
