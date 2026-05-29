@@ -40,7 +40,9 @@ source of truth — verify a claim against it.
   (`WAVEFRONT_TARGETS`); a contract version routes to one. No service
   discovery, no routing-by-host, no TLS termination — the ingress owns those.
 - A missing/invalid bundle at boot ⇒ refuse to start (fail fast). The bundle is
-  loaded once at boot — there is no in-place reload.
+  loaded at boot and atomically reloaded on `SIGHUP`; a malformed reload is
+  logged and the previous bundle keeps serving (the signal is non-destructive).
+  In-flight requests finish against the bundle they started under.
 - Keep the dependency surface minimal: Go standard library plus a small set of
   vetted modules. No heavyweight web framework, no cgo/native dependencies, no
   ORM.
