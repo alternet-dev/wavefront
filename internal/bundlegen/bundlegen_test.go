@@ -230,6 +230,37 @@ const additionalPropsFalseOpenAPI = `{
   }
 }`
 
+// nullableAnyOfOpenAPI exercises #112: the OpenAPI 3.1 nullable idiom
+// anyOf:[T, {type: null}]. `label` is a nullable scalar and `meta` is a
+// nullable $ref to a sibling component. Both must lower to proto3 optional
+// (the same lowering as 3.0's `nullable: true`); the nullable $ref must
+// still pull its target (Meta) into the descriptor set via the schema walk.
+const nullableAnyOfOpenAPI = `{
+  "openapi": "3.1.0",
+  "info": {"title": "acme", "version": "2026-05-17"},
+  "paths": {
+    "/v3/node": {
+      "post": {
+        "operationId": "makeNode",
+        "requestBody": {"content": {"application/json": {"schema": {"$ref": "#/components/schemas/Node"}}}},
+        "responses": {"200": {"content": {"application/json": {"schema": {"$ref": "#/components/schemas/Node"}}}}}
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "Node": {"type": "object", "properties": {
+        "id": {"type": "string"},
+        "label": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+        "meta": {"anyOf": [{"$ref": "#/components/schemas/Meta"}, {"type": "null"}]}
+      }},
+      "Meta": {"type": "object", "properties": {
+        "key": {"type": "string"}
+      }}
+    }
+  }
+}`
+
 const additionalPropsAbsentOpenAPI = `{
   "openapi": "3.0.0",
   "info": {"title": "acme", "version": "2026-05-17"},
@@ -280,6 +311,83 @@ func TestAddAdditionalPropertiesFalseIsANoOp(t *testing.T) {
 	fb, _ := os.ReadFile(filepath.Join(absentDir, "2026-05-17", "descriptors.binpb"))
 	if string(fa) != string(fb) {
 		t.Error("additionalProperties:false produced different descriptors than the key being absent")
+	}
+}
+
+// TestAddNullableAnyOfLowersToProto3Optional: a 3.1 anyOf:[T,{type:null}]
+// property lowers to a proto3 optional field, for both a scalar leaf and a
+// $ref. The $ref target is collected into the descriptor set. (#112)
+func TestAddNullableAnyOfLowersToProto3Optional(t *testing.T) {
+	in := writeOpenAPI(t, nullableAnyOfOpenAPI)
+	out := t.TempDir()
+	if err := bundlegen.Add(in, out, false); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	b, err := bundle.Load(out)
+	if err != nil {
+		t.Fatalf("generated bundle did not load: %v", err)
+	}
+
+	node, err := b.Message("wavefront.gen.v2026_05_17.Node")
+	if err != nil {
+		t.Fatalf("resolve Node: %v", err)
+	}
+
+	// A plain proto3 scalar has no presence; the nullable scalar does.
+	if id := node.Fields().ByName("id"); id == nil || id.HasPresence() {
+		t.Error("Node.id should be a plain scalar with no presence")
+	}
+	if label := node.Fields().ByName("label"); label == nil || !label.HasPresence() {
+		t.Error("Node.label (nullable anyOf scalar) should be a proto3 optional with presence")
+	}
+
+	// The nullable $ref is a message field referencing Meta, with presence.
+	meta := node.Fields().ByName("meta")
+	if meta == nil || meta.Message() == nil || !strings.HasSuffix(string(meta.Message().FullName()), ".Meta") {
+		t.Fatal("Node.meta (nullable anyOf $ref) should be a message field referencing Meta")
+	}
+	if !meta.HasPresence() {
+		t.Error("Node.meta (nullable anyOf $ref) should have presence")
+	}
+
+	// The nullable $ref's target was walked into the descriptor set.
+	if _, err := b.Message("wavefront.gen.v2026_05_17.Meta"); err != nil {
+		t.Errorf("nullable $ref target Meta not collected: %v", err)
+	}
+}
+
+// TestAddGenuineAnyOfUnionIsRejected: a real two-member polymorphic union
+// (no null member) stays a hard error, and the message points the operator
+// at the nullable shape rather than the bare "anyOf is unsupported". (#112)
+func TestAddGenuineAnyOfUnionIsRejected(t *testing.T) {
+	const unionOpenAPI = `{
+  "openapi": "3.1.0",
+  "info": {"title": "acme", "version": "2026-05-17"},
+  "paths": {
+    "/v3/x": {
+      "post": {
+        "requestBody": {"content": {"application/json": {"schema": {"$ref": "#/components/schemas/A"}}}},
+        "responses": {"200": {"content": {"application/json": {"schema": {"$ref": "#/components/schemas/A"}}}}}
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "A": {"type": "object", "properties": {
+        "either": {"anyOf": [{"$ref": "#/components/schemas/B"}, {"$ref": "#/components/schemas/C"}]}
+      }},
+      "B": {"type": "object", "properties": {"b": {"type": "string"}}},
+      "C": {"type": "object", "properties": {"c": {"type": "string"}}}
+    }
+  }
+}`
+	in := writeOpenAPI(t, unionOpenAPI)
+	err := bundlegen.Add(in, t.TempDir(), false)
+	if err == nil {
+		t.Fatal("a genuine anyOf union: expected a hard error, got nil")
+	}
+	if !strings.Contains(err.Error(), "nullable shape") {
+		t.Errorf("union rejection message = %q, want it to mention the nullable shape", err.Error())
 	}
 }
 
