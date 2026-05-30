@@ -535,10 +535,20 @@ func rejectUnsupported(sc *schema) error {
 		return fmt.Errorf("oneOf is unsupported")
 	case len(sc.AnyOf) > 0:
 		return fmt.Errorf("anyOf is unsupported")
-	case sc.AdditionalProperties != nil:
-		return fmt.Errorf("additionalProperties is unsupported")
+	case sc.AdditionalProperties != nil && !additionalPropertiesFalse(sc.AdditionalProperties):
+		return fmt.Errorf("additionalProperties is unsupported (only the no-op additionalProperties: false is accepted; true and typed-dict {schema} forms are not)")
 	}
 	return nil
+}
+
+// additionalPropertiesFalse reports whether the additionalProperties value
+// is the literal boolean false — "no properties beyond those declared",
+// which is exactly how a closed proto message already behaves. Such a
+// constraint carries no information and is treated as absent. The loose
+// form (true) and the typed-dict form ({<schema>}, i.e. Dict[str, X]) are
+// genuine semantic differences and stay rejected.
+func additionalPropertiesFalse(raw json.RawMessage) bool {
+	return bytes.Equal(bytes.TrimSpace(raw), []byte("false"))
 }
 
 func buildMessage(name string, sc *schema, pkg string) (*descriptorpb.DescriptorProto, error) {

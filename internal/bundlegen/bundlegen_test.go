@@ -172,10 +172,14 @@ func TestAddHardErrors(t *testing.T) {
 			"requestBody":{"content":{"application/json":{"schema":{"$ref":"#/components/schemas/A"}}}},
 			"responses":{"200":{"content":{"application/json":{"schema":{"$ref":"#/components/schemas/A"}}}}}}}},
 			"components":{"schemas":{"A":{"type":"object","properties":{"x":{"anyOf":[{"type":"string"}]}}}}}}`,
-		"additionalProperties": `{"openapi":"3.0.0","info":{"version":"1"},"paths":{"/x":{"post":{
+		"additionalProperties true": `{"openapi":"3.0.0","info":{"version":"1"},"paths":{"/x":{"post":{
 			"requestBody":{"content":{"application/json":{"schema":{"$ref":"#/components/schemas/A"}}}},
 			"responses":{"200":{"content":{"application/json":{"schema":{"$ref":"#/components/schemas/A"}}}}}}}},
 			"components":{"schemas":{"A":{"type":"object","additionalProperties":true,"properties":{"x":{"type":"string"}}}}}}`,
+		"additionalProperties typed dict": `{"openapi":"3.0.0","info":{"version":"1"},"paths":{"/x":{"post":{
+			"requestBody":{"content":{"application/json":{"schema":{"$ref":"#/components/schemas/A"}}}},
+			"responses":{"200":{"content":{"application/json":{"schema":{"$ref":"#/components/schemas/A"}}}}}}}},
+			"components":{"schemas":{"A":{"type":"object","additionalProperties":{"type":"string"},"properties":{"x":{"type":"string"}}}}}}`,
 		"inline non-ref schema": `{"openapi":"3.0.0","info":{"version":"1"},"paths":{"/x":{"post":{
 			"requestBody":{"content":{"application/json":{"schema":{"type":"object","properties":{"x":{"type":"string"}}}}}},
 			"responses":{"200":{"content":{"application/json":{"schema":{"$ref":"#/components/schemas/A"}}}}}}}},
@@ -196,6 +200,86 @@ func TestAddHardErrors(t *testing.T) {
 				t.Fatalf("%s: expected a hard error, got nil", name)
 			}
 		})
+	}
+}
+
+// additionalPropsFalseOpenAPI carries additionalProperties: false on its
+// component schema — the Pydantic v2 extra='forbid' default. A proto
+// message is closed by construction, so the constraint is already the
+// target representation and must be ignored. additionalPropsAbsentOpenAPI
+// is the control with the key removed; the two must emit byte-identical
+// descriptors. (#113)
+const additionalPropsFalseOpenAPI = `{
+  "openapi": "3.0.0",
+  "info": {"title": "acme", "version": "2026-05-17"},
+  "paths": {
+    "/v3/widget": {
+      "post": {
+        "operationId": "makeWidget",
+        "requestBody": {"content": {"application/json": {"schema": {"$ref": "#/components/schemas/Widget"}}}},
+        "responses": {"200": {"content": {"application/json": {"schema": {"$ref": "#/components/schemas/Widget"}}}}}
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "Widget": {"type": "object", "additionalProperties": false, "properties": {
+        "name": {"type": "string"}
+      }}
+    }
+  }
+}`
+
+const additionalPropsAbsentOpenAPI = `{
+  "openapi": "3.0.0",
+  "info": {"title": "acme", "version": "2026-05-17"},
+  "paths": {
+    "/v3/widget": {
+      "post": {
+        "operationId": "makeWidget",
+        "requestBody": {"content": {"application/json": {"schema": {"$ref": "#/components/schemas/Widget"}}}},
+        "responses": {"200": {"content": {"application/json": {"schema": {"$ref": "#/components/schemas/Widget"}}}}}
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "Widget": {"type": "object", "properties": {
+        "name": {"type": "string"}
+      }}
+    }
+  }
+}`
+
+// TestAddAdditionalPropertiesFalseIsANoOp: a schema with
+// additionalProperties: false bundles cleanly and emits descriptors
+// byte-identical to the same schema with the key absent — the key is fully
+// ignored, not merely tolerated. (#113)
+func TestAddAdditionalPropertiesFalseIsANoOp(t *testing.T) {
+	falseDir := t.TempDir()
+	if err := bundlegen.Add(writeOpenAPI(t, additionalPropsFalseOpenAPI), falseDir, false); err != nil {
+		t.Fatalf("Add with additionalProperties:false: %v", err)
+	}
+	b, err := bundle.Load(falseDir)
+	if err != nil {
+		t.Fatalf("bundle did not load: %v", err)
+	}
+	m, err := b.Message("wavefront.gen.v2026_05_17.Widget")
+	if err != nil {
+		t.Fatalf("resolve Widget: %v", err)
+	}
+	if m.Fields().ByName("name") == nil {
+		t.Error("Widget missing declared field name")
+	}
+
+	absentDir := t.TempDir()
+	if err := bundlegen.Add(writeOpenAPI(t, additionalPropsAbsentOpenAPI), absentDir, false); err != nil {
+		t.Fatalf("Add with key absent: %v", err)
+	}
+	fa, _ := os.ReadFile(filepath.Join(falseDir, "2026-05-17", "descriptors.binpb"))
+	fb, _ := os.ReadFile(filepath.Join(absentDir, "2026-05-17", "descriptors.binpb"))
+	if string(fa) != string(fb) {
+		t.Error("additionalProperties:false produced different descriptors than the key being absent")
 	}
 }
 
