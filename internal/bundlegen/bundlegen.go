@@ -1,10 +1,11 @@
 // Package bundlegen is the OpenAPI → bundle generator. It is deliberately a
 // constrained, fail-loud subset: request/response must be $ref'd component
-// object schemas, scalars + arrays + $ref + nullable→proto3-optional are
-// supported, and any unsupported construct
-// (allOf/oneOf/anyOf/additionalProperties/untyped/inline) is a hard error
-// rather than a lossy bundle. Output is byte-reproducible (sorted,
-// deterministic marshal) for the consumer's buf-breaking story.
+// object schemas; scalars, arrays, $ref, and nullable→proto3-optional —
+// both 3.0's `nullable: true` and the 3.1 `anyOf:[T, {type: null}]` idiom —
+// are supported, and any unsupported construct (allOf, oneOf, a genuine
+// non-nullable anyOf union, additionalProperties, untyped, inline) is a
+// hard error rather than a lossy bundle. Output is byte-reproducible
+// (sorted, deterministic marshal) for the consumer's buf-breaking story.
 //
 // Add emits one immutable layer per call. It walks every
 // paths.<path>.<method> operation in the input OpenAPI document, sorted by
@@ -515,6 +516,14 @@ func collectSchemas(doc openAPI, roots []string) (map[string]*schema, error) {
 				if err := visit(refName(prop.Items.Ref)); err != nil {
 					return err
 				}
+			default:
+				// A nullable $ref (anyOf:[{$ref}, {type: null}]) still names a
+				// component that must be pulled into the descriptor set.
+				if inner, ok := nullableAnyOf(prop); ok && inner.Ref != "" {
+					if err := visit(refName(inner.Ref)); err != nil {
+						return err
+					}
+				}
 			}
 		}
 		return nil
@@ -534,7 +543,12 @@ func rejectUnsupported(sc *schema) error {
 	case len(sc.OneOf) > 0:
 		return fmt.Errorf("oneOf is unsupported")
 	case len(sc.AnyOf) > 0:
-		return fmt.Errorf("anyOf is unsupported")
+		// The OpenAPI 3.1 nullable idiom anyOf:[T, {type: null}] is supported
+		// (lowered to proto3 optional in buildField); a genuine polymorphic
+		// union is not.
+		if _, ok := nullableAnyOf(sc); !ok {
+			return fmt.Errorf("anyOf is supported only for the nullable shape {T, {type: null}}; refactor true unions to a $ref with a discriminator field")
+		}
 	case sc.AdditionalProperties != nil && !additionalPropertiesFalse(sc.AdditionalProperties):
 		return fmt.Errorf("additionalProperties is unsupported (only the no-op additionalProperties: false is accepted; true and typed-dict {schema} forms are not)")
 	}
@@ -549,6 +563,52 @@ func rejectUnsupported(sc *schema) error {
 // genuine semantic differences and stay rejected.
 func additionalPropertiesFalse(raw json.RawMessage) bool {
 	return bytes.Equal(bytes.TrimSpace(raw), []byte("false"))
+}
+
+// nullableAnyOf matches the OpenAPI 3.1 nullable idiom: a two-member anyOf
+// where exactly one member is the null marker {"type": "null"} and the
+// other is a supported leaf (a $ref or a scalar). It returns the non-null
+// member and true on a match. This is 3.1's standardized replacement for
+// 3.0's `nullable: true`; both lower a field to proto3 optional. A genuine
+// polymorphic union (no null member, or a non-leaf other member) does not
+// match and stays a hard error.
+func nullableAnyOf(sc *schema) (*schema, bool) {
+	if len(sc.AnyOf) != 2 {
+		return nil, false
+	}
+	var other *schema
+	nullSeen := false
+	for _, m := range sc.AnyOf {
+		if isNullType(m) {
+			nullSeen = true
+			continue
+		}
+		other = m
+	}
+	if !nullSeen || other == nil || !isNullableLeaf(other) {
+		return nil, false
+	}
+	return other, true
+}
+
+// isNullType reports whether m is the bare null marker {"type": "null"}.
+func isNullType(m *schema) bool {
+	return m != nil && m.Type == "null" && m.Ref == ""
+}
+
+// isNullableLeaf reports whether sc is a form that lowers cleanly to a
+// single proto3-optional field: a $ref (message) or a scalar. Arrays and
+// inline objects are deliberately excluded — a nullable array collapses to
+// a repeated field (no presence) and is out of this idiom's scope.
+func isNullableLeaf(sc *schema) bool {
+	if sc.Ref != "" {
+		return true
+	}
+	switch sc.Type {
+	case "string", "boolean", "integer", "number":
+		return true
+	}
+	return false
 }
 
 func buildMessage(name string, sc *schema, pkg string) (*descriptorpb.DescriptorProto, error) {
@@ -580,6 +640,17 @@ func buildMessage(name string, sc *schema, pkg string) (*descriptorpb.Descriptor
 }
 
 func buildField(pname string, num int32, sc *schema, pkg string) (*descriptorpb.FieldDescriptorProto, bool, error) {
+	// OpenAPI 3.1 nullable idiom: anyOf:[T, {type: null}] lowers the same as
+	// 3.0's nullable:true — build the field from the non-null member T and
+	// mark it proto3 optional.
+	if inner, ok := nullableAnyOf(sc); ok {
+		f, _, err := buildField(pname, num, inner, pkg)
+		if err != nil {
+			return nil, false, err
+		}
+		return f, true, nil
+	}
+
 	f := &descriptorpb.FieldDescriptorProto{
 		Name:     proto.String(pname),
 		Number:   proto.Int32(num),
