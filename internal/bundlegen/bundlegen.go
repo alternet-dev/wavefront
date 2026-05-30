@@ -1,10 +1,11 @@
 // Package bundlegen is the OpenAPI → bundle generator. It is deliberately a
 // constrained, fail-loud subset: request/response must be $ref'd component
-// object schemas; scalars, arrays, $ref, and nullable→proto3-optional —
-// both 3.0's `nullable: true` and the 3.1 `anyOf:[T, {type: null}]` idiom —
-// are supported, and any unsupported construct (allOf, oneOf, a genuine
-// non-nullable anyOf union, additionalProperties, untyped, inline) is a
-// hard error rather than a lossy bundle. Output is byte-reproducible
+// object schemas; scalars, arrays, $ref, nullable→proto3-optional — both
+// 3.0's `nullable: true` and the 3.1 `anyOf:[T, {type: null}]` idiom — and a
+// typed dict (additionalProperties:<scalar|$ref>) → map<string,V> are
+// supported, and any unsupported construct (allOf, oneOf, a genuine
+// non-nullable anyOf union, an open or mixed additionalProperties, untyped,
+// inline) is a hard error rather than a lossy bundle. Output is byte-reproducible
 // (sorted, deterministic marshal) for the consumer's buf-breaking story.
 //
 // Add emits one immutable layer per call. It walks every
@@ -30,6 +31,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
 
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protodesc"
@@ -521,6 +523,14 @@ func collectSchemas(doc openAPI, roots []string) (map[string]*schema, error) {
 				if err := visit(refName(prop.Items.Ref)); err != nil {
 					return err
 				}
+			case prop.Type == "object":
+				// A typed-dict map whose value is a $ref (Dict[str, Item])
+				// names a component that must be pulled into the descriptor set.
+				if value, ok := mapValueSchema(prop.AdditionalProperties); ok && value.Ref != "" {
+					if err := visit(refName(value.Ref)); err != nil {
+						return err
+					}
+				}
 			default:
 				// A nullable $ref (anyOf:[{$ref}, {type: null}]) still names a
 				// component that must be pulled into the descriptor set.
@@ -555,7 +565,14 @@ func rejectUnsupported(sc *schema) error {
 			return fmt.Errorf("anyOf is supported only for the nullable shape {T, {type: null}}; refactor true unions to a $ref with a discriminator field")
 		}
 	case sc.AdditionalProperties != nil && !additionalPropertiesFalse(sc.AdditionalProperties):
-		return fmt.Errorf("additionalProperties is unsupported (only the no-op additionalProperties: false is accepted; true and typed-dict {schema} forms are not)")
+		// A pure typed dict — additionalProperties carrying a scalar or $ref
+		// value and no declared properties of its own (Dict[str, V]) — lowers
+		// to a proto3 map field. Every other form stays unsupported: true (an
+		// open object), an inline-object value (needs a $ref), and the mixed
+		// form that also declares properties.
+		if _, ok := mapValueSchema(sc.AdditionalProperties); !ok || len(sc.Properties) > 0 {
+			return fmt.Errorf("additionalProperties is unsupported (accepted: the no-op additionalProperties: false, and a typed dict additionalProperties:<scalar|$ref> with no declared properties; rejected: true, an inline-object value, and the mixed properties+additionalProperties form)")
+		}
 	}
 	return nil
 }
@@ -568,6 +585,52 @@ func rejectUnsupported(sc *schema) error {
 // genuine semantic differences and stay rejected.
 func additionalPropertiesFalse(raw json.RawMessage) bool {
 	return bytes.Equal(bytes.TrimSpace(raw), []byte("false"))
+}
+
+// mapValueSchema parses a typed-dict additionalProperties value and returns
+// its schema when it is a supported proto map value — a $ref (message) or a
+// scalar. It returns false for the boolean forms (true/false), an
+// inline-object value, or anything it can't parse. proto3 map values may not
+// themselves be repeated, so arrays are excluded as well; such a value must
+// be promoted to a named $ref.
+func mapValueSchema(raw json.RawMessage) (*schema, bool) {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || trimmed[0] != '{' {
+		return nil, false
+	}
+	var v schema
+	if err := json.Unmarshal(trimmed, &v); err != nil {
+		return nil, false
+	}
+	if v.Ref != "" {
+		return &v, true
+	}
+	switch v.Type {
+	case "string", "boolean", "integer", "number":
+		return &v, true
+	}
+	return nil, false
+}
+
+// mapEntryName returns the synthetic nested map-entry message name protoc
+// generates for a map field: the field name CamelCased with "Entry"
+// appended (user_tags -> UserTagsEntry, labels -> LabelsEntry).
+func mapEntryName(field string) string {
+	var b strings.Builder
+	upNext := true
+	for _, r := range field {
+		if r == '_' {
+			upNext = true
+			continue
+		}
+		if upNext {
+			b.WriteRune(unicode.ToUpper(r))
+			upNext = false
+		} else {
+			b.WriteRune(r)
+		}
+	}
+	return b.String() + "Entry"
 }
 
 // nullableAnyOf matches the OpenAPI 3.1 nullable idiom: a two-member anyOf
@@ -626,7 +689,7 @@ func buildMessage(name string, sc *schema, pkg string) (*descriptorpb.Descriptor
 	dp := &descriptorpb.DescriptorProto{Name: proto.String(name)}
 	num := int32(1)
 	for _, pname := range props {
-		f, optional, err := buildField(pname, num, sc.Properties[pname], pkg)
+		f, optional, nested, err := buildField(name, pname, num, sc.Properties[pname], pkg)
 		if err != nil {
 			return nil, fmt.Errorf("message %q field %q: %w", name, pname, err)
 		}
@@ -638,22 +701,25 @@ func buildMessage(name string, sc *schema, pkg string) (*descriptorpb.Descriptor
 			f.OneofIndex = proto.Int32(idx)
 			f.Proto3Optional = proto.Bool(true)
 		}
+		if nested != nil {
+			dp.NestedType = append(dp.NestedType, nested)
+		}
 		dp.Field = append(dp.Field, f)
 		num++
 	}
 	return dp, nil
 }
 
-func buildField(pname string, num int32, sc *schema, pkg string) (*descriptorpb.FieldDescriptorProto, bool, error) {
+func buildField(msgName, pname string, num int32, sc *schema, pkg string) (*descriptorpb.FieldDescriptorProto, bool, *descriptorpb.DescriptorProto, error) {
 	// OpenAPI 3.1 nullable idiom: anyOf:[T, {type: null}] lowers the same as
 	// 3.0's nullable:true — build the field from the non-null member T and
 	// mark it proto3 optional.
 	if inner, ok := nullableAnyOf(sc); ok {
-		f, _, err := buildField(pname, num, inner, pkg)
+		f, _, nested, err := buildField(msgName, pname, num, inner, pkg)
 		if err != nil {
-			return nil, false, err
+			return nil, false, nil, err
 		}
-		return f, true, nil
+		return f, true, nested, nil
 	}
 
 	f := &descriptorpb.FieldDescriptorProto{
@@ -666,7 +732,7 @@ func buildField(pname string, num int32, sc *schema, pkg string) (*descriptorpb.
 	if sc.Ref != "" {
 		f.Type = descriptorpb.FieldDescriptorProto_TYPE_MESSAGE.Enum()
 		f.TypeName = proto.String("." + pkg + "." + refName(sc.Ref))
-		return f, false, nil
+		return f, false, nil, nil
 	}
 
 	switch sc.Type {
@@ -688,13 +754,13 @@ func buildField(pname string, num int32, sc *schema, pkg string) (*descriptorpb.
 		}
 	case "array":
 		if sc.Items == nil {
-			return nil, false, fmt.Errorf("array without items")
+			return nil, false, nil, fmt.Errorf("array without items")
 		}
 		f.Label = descriptorpb.FieldDescriptorProto_LABEL_REPEATED.Enum()
 		if sc.Items.Ref != "" {
 			f.Type = descriptorpb.FieldDescriptorProto_TYPE_MESSAGE.Enum()
 			f.TypeName = proto.String("." + pkg + "." + refName(sc.Items.Ref))
-			return f, false, nil
+			return f, false, nil, nil
 		}
 		switch sc.Items.Type {
 		case "string":
@@ -706,18 +772,89 @@ func buildField(pname string, num int32, sc *schema, pkg string) (*descriptorpb.
 		case "number":
 			f.Type = descriptorpb.FieldDescriptorProto_TYPE_DOUBLE.Enum()
 		default:
-			return nil, false, fmt.Errorf("array item type %q is unsupported", sc.Items.Type)
+			return nil, false, nil, fmt.Errorf("array item type %q is unsupported", sc.Items.Type)
 		}
-		return f, false, nil
+		return f, false, nil, nil
 	case "object":
-		return nil, false, fmt.Errorf("inline object properties are unsupported (use a $ref)")
+		// A pure typed dict (additionalProperties:<scalar|$ref>, no declared
+		// properties) lowers to a proto3 map field; any other inline object
+		// must be promoted to a $ref. rejectUnsupported has already screened
+		// out the mixed and untyped forms.
+		if value, ok := mapValueSchema(sc.AdditionalProperties); ok && len(sc.Properties) == 0 {
+			return buildMapField(msgName, pname, num, value, pkg)
+		}
+		return nil, false, nil, fmt.Errorf("inline object properties are unsupported (use a $ref)")
 	case "":
-		return nil, false, fmt.Errorf("property has no type and no $ref")
+		return nil, false, nil, fmt.Errorf("property has no type and no $ref")
 	default:
-		return nil, false, fmt.Errorf("type %q is unsupported", sc.Type)
+		return nil, false, nil, fmt.Errorf("type %q is unsupported", sc.Type)
 	}
 
-	return f, sc.Nullable, nil
+	return f, sc.Nullable, nil, nil
+}
+
+// buildMapField lowers a pure typed dict to a proto3 map field: a repeated
+// message field whose element is a synthetic <Field>Entry map-entry message
+// (key=1 string, value=2 V) nested in the containing message. This is
+// exactly the shape proto3's map<string,V> compiles to. The returned entry
+// is attached to the containing message's NestedType by the caller.
+func buildMapField(msgName, pname string, num int32, value *schema, pkg string) (*descriptorpb.FieldDescriptorProto, bool, *descriptorpb.DescriptorProto, error) {
+	valueField := &descriptorpb.FieldDescriptorProto{
+		Name:     proto.String("value"),
+		Number:   proto.Int32(2),
+		Label:    descriptorpb.FieldDescriptorProto_LABEL_OPTIONAL.Enum(),
+		JsonName: proto.String("value"),
+	}
+	if value.Ref != "" {
+		valueField.Type = descriptorpb.FieldDescriptorProto_TYPE_MESSAGE.Enum()
+		valueField.TypeName = proto.String("." + pkg + "." + refName(value.Ref))
+	} else {
+		switch value.Type {
+		case "string":
+			valueField.Type = descriptorpb.FieldDescriptorProto_TYPE_STRING.Enum()
+		case "boolean":
+			valueField.Type = descriptorpb.FieldDescriptorProto_TYPE_BOOL.Enum()
+		case "integer":
+			if value.Format == "int64" {
+				valueField.Type = descriptorpb.FieldDescriptorProto_TYPE_INT64.Enum()
+			} else {
+				valueField.Type = descriptorpb.FieldDescriptorProto_TYPE_INT32.Enum()
+			}
+		case "number":
+			if value.Format == "float" {
+				valueField.Type = descriptorpb.FieldDescriptorProto_TYPE_FLOAT.Enum()
+			} else {
+				valueField.Type = descriptorpb.FieldDescriptorProto_TYPE_DOUBLE.Enum()
+			}
+		default:
+			return nil, false, nil, fmt.Errorf("map value type %q is unsupported", value.Type)
+		}
+	}
+
+	entryName := mapEntryName(pname)
+	entry := &descriptorpb.DescriptorProto{
+		Name: proto.String(entryName),
+		Field: []*descriptorpb.FieldDescriptorProto{
+			{
+				Name:     proto.String("key"),
+				Number:   proto.Int32(1),
+				Label:    descriptorpb.FieldDescriptorProto_LABEL_OPTIONAL.Enum(),
+				Type:     descriptorpb.FieldDescriptorProto_TYPE_STRING.Enum(),
+				JsonName: proto.String("key"),
+			},
+			valueField,
+		},
+		Options: &descriptorpb.MessageOptions{MapEntry: proto.Bool(true)},
+	}
+	f := &descriptorpb.FieldDescriptorProto{
+		Name:     proto.String(pname),
+		Number:   proto.Int32(num),
+		Label:    descriptorpb.FieldDescriptorProto_LABEL_REPEATED.Enum(),
+		Type:     descriptorpb.FieldDescriptorProto_TYPE_MESSAGE.Enum(),
+		TypeName: proto.String("." + pkg + "." + msgName + "." + entryName),
+		JsonName: proto.String(pname),
+	}
+	return f, false, entry, nil
 }
 
 func sanitize(version string) string {
