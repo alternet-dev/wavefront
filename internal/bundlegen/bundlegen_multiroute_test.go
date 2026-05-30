@@ -296,6 +296,97 @@ func TestAddBodylessOperationsSynthesizeEmpty(t *testing.T) {
 	}
 }
 
+// emptyInlineSchemaOpenAPI exercises #114: a 200 response whose
+// application/json schema is the empty inline object `{}` — the shape
+// FastAPI/Pydantic emit for a handler declared without a response_model.
+// It is semantically bodyless and must bind the synthetic Empty message,
+// exactly as the absent-content case from #105, rather than tripping the
+// inline-schema rejection. A bodied GET (response Item) runs alongside to
+// confirm the synthetic Empty coexists with a real message.
+const emptyInlineSchemaOpenAPI = `{
+  "openapi": "3.1.0",
+  "info": {"title": "acme", "version": "2026-10-01"},
+  "paths": {
+    "/v0/things/{id}/activate": {
+      "post": {
+        "operationId": "activateThing",
+        "responses": {"200": {"description": "Successful Response", "content": {"application/json": {"schema": {}}}}}
+      }
+    },
+    "/v0/things/{id}": {
+      "get": {
+        "operationId": "getThing",
+        "responses": {"200": {"content": {"application/json": {"schema": {"$ref": "#/components/schemas/Item"}}}}}
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "Item": {"type": "object", "properties": {
+        "id": {"type": "string"},
+        "name": {"type": "string"}
+      }}
+    }
+  }
+}`
+
+// TestAddEmptyInlineSchemaBindsEmpty: a 200 response carrying the empty
+// inline schema `{}` binds the synthetic wavefront.gen.v<ver>.Empty —
+// identical output to the absent-content case — instead of hard-erroring
+// on the inline-schema check. (#114)
+func TestAddEmptyInlineSchemaBindsEmpty(t *testing.T) {
+	in := writeOpenAPI(t, emptyInlineSchemaOpenAPI)
+	out := t.TempDir()
+	if err := bundlegen.Add(in, out, false); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+
+	b, err := bundle.Load(out)
+	if err != nil {
+		t.Fatalf("generated bundle did not load: %v", err)
+	}
+
+	const pkg = "wavefront.gen.v2026_10_01"
+
+	// The activate POST has no requestBody (req Empty per #105) and an empty
+	// inline 200 schema (resp Empty per #114); the GET binds the bodied Item.
+	want := []struct {
+		route, method   string
+		reqSuf, respSuf string
+	}{
+		{"/v0/things/{id}", "GET", ".Empty", ".Item"},
+		{"/v0/things/{id}/activate", "POST", ".Empty", ".Empty"},
+	}
+	for _, w := range want {
+		c, ok := b.LookupRoute(w.route, w.method)
+		if !ok {
+			t.Errorf("LookupRoute(%q, %q): not found", w.route, w.method)
+			continue
+		}
+		if !strings.HasSuffix(c.RequestMessage(), w.reqSuf) {
+			t.Errorf("LookupRoute(%q, %q).RequestMessage() = %q, want suffix %q",
+				w.route, w.method, c.RequestMessage(), w.reqSuf)
+		}
+		if !strings.HasSuffix(c.ResponseMessage(), w.respSuf) {
+			t.Errorf("LookupRoute(%q, %q).ResponseMessage() = %q, want suffix %q",
+				w.route, w.method, c.ResponseMessage(), w.respSuf)
+		}
+	}
+
+	// The empty inline schema resolves through the same synthetic Empty as
+	// the absent-content case: a zero-field message, emitted exactly once.
+	em, err := b.Message(pkg + ".Empty")
+	if err != nil {
+		t.Fatalf("descriptor missing synthetic Empty: %v", err)
+	}
+	if n := em.Fields().Len(); n != 0 {
+		t.Errorf("Empty has %d fields, want 0", n)
+	}
+	if _, err := b.Message(pkg + ".Item"); err != nil {
+		t.Errorf("descriptor missing Item: %v", err)
+	}
+}
+
 // TestAddEmptyOpenAPIIsAHardError: an OpenAPI doc with zero operations
 // can't emit a layer with no contracts (versions.yaml.contracts must be
 // non-empty per the bundle schema).
