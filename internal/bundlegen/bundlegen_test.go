@@ -282,6 +282,37 @@ const additionalPropsAbsentOpenAPI = `{
   }
 }`
 
+// mapAdditionalPropsOpenAPI exercises #119: a Pydantic Dict[str, V] surfaces
+// as a property whose schema is {type:object, additionalProperties:<V>} with
+// no declared properties of its own. `labels` is Dict[str, str] and must
+// lower to map<string,string>; `items` is Dict[str, Item] and must lower to
+// map<string,Item>, pulling the value $ref's target (Item) into the
+// descriptor set via the schema walk.
+const mapAdditionalPropsOpenAPI = `{
+  "openapi": "3.0.0",
+  "info": {"title": "acme", "version": "2026-05-17"},
+  "paths": {
+    "/v3/bag": {
+      "post": {
+        "operationId": "makeBag",
+        "requestBody": {"content": {"application/json": {"schema": {"$ref": "#/components/schemas/Bag"}}}},
+        "responses": {"200": {"content": {"application/json": {"schema": {"$ref": "#/components/schemas/Bag"}}}}}
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "Bag": {"type": "object", "properties": {
+        "labels": {"type": "object", "additionalProperties": {"type": "string"}},
+        "items": {"type": "object", "additionalProperties": {"$ref": "#/components/schemas/Item"}}
+      }},
+      "Item": {"type": "object", "properties": {
+        "sku": {"type": "string"}
+      }}
+    }
+  }
+}`
+
 // TestAddAdditionalPropertiesFalseIsANoOp: a schema with
 // additionalProperties: false bundles cleanly and emits descriptors
 // byte-identical to the same schema with the key absent — the key is fully
@@ -311,6 +342,58 @@ func TestAddAdditionalPropertiesFalseIsANoOp(t *testing.T) {
 	fb, _ := os.ReadFile(filepath.Join(absentDir, "2026-05-17", "descriptors.binpb"))
 	if string(fa) != string(fb) {
 		t.Error("additionalProperties:false produced different descriptors than the key being absent")
+	}
+}
+
+// TestAddTypedAdditionalPropertiesBecomesMap: a property whose schema is a
+// pure typed dict ({type:object, additionalProperties:<scalar|$ref>} with no
+// declared properties) lowers to a proto3 map field. The scalar value form
+// becomes map<string,string>; the $ref value form becomes map<string,Item>
+// and pulls Item into the descriptor set. (#119)
+func TestAddTypedAdditionalPropertiesBecomesMap(t *testing.T) {
+	in := writeOpenAPI(t, mapAdditionalPropsOpenAPI)
+	out := t.TempDir()
+	if err := bundlegen.Add(in, out, false); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	b, err := bundle.Load(out)
+	if err != nil {
+		t.Fatalf("generated bundle did not load: %v", err)
+	}
+
+	bag, err := b.Message("wavefront.gen.v2026_05_17.Bag")
+	if err != nil {
+		t.Fatalf("resolve Bag: %v", err)
+	}
+
+	labels := bag.Fields().ByName("labels")
+	if labels == nil || !labels.IsMap() {
+		t.Fatal("Bag.labels (Dict[str,str]) should be a map field")
+	}
+	if k := labels.MapKey().Kind().String(); k != "string" {
+		t.Errorf("Bag.labels map key kind = %q, want string", k)
+	}
+	if v := labels.MapValue().Kind().String(); v != "string" {
+		t.Errorf("Bag.labels map value kind = %q, want string", v)
+	}
+
+	items := bag.Fields().ByName("items")
+	if items == nil || !items.IsMap() {
+		t.Fatal("Bag.items (Dict[str,Item]) should be a map field")
+	}
+	if k := items.MapKey().Kind().String(); k != "string" {
+		t.Errorf("Bag.items map key kind = %q, want string", k)
+	}
+	if v := items.MapValue().Kind().String(); v != "message" {
+		t.Fatalf("Bag.items map value kind = %q, want message", v)
+	}
+	if mv := items.MapValue().Message(); mv == nil || !strings.HasSuffix(string(mv.FullName()), ".Item") {
+		t.Error("Bag.items map value should reference the Item message")
+	}
+
+	// The value $ref's target was walked into the descriptor set.
+	if _, err := b.Message("wavefront.gen.v2026_05_17.Item"); err != nil {
+		t.Errorf("map value $ref target Item not collected: %v", err)
 	}
 }
 
