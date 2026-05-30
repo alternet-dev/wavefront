@@ -499,7 +499,12 @@ func collectSchemas(doc openAPI, roots []string) (map[string]*schema, error) {
 		if err := rejectUnsupported(sc); err != nil {
 			return fmt.Errorf("schema %q: %w", name, err)
 		}
-		if sc.Type != "object" || len(sc.Properties) == 0 {
+		// An explicitly-empty object ("properties": {}) is a deliberately-closed
+		// zero-field message and is accepted; a bare {"type":"object"} with no
+		// properties key is an open/untyped object and stays rejected. The two
+		// differ only by whether the properties key is present: encoding/json
+		// leaves an absent map nil and allocates a non-nil map for {}.
+		if sc.Type != "object" || sc.Properties == nil {
 			return fmt.Errorf("schema %q must be an object with properties", name)
 		}
 		out[name] = sc
