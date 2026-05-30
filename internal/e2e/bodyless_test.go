@@ -66,7 +66,7 @@ func TestBodylessGETSendsCleanUpstreamRequest(t *testing.T) {
 	dir := bodylessBundleDir(t)
 	h := Spawn(t, SpawnOpts{
 		BundleDir: dir,
-		BackendHandler: func(w http.ResponseWriter, r *http.Request) {
+		BackendHandler: func(w http.ResponseWriter, _ *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = io.WriteString(w, `{"id":"id-1","name":"fetched"}`)
 		},
