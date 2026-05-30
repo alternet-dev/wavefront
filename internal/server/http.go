@@ -14,6 +14,7 @@ import (
 
 	"github.com/alternet-dev/wavefront/internal/bundle"
 	"github.com/alternet-dev/wavefront/internal/negotiate"
+	"github.com/alternet-dev/wavefront/internal/tracing"
 	"github.com/alternet-dev/wavefront/internal/transform"
 	"github.com/alternet-dev/wavefront/internal/wireerror"
 )
@@ -121,6 +122,10 @@ func isProtobufContentType(v string) bool {
 
 func (s *Server) proxy(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
+	// One wavefront-attributed span per request, continuing the inbound W3C
+	// traceparent when present. nil (tracing disabled / unsampled) is a safe
+	// no-op for every Span method, so the request path is unchanged.
+	span := s.tracer.StartSpan("wavefront.proxy", r.Header.Get("traceparent"))
 	// version is the bundle-known contract version (or versionUnknown until
 	// negotiate succeeds). It labels the metrics and the structured log line —
 	// staying inside that bounded set keeps Prometheus cardinality finite.
@@ -140,10 +145,12 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request) {
 	resolutionKind := ""
 	outcome := outcomeOK
 	upstreamStatus := 0
+	transformOutcome := ""
 
-	fail := func(werr *wireerror.Error, transformOutcome string) {
+	fail := func(werr *wireerror.Error, tout string) {
 		outcome = werr.Code()
-		s.writeError(w, werr, version, responseVersion, transformOutcome)
+		transformOutcome = tout
+		s.writeError(w, werr, version, responseVersion, tout)
 	}
 
 	defer func() {
@@ -166,6 +173,16 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request) {
 			slog.String("outcome", outcome),
 			slog.Int64("latency_ms", time.Since(start).Milliseconds()),
 		)
+
+		span.SetAttr("contract_version", version)
+		span.SetAttr("target", target)
+		span.SetAttr("transform_outcome", transformOutcome)
+		if outcome == outcomeOK {
+			span.SetStatus(tracing.StatusOK)
+		} else {
+			span.SetStatus(tracing.StatusError)
+		}
+		span.End()
 	}()
 
 	b := s.bundle.Load()

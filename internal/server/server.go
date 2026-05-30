@@ -22,6 +22,7 @@ import (
 	"github.com/alternet-dev/wavefront/internal/adapter"
 	"github.com/alternet-dev/wavefront/internal/bundle"
 	"github.com/alternet-dev/wavefront/internal/config"
+	"github.com/alternet-dev/wavefront/internal/tracing"
 )
 
 // HTTP server timeouts. ReadHeaderTimeout and ReadTimeout come from config —
@@ -45,6 +46,7 @@ type Server struct {
 	adapter adapter.Adapter
 	client  *http.Client
 	metrics *metrics
+	tracer  *tracing.Exporter
 	logger  *slog.Logger
 	// connStateMap tracks per-connection observability state for the
 	// stdlib-boundary detection. See stdlib_boundary.go for the model.
@@ -69,6 +71,11 @@ func New(cfg *config.Config) *Server {
 		logger:  slog.Default(),
 	}
 	s.adapter = adapter.NewProtoJSON(s) // *Server is the MessageResolver
+	s.tracer = tracing.NewExporter(tracing.Config{
+		Endpoint:    cfg.TracesEndpoint,
+		ServiceName: cfg.TracesServiceName,
+		SampleRatio: cfg.TracesSampleRatio,
+	})
 	return s
 }
 
@@ -218,6 +225,7 @@ func (s *Server) Run(ctx context.Context) error {
 		defer cancel()
 		_ = data.Shutdown(shutCtx)
 		_ = ops.Shutdown(shutCtx)
+		_ = s.tracer.Shutdown(shutCtx)
 		return nil
 	case err := <-errc:
 		return err

@@ -17,6 +17,9 @@
 //	WAVEFRONT_READ_TIMEOUT_MS         — data-plane ReadTimeout (headers+body) in ms (default 30000)
 //	WAVEFRONT_MAX_BODY_BYTES          — maximum request body size in bytes (default 1048576)
 //	WAVEFRONT_LOG_LEVEL               — log level: debug|info|warn|error (default info)
+//	WAVEFRONT_TRACES_OTLP_ENDPOINT    — OTLP/HTTP collector base URL; unset disables tracing
+//	WAVEFRONT_TRACES_SERVICE_NAME     — resource service.name on emitted spans (default wavefront)
+//	WAVEFRONT_TRACES_SAMPLE_RATIO     — root-trace sample probability in (0,1] (default 1)
 package config
 
 import (
@@ -43,6 +46,9 @@ type Config struct {
 	ReadTimeout           time.Duration
 	MaxBodyBytes          int64
 	LogLevel              slog.Level
+	TracesEndpoint        string
+	TracesServiceName     string
+	TracesSampleRatio     float64
 }
 
 type MissingError struct{ Var string }
@@ -69,9 +75,13 @@ const (
 	defReadHeaderTimeout = 10000
 	defReadTimeout       = 30000
 	defMaxBody           = 1 << 20
+	defSampleRatio       = 1.0
 )
 
-var errPositive = errors.New("must be greater than zero")
+var (
+	errPositive   = errors.New("must be greater than zero")
+	errRatioRange = errors.New("must be in (0, 1]")
+)
 
 // Lookuper resolves an environment variable: its value and whether it is set.
 // It matches the signature of os.LookupEnv.
@@ -205,6 +215,22 @@ func Load(opts ...Option) (*Config, error) {
 	}
 	cfg.LogLevel = lvl
 
+	cfg.TracesEndpoint = withDefault("WAVEFRONT_TRACES_OTLP_ENDPOINT", "")
+	if cfg.TracesEndpoint != "" {
+		if e := validateBaseURL(cfg.TracesEndpoint); e != nil {
+			return nil, &InvalidError{Var: "WAVEFRONT_TRACES_OTLP_ENDPOINT", Value: cfg.TracesEndpoint, Err: e}
+		}
+	}
+	cfg.TracesServiceName = withDefault("WAVEFRONT_TRACES_SERVICE_NAME", "")
+	ratio, e := parseFloatVar(nonBlank, "WAVEFRONT_TRACES_SAMPLE_RATIO", defSampleRatio)
+	if e != nil {
+		return nil, e
+	}
+	if ratio <= 0 || ratio > 1 {
+		return nil, &InvalidError{Var: "WAVEFRONT_TRACES_SAMPLE_RATIO", Value: strconv.FormatFloat(ratio, 'g', -1, 64), Err: errRatioRange}
+	}
+	cfg.TracesSampleRatio = ratio
+
 	return cfg, nil
 }
 
@@ -241,6 +267,18 @@ func parseInt64Var(nonBlank func(string) (string, bool), key string, def int64) 
 		return 0, &InvalidError{Var: key, Value: v, Err: perr}
 	}
 	return n, nil
+}
+
+func parseFloatVar(nonBlank func(string) (string, bool), key string, def float64) (float64, error) {
+	v, ok := nonBlank(key)
+	if !ok {
+		return def, nil
+	}
+	f, perr := strconv.ParseFloat(v, 64)
+	if perr != nil {
+		return 0, &InvalidError{Var: key, Value: v, Err: perr}
+	}
+	return f, nil
 }
 
 func validateBaseURL(s string) error {

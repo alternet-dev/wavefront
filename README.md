@@ -155,8 +155,8 @@ Operational notes:
   errors carry `code` plus a `transform_outcome` dimension that splits
   `transform_failed` by chain side. `/health` and `/ready` are the probes.
 - **Codec.** `protobuf ↔ JSON` is the only adapter today; the adapter boundary
-  is built so another codec could be added. Auth + tracing headers are
-  forwarded untouched.
+  is built so another codec could be added. All non-hop-by-hop client headers
+  are forwarded untouched.
 
 The bundle schema and transform vocabulary are detailed in
 [docs/protocol.md](docs/protocol.md); integrating a consumer is covered in

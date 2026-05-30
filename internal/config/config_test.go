@@ -328,6 +328,66 @@ func TestTargetURLUnknownNameReturnsFalse(t *testing.T) {
 	}
 }
 
+func TestTracingDefaultsWhenUnset(t *testing.T) {
+	cfg, err := load(minimal())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.TracesEndpoint != "" {
+		t.Errorf("TracesEndpoint default = %q, want empty (disabled)", cfg.TracesEndpoint)
+	}
+	if cfg.TracesServiceName != "" {
+		t.Errorf("TracesServiceName default = %q, want empty", cfg.TracesServiceName)
+	}
+	if cfg.TracesSampleRatio != 1.0 {
+		t.Errorf("TracesSampleRatio default = %v, want 1.0", cfg.TracesSampleRatio)
+	}
+}
+
+func TestTracingOverridesParse(t *testing.T) {
+	p := minimal()
+	p["WAVEFRONT_TRACES_OTLP_ENDPOINT"] = "http://collector:4318"
+	p["WAVEFRONT_TRACES_SERVICE_NAME"] = "wavefront-edge"
+	p["WAVEFRONT_TRACES_SAMPLE_RATIO"] = "0.25"
+	cfg, err := load(p)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.TracesEndpoint != "http://collector:4318" {
+		t.Errorf("TracesEndpoint = %q", cfg.TracesEndpoint)
+	}
+	if cfg.TracesServiceName != "wavefront-edge" {
+		t.Errorf("TracesServiceName = %q", cfg.TracesServiceName)
+	}
+	if cfg.TracesSampleRatio != 0.25 {
+		t.Errorf("TracesSampleRatio = %v", cfg.TracesSampleRatio)
+	}
+}
+
+func TestInvalidTracesEndpointIsError(t *testing.T) {
+	for _, bad := range []string{"not a url", "ftp://x", "/no-scheme"} {
+		p := minimal()
+		p["WAVEFRONT_TRACES_OTLP_ENDPOINT"] = bad
+		_, err := load(p)
+		var ie *InvalidError
+		if !errors.As(err, &ie) || ie.Var != "WAVEFRONT_TRACES_OTLP_ENDPOINT" {
+			t.Errorf("%q: want InvalidError(WAVEFRONT_TRACES_OTLP_ENDPOINT), got %v", bad, err)
+		}
+	}
+}
+
+func TestInvalidTracesSampleRatioIsError(t *testing.T) {
+	for _, bad := range []string{"nope", "0", "-0.5", "1.5"} {
+		p := minimal()
+		p["WAVEFRONT_TRACES_SAMPLE_RATIO"] = bad
+		_, err := load(p)
+		var ie *InvalidError
+		if !errors.As(err, &ie) || ie.Var != "WAVEFRONT_TRACES_SAMPLE_RATIO" {
+			t.Errorf("%q: want InvalidError(WAVEFRONT_TRACES_SAMPLE_RATIO), got %v", bad, err)
+		}
+	}
+}
+
 func TestBlankOverrideFallsBackToDefault(t *testing.T) {
 	p := minimal()
 	p["WAVEFRONT_LISTEN_ADDR"] = ""

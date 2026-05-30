@@ -59,8 +59,17 @@ request.
   `/ready` (readiness) returns 200 only once a valid bundle is loaded, 503
   before. Both served on the metrics listener.
 - Lifecycle events — config, bundle load, listen, shutdown — are logged as
-  structured JSON. Client tracing headers are forwarded to the upstream, not
-  terminated.
+  structured JSON.
+- Distributed tracing is opt-in via `WAVEFRONT_TRACES_OTLP_ENDPOINT` (unset =
+  disabled, zero overhead). When set, wavefront emits one `wavefront.proxy`
+  span per request to that OTLP/HTTP collector, continuing the inbound W3C
+  `traceparent` — the client's `traceparent`/`tracestate` are still forwarded
+  untouched, so wavefront adds a span rather than terminating the trace. Each
+  span carries `contract_version`, `target`, and `transform_outcome`
+  attributes and a `service.name` resource (`WAVEFRONT_TRACES_SERVICE_NAME`,
+  default `wavefront`); `WAVEFRONT_TRACES_SAMPLE_RATIO` in `(0,1]` sets the
+  root-trace sample probability. Emission is non-blocking and best-effort: a
+  full queue or a collector error drops the span, never the request.
 - Every proxied request emits one structured `slog` line with
   `contract_version`, `route`, `target`, `resolution_kind`
   (`route` / `transform`), `upstream_status`, `outcome`, and `latency_ms`.
