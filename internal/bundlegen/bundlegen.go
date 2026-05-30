@@ -436,10 +436,29 @@ func refSchemaName(op operation, request bool) (string, error) {
 	if !ok || m.Schema == nil {
 		return "", fmt.Errorf("operation has no application/json schema")
 	}
+	// An empty inline schema `{}` carries no shape — the form FastAPI emits
+	// for a handler declared without a response_model. It is semantically
+	// bodyless, so bind the same synthetic Empty as an absent body rather
+	// than tripping the inline-schema rejection below.
+	if isEmptySchema(m.Schema) {
+		return emptyMessageName, nil
+	}
 	if m.Schema.Ref == "" {
 		return "", fmt.Errorf("request/response schema must be a $ref to #/components/schemas (inline schemas are unsupported)")
 	}
 	return refName(m.Schema.Ref), nil
+}
+
+// isEmptySchema reports whether sc is the empty inline schema `{}` — it
+// carries no $ref and no shape-bearing keyword at all. Such a schema is
+// indistinguishable from an absent body, so a bodyless side resolves it to
+// the synthetic Empty message. A schema with any field set (even a bare
+// type or nullable flag) is a real inline schema and stays rejected.
+func isEmptySchema(sc *schema) bool {
+	return sc.Ref == "" && sc.Type == "" && sc.Format == "" && !sc.Nullable &&
+		len(sc.Properties) == 0 && sc.Items == nil &&
+		len(sc.AllOf) == 0 && len(sc.OneOf) == 0 && len(sc.AnyOf) == 0 &&
+		sc.AdditionalProperties == nil
 }
 
 // partitionEmpty splits roots into the real component-schema names (which
