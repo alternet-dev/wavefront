@@ -391,6 +391,72 @@ func TestAddGenuineAnyOfUnionIsRejected(t *testing.T) {
 	}
 }
 
+// emptyObjectOpenAPI carries a component that is an explicitly-empty object —
+// {"type":"object","properties":{}} — the shape FastAPI emits for a model with
+// no fields (a bare acknowledgement). It must bundle as a zero-field proto
+// message rather than being rejected. (#118)
+const emptyObjectOpenAPI = `{
+  "openapi": "3.0.0",
+  "info": {"title": "acme", "version": "2026-05-17"},
+  "paths": {
+    "/v3/ack": {
+      "post": {
+        "operationId": "doAck",
+        "requestBody": {"content": {"application/json": {"schema": {"$ref": "#/components/schemas/AckRequest"}}}},
+        "responses": {"200": {"content": {"application/json": {"schema": {"$ref": "#/components/schemas/Ack"}}}}}
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "AckRequest": {"type": "object", "properties": {"id": {"type": "string"}}},
+      "Ack": {"type": "object", "properties": {}}
+    }
+  }
+}`
+
+// TestAddAcceptsEmptyObjectSchema: an explicitly-empty object schema
+// ({"type":"object","properties":{}}) bundles as a zero-field proto message; a
+// bare {"type":"object"} with no properties key stays a hard error — the
+// open/untyped-object boundary. (#118)
+func TestAddAcceptsEmptyObjectSchema(t *testing.T) {
+	in := writeOpenAPI(t, emptyObjectOpenAPI)
+	out := t.TempDir()
+	if err := bundlegen.Add(in, out, false); err != nil {
+		t.Fatalf("Add explicit-empty object: %v", err)
+	}
+	b, err := bundle.Load(out)
+	if err != nil {
+		t.Fatalf("generated bundle did not load: %v", err)
+	}
+	ack, err := b.Message("wavefront.gen.v2026_05_17.Ack")
+	if err != nil {
+		t.Fatalf("resolve Ack: %v", err)
+	}
+	if n := ack.Fields().Len(); n != 0 {
+		t.Errorf("Ack should be a zero-field message, has %d field(s)", n)
+	}
+
+	// A bare {"type":"object"} with no properties key is an open/untyped object
+	// and stays rejected, so the acceptance above is a deliberate boundary.
+	const noPropsKeyOpenAPI = `{
+  "openapi": "3.0.0",
+  "info": {"title": "acme", "version": "2026-05-17"},
+  "paths": {
+    "/v3/ack": {
+      "post": {
+        "requestBody": {"content": {"application/json": {"schema": {"$ref": "#/components/schemas/Open"}}}},
+        "responses": {"200": {"content": {"application/json": {"schema": {"$ref": "#/components/schemas/Open"}}}}}
+      }
+    }
+  },
+  "components": {"schemas": {"Open": {"type": "object"}}}
+}`
+	if err := bundlegen.Add(writeOpenAPI(t, noPropsKeyOpenAPI), t.TempDir(), false); err == nil {
+		t.Error("a bare {type:object} with no properties key should still be a hard error")
+	}
+}
+
 // addLayer writes a minimal valid layer <bundleDir>/<version>/ by hand —
 // Remove only inspects the directory layout, not the layer contents.
 func addLayer(t *testing.T, bundleDir, version string) {
