@@ -20,7 +20,7 @@ func TestErrorSchemaNames(t *testing.T) {
 			"200":     {Content: jsonRef("#/components/schemas/Item")},
 			"404":     {Content: jsonRef("#/components/schemas/Problem")},
 			"409":     {Content: jsonRef("#/components/schemas/Conflict")},
-			"503":     {Content: map[string]mediaType{}},              // bodyless → Empty
+			"503":     {Content: map[string]mediaType{}},                  // bodyless → Empty
 			"206":     {Content: jsonRef("#/components/schemas/Partial")}, // ceiling → skipped
 			"default": {Content: jsonRef("#/components/schemas/Problem")}, // non-numeric → skipped
 		},
