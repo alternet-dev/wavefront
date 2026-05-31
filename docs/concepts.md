@@ -77,8 +77,8 @@ Auth-transparent. `wavefront` forwards `Authorization` (and tracing headers)
 untouched; the upstream validates exactly as it would for any other caller.
 `wavefront` never mints, validates, or inspects identity, and holds no policy.
 An upstream `401` / `403` is a legitimate outcome and reaches the client with
-its status preserved (via the bounded passthrough set), not flattened to a
-generic gateway error — see the [error contract](protocol.md#error-contract).
+its status preserved, not flattened to a generic gateway error — see the
+[error contract](protocol.md#error-contract).
 
 ## Non-goals
 

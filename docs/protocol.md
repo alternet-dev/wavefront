@@ -158,8 +158,10 @@ stability is the entire point of `wavefront`).
 **Success** is untouched passthrough: the reply is the protobuf shaped exactly
 per the contract's `response_message`. No envelope, no wrap.
 
-**`wavefront`-originated failures** (negotiation / decode / transport — distinct
-from a backend domain error) return:
+### Wavefront-originated failures
+
+Failures in negotiation, decode, or transport — distinct from a backend domain
+error — return:
 
 - a proper **HTTP status** (table below),
 - correctly-set **standard headers** — `Content-Type`, and `Retry-After` where
@@ -178,8 +180,8 @@ from a backend domain error) return:
 | `unsupported_media_type` | 415 | `Content-Type` | request `Content-Type` is not `application/protobuf`; the wrong envelope is rejected before the body is read, separating it from `decode_failed` |
 | `request_body_too_large` | 413 | `Content-Type` | inbound body exceeds `WAVEFRONT_MAX_BODY_BYTES` |
 | `upstream_timeout` | 504 | `Content-Type`, `Retry-After` | upstream exceeds `WAVEFRONT_REQUEST_TIMEOUT_MS` |
-| `upstream_error` | 502 | `Content-Type` | upstream unreachable / reply un-encodable / a non-2xx outside the passthrough set / a 3xx (redirects are not followed) |
-| `upstream_status` | 401 / 403 / 404 / 405 / 409 / 410 / 422 / 429 / 451 | `Content-Type`; `Retry-After` preserved verbatim for 429 | upstream returned a status in the bounded passthrough set — the status is relayed, the body stays the `wavefront.v0.Error` envelope so the body-type invariant holds |
+| `upstream_error` | 502 | `Content-Type` | upstream unreachable / reply un-encodable / capability ceiling (see below) / undeclared status under `strict: true` |
+| `upstream_status` | (upstream's status) | `Content-Type`; `Retry-After` preserved verbatim for 429 | upstream returned an undeclared non-success status under a non-strict contract — the upstream's status and a UTF-8-coerced relay of the upstream body are returned as the `wavefront.v0.Error` aid envelope |
 | `transform_failed` | 422 | `Content-Type` | a request transform verb can't apply — well-formed request, unprocessable under this contract's mapping |
 | `transform_failed` | 502 | `Content-Type` | a response transform verb can't apply — live internal shape drifted from the bundle's response stanzas |
 | `internal_error` | 500 | `Content-Type` | a panic in the request path or other unrecoverable fault inside wavefront itself; the recovered panic value and stack are logged, never sent on the wire |
@@ -190,27 +192,66 @@ No client library is shipped: a client checks the HTTP status; structured
 handling (reading the header or decoding `wavefront.v0.Error`) is the
 consumer's own choice.
 
-### Selective upstream passthrough
+### Upstream status dispatch
 
-Two rules govern how upstream responses reach the client.
+The upstream's status determines how wavefront shapes the response.
 
-**Non-2xx passthrough.** When the upstream returns a status in the bounded set
-`{401, 403, 404, 405, 409, 410, 422, 429, 451}`, the upstream's status is
-relayed with `X-Wavefront-Error: upstream_status` and a
-`wavefront.v0.Error{code: "upstream_status"}` body — the body type is invariant,
-the upstream's raw body is not relayed. For `429`, the upstream's `Retry-After`
-(if any) is preserved verbatim. Every other non-2xx, and every `3xx`, collapses
-to `upstream_error` (502). Upstream redirects are not followed
-(`http.Client.CheckRedirect` returns `http.ErrUseLastResponse`), so a `3xx`
-reaches the proxy as a final response and folds into the same 502. `304` is
-not part of the passthrough set — conditional requests are not part of the
-v0.x contract.
+**200–203 (success).** Status preserved, body = the encoded `response_message`.
+Success transforms run.
 
-**2xx fidelity.** `200` / `201` / `202` / `203` flow through verbatim with the
-encoded `response_message` body. `204` and `205` flow through with **no body** —
-wavefront does not encode an empty `response_message`. Out-of-contract 2xx
-codes (`206`, `207`, `208`, `226`) are shape drift and collapse to
-`upstream_error` (502).
+**204/205 (no content).** Status preserved, no body. Wavefront does not encode
+an empty `response_message`; the protocol contract is that 204/205 carry no
+body.
+
+**Capability ceiling: 206/207/208/226 and all 3xx.** Hard `upstream_error` 502
+at every strictness, regardless of any declared binding. These are wire features
+wavefront does not model: 206 (partial content / range), 207/208 (WebDAV),
+226 (IM Used / delta encoding), and redirects. Upstream redirects are not
+followed (`http.Client.CheckRedirect` returns `http.ErrUseLastResponse`), so a
+3xx reaches the proxy as a final response and falls into this ceiling.
+
+**Declared (route, status) — typed error response.** When a `versions.yaml`
+`error_messages` stanza binds the upstream's status to a proto message, the
+response is a first-class typed contract response: the upstream's status is
+preserved, the body is the bound message encoded from the upstream JSON, no
+`X-Wavefront-Error` header is set, and `X-Wavefront-Contract-Version` is set —
+exactly like a 2xx success. The declared-error body does not run the 2xx-scoped
+response transforms.
+
+**Undeclared + `strict: true` — hard 502.** When the upstream returns a status
+not declared in `error_messages` and the contract carries `strict: true`, the
+response collapses to a hard `upstream_error` 502. This protects consumers from
+unexpected shapes in strict contracts.
+
+**Undeclared + non-strict — aid envelope.** When the upstream returns a status
+not declared in `error_messages` and the contract is non-strict (the default),
+the response preserves the upstream's status, sets
+`X-Wavefront-Error: upstream_status`, and relays the upstream body verbatim
+(UTF-8-coerced) as the `wavefront.v0.Error.message` field. This is an opaque
+debugging aid — the body is the aid envelope, not a contract type. For 429, the
+upstream `Retry-After` (if any) is preserved verbatim.
+
+**Declaring error types in `versions.yaml`.** The `error_messages` map binds
+non-success statuses to proto message types drawn from the layer's descriptor
+set. A status cannot be 2xx (success shapes belong to `response_message`) or
+a capability ceiling. Unresolvable message names are refused at load.
+
+```yaml
+contracts:
+  - contract_version: "2024-11"
+    route: /v3/items
+    method: POST
+    request_message:  acme.v2024_11.CreateItemRequest
+    response_message: acme.v2024_11.Item
+    error_messages:
+      "409": acme.v2024_11.ConflictError
+      "422": acme.v2024_11.ValidationError
+    strict: true          # undeclared statuses collapse to 502, not aid-relayed
+```
+
+The generator writes `error_messages` automatically from a layer's OpenAPI
+non-success response schemas; the operator may also add or override entries
+manually.
 
 ### Disambiguating shared statuses
 
@@ -219,12 +260,14 @@ the discriminator.
 
 | HTTP | Wavefront-originated | Upstream-originated |
 |---|---|---|
-| 404 | `unknown_route` — no contract binds `(path, method)` | `upstream_status` — upstream returned 404 |
-| 422 | `transform_failed` — a request transform verb couldn't apply | `upstream_status` — upstream returned 422 |
+| 404 | `unknown_route` — no contract binds `(path, method)` | typed response (if declared) or `upstream_status` aid — upstream returned 404 |
+| 422 | `transform_failed` — a request transform verb couldn't apply | typed response (if declared) or `upstream_status` aid — upstream returned 422 |
+| *(declared status)* | — | no `X-Wavefront-Error` — a contract-declared typed response |
 
 A client that branches on HTTP status alone will conflate these; one that
 reads `X-Wavefront-Error` separates wavefront-originated from
-upstream-originated cases.
+upstream-originated cases and detects typed contract responses by the absence of
+the header.
 
 ### Stdlib-boundary statuses
 
