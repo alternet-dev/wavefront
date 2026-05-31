@@ -266,6 +266,19 @@ func Unavailable(msg string) *Error {
 	}
 }
 
+// IsCapabilityCeiling reports whether status names an HTTP feature wavefront
+// does not model and never will at the proxy edge: 206 Partial Content (no
+// Range support), 207/208 WebDAV, 226 IM Used (delta encoding), and every 3xx
+// redirect. Such a status is a hard 502 regardless of any declared binding or
+// per-route strictness — it is a capability statement, not a policy choice.
+func IsCapabilityCeiling(status int) bool {
+	switch status {
+	case 206, 207, 208, 226:
+		return true
+	}
+	return status >= 300 && status <= 399
+}
+
 // UpstreamStatus — the upstream returned a status in the bounded passthrough
 // set {401, 403, 404, 405, 409, 410, 422, 429, 451}. The upstream's status is
 // preserved on the response (so a 401 stays a 401); the body is the standard
