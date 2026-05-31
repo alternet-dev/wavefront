@@ -159,12 +159,25 @@ func Add(openapiSrc, bundleDir string, force bool) error {
 		if rerr != nil {
 			return fmt.Errorf("%s %s: %w", strings.ToUpper(o.method), o.route, rerr)
 		}
+		errNames, eerr := errorSchemaNames(o.op)
+		if eerr != nil {
+			return fmt.Errorf("%s %s: %w", strings.ToUpper(o.method), o.route, eerr)
+		}
 		roots = append(roots, reqName, respName)
+		errMsgs := make(map[string]string, len(errNames))
+		for code, name := range errNames {
+			roots = append(roots, name)
+			errMsgs[code] = pkg + "." + name
+		}
+		if len(errMsgs) == 0 {
+			errMsgs = nil
+		}
 		entries = append(entries, contractEntry{
 			Route:           o.route,
 			Method:          strings.ToUpper(o.method),
 			RequestMessage:  pkg + "." + reqName,
 			ResponseMessage: pkg + "." + respName,
+			ErrorMessages:   errMsgs,
 		})
 	}
 
@@ -270,6 +283,7 @@ type contractEntry struct {
 	Method          string
 	RequestMessage  string
 	ResponseMessage string
+	ErrorMessages   map[string]string // status → fully-qualified message; nil when none
 }
 
 // renderVersionsYAML emits the versions.yaml body for one layer. The
@@ -286,6 +300,21 @@ func renderVersionsYAML(version string, entries []contractEntry) string {
 		fmt.Fprintf(&b, "    method: %s\n", e.Method)
 		fmt.Fprintf(&b, "    request_message: %s\n", e.RequestMessage)
 		fmt.Fprintf(&b, "    response_message: %s\n", e.ResponseMessage)
+		if len(e.ErrorMessages) > 0 {
+			b.WriteString("    error_messages:\n")
+			codes := make([]string, 0, len(e.ErrorMessages))
+			for code := range e.ErrorMessages {
+				codes = append(codes, code)
+			}
+			sort.Slice(codes, func(i, j int) bool {
+				ni, _ := strconv.Atoi(codes[i])
+				nj, _ := strconv.Atoi(codes[j])
+				return ni < nj
+			})
+			for _, code := range codes {
+				fmt.Fprintf(&b, "      %q: %s\n", code, e.ErrorMessages[code])
+			}
+		}
 	}
 	return b.String()
 }
