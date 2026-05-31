@@ -468,7 +468,7 @@ func Load(dir string) (*Bundle, error) {
 				}
 				*pair.out = md
 			}
-			for status, name := range c.errorMessages {
+			for _, name := range c.errorMessages {
 				d, ferr := files.FindDescriptorByName(protoreflect.FullName(name))
 				if ferr != nil {
 					return nil, &MessageNotFoundError{Contract: c.contractVersion, Message: name}
@@ -476,7 +476,6 @@ func Load(dir string) (*Bundle, error) {
 				if _, ok := d.(protoreflect.MessageDescriptor); !ok {
 					return nil, &MessageNotFoundError{Contract: c.contractVersion, Message: name}
 				}
-				_ = status
 			}
 			if ov, hasOverride := resolutionMap[c.contractVersion]; hasOverride {
 				if ov.Transform != nil {
@@ -964,6 +963,7 @@ func validateContract(yc yamlContract) (*Contract, error) {
 			if status >= 200 && status <= 299 {
 				return nil, &ValidationError{Contract: cv, Field: "error_messages", Reason: "status " + code + " is 2xx; success bodies bind via response_message"}
 			}
+			// 206-208/226 are caught by the 2xx guard above; only 3xx reaches here.
 			if wireerror.IsCapabilityCeiling(status) {
 				return nil, &ValidationError{Contract: cv, Field: "error_messages", Reason: "status " + code + " is a capability ceiling and is always 502"}
 			}
