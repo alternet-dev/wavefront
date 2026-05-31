@@ -68,6 +68,30 @@ The full error contract is in [protocol.md](protocol.md#error-contract); the
 canonical `wavefront.v0.Error` declaration is at
 [`proto/wavefront/v0/error.proto`](../proto/wavefront/v0/error.proto).
 
+### Non-2xx responses
+
+Non-2xx responses fall into three categories. Inspect `X-Wavefront-Error` to
+distinguish them:
+
+**No `X-Wavefront-Error` header — typed contract error.** The upstream returned
+a status declared in the bundle's `error_messages` map. Decode the body as the
+proto message bound to that `(route, status)` — it is a first-class contract
+type, not a wavefront envelope. Look up the message name from the layer's
+`versions.yaml` `error_messages` entry for the received status.
+
+**`X-Wavefront-Error: upstream_status` — aid envelope.** The upstream returned a
+status not declared in `error_messages` (and the contract is non-strict). The
+body is a `wavefront.v0.Error` protobuf; its `message` field carries an
+opaque relay of the upstream body (UTF-8-coerced) as a debugging aid. The HTTP
+status is the upstream's own. For 429 responses, the upstream `Retry-After` (if
+present) is preserved verbatim.
+
+**Any other `X-Wavefront-Error` value — wavefront-originated failure.** The
+failure is an infrastructure-layer event (decode failure, route miss, timeout,
+etc.), not a backend domain error. Decode the body as `wavefront.v0.Error` and
+read `code` for the specific failure type. Full table in
+[protocol.md](protocol.md#error-contract).
+
 ## Generating message types
 
 The descriptor set is plugin-agnostic. Every protoc-based code generator
@@ -192,10 +216,17 @@ export async function createItem(name: string): Promise<{ id: string }> {
 }
 ```
 
-For structured error handling, decode `bytes` as `wavefront.v0.Error` when
-`X-Wavefront-Error` is present — generate the `wavefront/v0/error.proto`
-message into your tree (it is a tiny `{ code, message }` shape) and surface
-`code` to the caller.
+For structured error handling on non-2xx responses, branch on
+`X-Wavefront-Error`:
+
+- **header absent** — a declared typed error: look up the status in
+  `versions.yaml` `error_messages` to find the bound proto type, then decode
+  `bytes` as that type.
+- **`upstream_status`** — an undeclared upstream status (non-strict): decode
+  `bytes` as `wavefront.v0.Error`; the `message` field is an opaque relay of
+  the upstream body.
+- **any other value** — a wavefront-originated failure: decode `bytes` as
+  `wavefront.v0.Error` and surface `code` to the caller.
 
 ### Go
 
@@ -371,18 +402,20 @@ Both are valid; pick on the consumer's CI ergonomics.
 
 ## Errors
 
-`wavefront`-originated failures return a `wavefront.v0.Error { code, message }`
-body, `Content-Type: application/protobuf`, and `X-Wavefront-Error: <code>`.
-A consumer that wants typed handling decodes the body; one that only needs
-to surface the failure can branch on `X-Wavefront-Error` alone. Full table
-in [protocol.md](protocol.md#error-contract).
+A non-2xx response is one of three shapes; the `X-Wavefront-Error` response
+header is the discriminator:
 
-The codes consumers see most often:
+| `X-Wavefront-Error` | Body type | Meaning |
+|---|---|---|
+| absent | the per-status contract type from `error_messages` | a declared typed error — decode as the proto message bound to this status |
+| `upstream_status` | `wavefront.v0.Error` | undeclared upstream status (non-strict): status preserved, `message` = opaque relay of upstream body |
+| any other value | `wavefront.v0.Error` | wavefront-originated failure — decode `code` for the specific cause |
 
-- `upstream_status` — the upstream returned a domain-level non-success in the
-  bounded passthrough set ({401, 403, 404, 405, 409, 410, 422, 429, 451}).
-  The HTTP status is the upstream's; the body is still the
-  `wavefront.v0.Error` envelope.
+The `wavefront.v0.Error` codes consumers see most often:
+
+- `upstream_status` — the upstream returned a non-success status not declared
+  in `error_messages`. The HTTP status is the upstream's; the `message` field
+  relays the raw upstream body as an opaque debugging aid.
 - `unsupported_contract_version` (400) — the value the consumer sent in
   `X-Api-Contract-Version` is missing, unknown, or unsupported. Check the
   header value against the layers in the bundle.
@@ -399,6 +432,9 @@ The codes consumers see most often:
   `request_message`. Usually a stale generator vs. the bundle on the
   consumer side.
 
-On an error response with no `X-Wavefront-Error` header, the failure
-originated below `wavefront` itself (e.g. ingress 408 / 431 / 417). The
-body is whatever produced it, not necessarily a `wavefront.v0.Error`.
+On a response with no `X-Wavefront-Error` header, the body is either a
+declared typed error (see above) or a failure that originated below wavefront
+itself (e.g. ingress 408 / 431 / 417, whose body is whatever the ingress
+produced). In both cases: check whether the status has an `error_messages`
+binding in `versions.yaml` to distinguish a typed contract response from a
+below-wavefront failure.

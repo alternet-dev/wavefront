@@ -1,6 +1,8 @@
 package wireerror
 
 import (
+	"strings"
+
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protodesc"
 	"google.golang.org/protobuf/reflect/protoreflect"
@@ -50,7 +52,10 @@ func init() {
 func marshalError(code, message string) []byte {
 	m := dynamicpb.NewMessage(errorMD)
 	m.Set(errorMD.Fields().ByName("code"), protoreflect.ValueOfString(code))
-	m.Set(errorMD.Fields().ByName("message"), protoreflect.ValueOfString(message))
+	// The message may carry a relayed upstream body (aid envelope) whose bytes
+	// are not guaranteed valid UTF-8; proto3 string fields must be. Coerce
+	// invalid sequences to U+FFFD so the envelope never fails to marshal.
+	m.Set(errorMD.Fields().ByName("message"), protoreflect.ValueOfString(strings.ToValidUTF8(message, "�")))
 	b, err := proto.Marshal(m)
 	if err != nil {
 		panic("wireerror: marshaling wavefront.v0.Error: " + err.Error())

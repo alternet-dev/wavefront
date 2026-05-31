@@ -32,8 +32,8 @@ const MediaTypeProtobuf = "application/protobuf"
 // interface so it can flow through normal Go error handling.
 //
 // `status` is per-instance rather than per-code because `upstream_status`
-// parameterizes the HTTP status across the bounded passthrough set
-// {401,403,404,405,409,410,422,429,451}. Every other code in the table has a
+// parameterizes the HTTP status across any undeclared non-success status
+// outside the capability ceiling. Every other code in the table has a
 // fixed status — passed at construction and never varied.
 //
 // `retryAfter` is the verbatim header value to emit. It is empty for every
@@ -279,16 +279,17 @@ func IsCapabilityCeiling(status int) bool {
 	return status >= 300 && status <= 399
 }
 
-// UpstreamStatus — the upstream returned a status in the bounded passthrough
-// set {401, 403, 404, 405, 409, 410, 422, 429, 451}. The upstream's status is
-// preserved on the response (so a 401 stays a 401); the body is the standard
-// wavefront.v0.Error envelope so the body type invariant holds. This is the
-// first wire-error code whose HTTP status is parameterized — every other
-// constructor pins a fixed status.
+// UpstreamStatus — the upstream returned an undeclared non-success status
+// outside the capability ceiling, on a non-strict route. The upstream's status
+// is preserved on the response (so a 503 stays a 503); the body is a
+// wavefront.v0.Error aid envelope whose message field relays the upstream body
+// (UTF-8-coerced), so the wire-error body type holds while the client still
+// sees the upstream's own detail. This is the only wire-error code whose HTTP
+// status is parameterized — every other constructor pins a fixed status.
 //
 // For an upstream 429, the caller can attach the upstream's Retry-After value
 // with `.WithRetryAfter(...)`; the header is relayed verbatim. For any other
-// passthrough code, Retry-After is not emitted.
+// status, Retry-After is not emitted.
 func UpstreamStatus(httpStatus int, msg string) *Error {
 	return &Error{
 		code:    codeUpstreamStatus,
