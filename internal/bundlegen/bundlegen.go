@@ -29,6 +29,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -39,6 +40,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/alternet-dev/wavefront/internal/bundle"
+	"github.com/alternet-dev/wavefront/internal/wireerror"
 )
 
 type schema struct {
@@ -450,6 +452,43 @@ func refSchemaName(op operation, request bool) (string, error) {
 		return "", fmt.Errorf("request/response schema must be a $ref to #/components/schemas (inline schemas are unsupported)")
 	}
 	return refName(m.Schema.Ref), nil
+}
+
+// errorSchemaNames resolves a route's declared non-2xx response schemas to
+// component-schema names, keyed by the numeric status string. It skips:
+//   - 2xx statuses (the success body binds via refSchemaName(op, false));
+//   - capability-ceiling statuses (206/207/208/226 + 3xx — always 502, never
+//     typed);
+//   - non-numeric keys ("default", "4XX") — wavefront binds concrete statuses.
+//
+// A declared error response with no application/json schema is bodyless and
+// binds the synthetic Empty (a first-class typed-but-empty response, the same
+// treatment a 204 success gets). A non-empty inline schema is rejected under
+// the fail-loud doctrine, exactly like a bodied success side.
+func errorSchemaNames(op operation) (map[string]string, error) {
+	out := map[string]string{}
+	for code, resp := range op.Responses {
+		status, err := strconv.Atoi(code)
+		if err != nil {
+			continue
+		}
+		if status >= 200 && status <= 299 {
+			continue
+		}
+		if wireerror.IsCapabilityCeiling(status) {
+			continue
+		}
+		m, ok := resp.Content["application/json"]
+		if !ok || m.Schema == nil || isEmptySchema(m.Schema) {
+			out[code] = emptyMessageName
+			continue
+		}
+		if m.Schema.Ref == "" {
+			return nil, fmt.Errorf("response %s schema must be a $ref to #/components/schemas (inline schemas are unsupported)", code)
+		}
+		out[code] = refName(m.Schema.Ref)
+	}
+	return out, nil
 }
 
 // isEmptySchema reports whether sc is the empty inline schema `{}` — it
