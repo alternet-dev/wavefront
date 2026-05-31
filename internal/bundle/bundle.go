@@ -108,18 +108,19 @@ func (e *PackageCollisionError) Error() string {
 // so it satisfies an adapter Binding interface (RequestMessage/ResponseMessage)
 // structurally, with no import cycle.
 type Contract struct {
-	contractVersion string
-	route           string
-	method          string
-	requestMessage  string
-	responseMessage string
-	requestOps      []transform.Op
-	responseOps     []transform.Op
-	target          string
-	transformTarget string
-	chain           []*Contract
-	errorMessages   map[int]string
-	strict          bool
+	contractVersion  string
+	route            string
+	method           string
+	requestMessage   string
+	responseMessage  string
+	requestOps       []transform.Op
+	responseOps      []transform.Op
+	target           string
+	transformTarget  string
+	chain            []*Contract
+	errorMessages    map[int]string
+	errorResponseOps map[int][]transform.Op
+	strict           bool
 }
 
 func (c *Contract) ContractVersion() string     { return c.contractVersion }
@@ -129,9 +130,14 @@ func (c *Contract) RequestMessage() string      { return c.requestMessage }
 func (c *Contract) ResponseMessage() string     { return c.responseMessage }
 func (c *Contract) RequestOps() []transform.Op  { return c.requestOps }
 func (c *Contract) ResponseOps() []transform.Op { return c.responseOps }
-func (c *Contract) Target() string              { return c.target }
-func (c *Contract) TransformTarget() string     { return c.transformTarget }
-func (c *Contract) Chain() []*Contract          { return c.chain }
+
+// ErrorResponseOps returns the response transform ops scoped to a declared
+// error status, or nil if none are configured. A nil slice is a byte-identical
+// passthrough in transform.ApplyResponse, so callers can apply it unconditionally.
+func (c *Contract) ErrorResponseOps(status int) []transform.Op { return c.errorResponseOps[status] }
+func (c *Contract) Target() string                             { return c.target }
+func (c *Contract) TransformTarget() string                    { return c.transformTarget }
+func (c *Contract) Chain() []*Contract                         { return c.chain }
 
 // ErrorMessage returns the proto message name the contract binds for an
 // upstream status, if declared. A declared (route, status) is a first-class
@@ -307,9 +313,10 @@ type yamlResolution struct {
 }
 
 type yamlTransform struct {
-	Request  []yamlOp `yaml:"request"`
-	Response []yamlOp `yaml:"response"`
-	Target   string   `yaml:"target"`
+	Request        []yamlOp            `yaml:"request"`
+	Response       []yamlOp            `yaml:"response"`
+	ErrorResponses map[string][]yamlOp `yaml:"error_responses"`
+	Target         string              `yaml:"target"`
 }
 
 type yamlRoute struct {
@@ -490,6 +497,35 @@ func Load(dir string) (*Bundle, error) {
 					c.requestOps = reqOps
 					c.responseOps = respOps
 					c.transformTarget = strings.TrimSpace(ov.Transform.Target)
+					if len(ov.Transform.ErrorResponses) > 0 {
+						c.errorResponseOps = make(map[int][]transform.Op, len(ov.Transform.ErrorResponses))
+						for code, raw := range ov.Transform.ErrorResponses {
+							status, perr := strconv.Atoi(strings.TrimSpace(code))
+							if perr != nil {
+								return nil, &ValidationError{Contract: c.contractVersion, Field: "transform.error_responses", Reason: "status key " + code + " is not a number"}
+							}
+							name, declared := c.errorMessages[status]
+							if !declared {
+								return nil, &ValidationError{Contract: c.contractVersion, Field: "transform.error_responses", Reason: "status " + code + " has no error_messages binding to transform"}
+							}
+							ed, ferr := files.FindDescriptorByName(protoreflect.FullName(name))
+							if ferr != nil {
+								return nil, &MessageNotFoundError{Contract: c.contractVersion, Message: name}
+							}
+							emd, ok := ed.(protoreflect.MessageDescriptor)
+							if !ok {
+								return nil, &MessageNotFoundError{Contract: c.contractVersion, Message: name}
+							}
+							// The bound error message is the response cross-check target:
+							// rename.to / default.field validate against the error type,
+							// exactly as 2xx response ops validate against response_message.
+							ops, oerr := toOps(c.contractVersion, "response", raw, reqMsg, emd)
+							if oerr != nil {
+								return nil, oerr
+							}
+							c.errorResponseOps[status] = ops
+						}
+					}
 				} else {
 					// Route override — named target, no transform ops.
 					c.target = strings.TrimSpace(ov.Route.Target)

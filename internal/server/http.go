@@ -378,8 +378,9 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request) {
 	//                   → first-class typed response: upstream status
 	//                     preserved, body = bound message encoded from the
 	//                     upstream JSON, NO X-Wavefront-Error, contract-
-	//                     version header set. Declared-error bodies do not
-	//                     run the 2xx-scoped ResponseOps.
+	//                     version header set. Declared-error bodies do not run
+	//                     the 2xx-scoped ResponseOps, but they DO run the
+	//                     per-status ErrorResponseOps (error_responses ops).
 	//   undeclared + strict:true
 	//                   → hard 502 upstream_error.
 	//   undeclared + non-strict (aid envelope)
@@ -412,10 +413,18 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request) {
 		// Non-success, non-ceiling. A declared (route, status) is a first-class
 		// typed contract response — status preserved, typed body, NO
 		// X-Wavefront-Error, exactly like a 2xx. Declared-error bodies do not
-		// run the 2xx-scoped ResponseOps (status-scoped error transforms are a
-		// separate concern). An undeclared status falls to the aid envelope,
-		// unless the contract is strict (hard 502).
+		// run the 2xx-scoped ResponseOps, but they DO run the per-status
+		// ErrorResponseOps bound for that status (transform.error_responses).
+		// An undeclared status falls to the aid envelope, unless the contract
+		// is strict (hard 502).
 		if _, declared := c.ErrorMessage(uresp.StatusCode); declared {
+			for i := len(chain) - 1; i >= 0; i-- {
+				upBody, werr = transform.ApplyResponse(chain[i].ErrorResponseOps(uresp.StatusCode), upBody)
+				if werr != nil {
+					fail(werr, "response")
+					return
+				}
+			}
 			out, ct, eerr := s.adapter.EncodeError(c, uresp.StatusCode, upBody)
 			if eerr != nil {
 				fail(eerr, "")
