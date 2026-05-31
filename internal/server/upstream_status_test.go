@@ -293,6 +293,7 @@ func TestUpstreamArbitraryStatusIsAidRelayed(t *testing.T) {
 		http.StatusInternalServerError, // 500
 		http.StatusServiceUnavailable,  // 503
 	}
+	md := wavefrontErrorMD(t)
 	for _, status := range cases {
 		t.Run(strconv.Itoa(status), func(t *testing.T) {
 			b := loadBundle(t)
@@ -322,6 +323,16 @@ func TestUpstreamArbitraryStatusIsAidRelayed(t *testing.T) {
 			}
 			if got := resp.Header.Get("X-Wavefront-Error"); got != "upstream_status" {
 				t.Errorf("X-Wavefront-Error = %q, want upstream_status", got)
+			}
+
+			body, _ := io.ReadAll(resp.Body)
+			m := dynamicpb.NewMessage(md)
+			if err := proto.Unmarshal(body, m); err != nil {
+				t.Fatalf("response body is not wavefront.v0.Error: %v (raw=%q)", err, body)
+			}
+			// The upstream's raw body is relayed into the message field.
+			if got := m.Get(md.Fields().ByName("message")).String(); !strings.Contains(got, "maintenance") {
+				t.Errorf("decoded message = %q, want it to relay the upstream body", got)
 			}
 		})
 	}
