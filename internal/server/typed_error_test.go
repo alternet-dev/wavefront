@@ -167,6 +167,72 @@ contracts:
 	}
 }
 
+// TestDeclaredErrorRunsStatusScopedTransform: a resolution error_responses
+// rename fires on the (409, Item) pair before the body is encoded, so the
+// upstream `detail` field lands in the bound message's `text` field. Without
+// the transform the upstream shape does not match acme.v1.Item.
+func TestDeclaredErrorRunsStatusScopedTransform(t *testing.T) {
+	dir := bundletest.Dir(t, `version: 1
+contracts:
+  - contract_version: "2024-11"
+    route: /v3/echo
+    method: POST
+    request_message: acme.v1.Ping
+    response_message: acme.v1.Pong
+    error_messages:
+      "409": acme.v1.Item
+`)
+	bundletest.WriteResolution(t, dir, `version: 1
+overrides:
+  - contract_version: "2024-11"
+    transform:
+      error_responses:
+        "409":
+          - rename:
+              from: detail
+              to: text
+`)
+	b, err := bundle.Load(dir)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusConflict)
+		_, _ = w.Write([]byte(`{"id":7,"detail":"already exists"}`))
+	}))
+	defer upstream.Close()
+
+	s := server.New(baseCfg(upstream.URL))
+	s.SetBundle(b)
+	front := httptest.NewServer(s.DataHandler())
+	defer front.Close()
+
+	req, _ := http.NewRequest(http.MethodPost, front.URL+"/v3/echo", strings.NewReader(string(pingBytes(t, b, "hi", 1))))
+	req.Header.Set("Content-Type", "application/protobuf")
+	req.Header.Set("X-Api-Contract-Version", "2024-11")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("status = %d, want 409 (declared status preserved through the transform)", resp.StatusCode)
+	}
+	out, _ := io.ReadAll(resp.Body)
+	itemMD, _ := b.Message("acme.v1.Item")
+	item := dynamicpb.NewMessage(itemMD)
+	if err := proto.Unmarshal(out, item); err != nil {
+		t.Fatalf("body is not acme.v1.Item: %v", err)
+	}
+	if got := item.Get(itemMD.Fields().ByName("text")).String(); got != "already exists" {
+		t.Errorf("decoded text = %q, want %q (rename detail→text must fire on the 409 body)", got, "already exists")
+	}
+	if got := item.Get(itemMD.Fields().ByName("id")).Int(); got != 7 {
+		t.Errorf("decoded id = %d, want 7", got)
+	}
+}
+
 // TestAidEnvelopeRelaysInvalidUTF8Body: a non-strict undeclared status whose
 // upstream body is not valid UTF-8 must still produce a valid envelope (status
 // preserved, upstream_status) with a UTF-8-valid relayed message.
