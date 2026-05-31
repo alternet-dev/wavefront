@@ -278,15 +278,10 @@ func TestUpstreamTimeoutIs504(t *testing.T) {
 	}
 }
 
-func TestUpstreamNon2xxIs502(t *testing.T) {
+func TestUpstreamUnreachableIs502(t *testing.T) {
 	b := loadBundle(t)
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(500)
-		_, _ = w.Write([]byte(`{"err":"boom"}`))
-	}))
-	defer upstream.Close()
-
-	s := server.New(baseCfg(upstream.URL))
+	// Point at a port nothing is listening on — connection refused → upstream_error.
+	s := server.New(baseCfg("http://127.0.0.1:1"))
 	s.SetBundle(b)
 	front := httptest.NewServer(s.DataHandler())
 	defer front.Close()
