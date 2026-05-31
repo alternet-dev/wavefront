@@ -17,6 +17,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 
 	"google.golang.org/protobuf/proto"
@@ -27,6 +28,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/alternet-dev/wavefront/internal/transform"
+	"github.com/alternet-dev/wavefront/internal/wireerror"
 )
 
 const (
@@ -116,6 +118,8 @@ type Contract struct {
 	target          string
 	transformTarget string
 	chain           []*Contract
+	errorMessages   map[int]string
+	strict          bool
 }
 
 func (c *Contract) ContractVersion() string     { return c.contractVersion }
@@ -128,6 +132,19 @@ func (c *Contract) ResponseOps() []transform.Op { return c.responseOps }
 func (c *Contract) Target() string              { return c.target }
 func (c *Contract) TransformTarget() string     { return c.transformTarget }
 func (c *Contract) Chain() []*Contract          { return c.chain }
+
+// ErrorMessage returns the proto message name the contract binds for an
+// upstream status, if declared. A declared (route, status) is a first-class
+// typed contract response; an undeclared one falls to the aid envelope (or a
+// hard 502 under strict).
+func (c *Contract) ErrorMessage(status int) (string, bool) {
+	name, ok := c.errorMessages[status]
+	return name, ok
+}
+
+// Strict reports whether undeclared upstream statuses collapse to a hard 502
+// for this contract rather than the graceful aid envelope.
+func (c *Contract) Strict() bool { return c.strict }
 
 // Bundle holds the resolved view of a loaded bundle directory. Internally a
 // flat list of contracts: a layer holds one or more contracts sharing a
@@ -242,11 +259,13 @@ func (b *Bundle) Message(fullName string) (protoreflect.MessageDescriptor, error
 // --- on-disk shape (strict-decoded) ---
 
 type yamlContract struct {
-	ContractVersion string `yaml:"contract_version"`
-	Route           string `yaml:"route"`
-	Method          string `yaml:"method"`
-	RequestMessage  string `yaml:"request_message"`
-	ResponseMessage string `yaml:"response_message"`
+	ContractVersion string            `yaml:"contract_version"`
+	Route           string            `yaml:"route"`
+	Method          string            `yaml:"method"`
+	RequestMessage  string            `yaml:"request_message"`
+	ResponseMessage string            `yaml:"response_message"`
+	ErrorMessages   map[string]string `yaml:"error_messages"`
+	Strict          bool              `yaml:"strict"`
 }
 
 type yamlRename struct {
@@ -448,6 +467,16 @@ func Load(dir string) (*Bundle, error) {
 					return nil, &MessageNotFoundError{Contract: c.contractVersion, Message: pair.name}
 				}
 				*pair.out = md
+			}
+			for status, name := range c.errorMessages {
+				d, ferr := files.FindDescriptorByName(protoreflect.FullName(name))
+				if ferr != nil {
+					return nil, &MessageNotFoundError{Contract: c.contractVersion, Message: name}
+				}
+				if _, ok := d.(protoreflect.MessageDescriptor); !ok {
+					return nil, &MessageNotFoundError{Contract: c.contractVersion, Message: name}
+				}
+				_ = status
 			}
 			if ov, hasOverride := resolutionMap[c.contractVersion]; hasOverride {
 				if ov.Transform != nil {
@@ -923,6 +952,27 @@ func validateContract(yc yamlContract) (*Contract, error) {
 	}
 	if c.responseMessage == "" {
 		return nil, &ValidationError{Contract: cv, Field: "response_message", Reason: "must not be empty"}
+	}
+	c.strict = yc.Strict
+	if len(yc.ErrorMessages) > 0 {
+		c.errorMessages = make(map[int]string, len(yc.ErrorMessages))
+		for code, msg := range yc.ErrorMessages {
+			status, perr := strconv.Atoi(strings.TrimSpace(code))
+			if perr != nil {
+				return nil, &ValidationError{Contract: cv, Field: "error_messages", Reason: "status key " + code + " is not a number"}
+			}
+			if status >= 200 && status <= 299 {
+				return nil, &ValidationError{Contract: cv, Field: "error_messages", Reason: "status " + code + " is 2xx; success bodies bind via response_message"}
+			}
+			if wireerror.IsCapabilityCeiling(status) {
+				return nil, &ValidationError{Contract: cv, Field: "error_messages", Reason: "status " + code + " is a capability ceiling and is always 502"}
+			}
+			name := strings.TrimSpace(msg)
+			if name == "" {
+				return nil, &ValidationError{Contract: cv, Field: "error_messages", Reason: "status " + code + " has an empty message name"}
+			}
+			c.errorMessages[status] = name
+		}
 	}
 	return c, nil
 }
