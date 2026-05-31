@@ -47,6 +47,32 @@ func TestLoadBindsErrorMessages(t *testing.T) {
 	}
 }
 
+func TestLoadRejectsInvalidErrorMessages(t *testing.T) {
+	base := `version: 1
+contracts:
+  - contract_version: "2024-11"
+    route: /v3/echo
+    method: POST
+    request_message: acme.v1.Ping
+    response_message: acme.v1.Pong
+    error_messages:
+`
+	cases := map[string]string{
+		"2xx key":         "      \"200\": acme.v1.Item\n",
+		"ceiling key":     "      \"206\": acme.v1.Item\n",
+		"redirect key":    "      \"301\": acme.v1.Item\n",
+		"non-numeric key": "      \"default\": acme.v1.Item\n",
+		"unresolvable":    "      \"409\": acme.v1.DoesNotExist\n",
+	}
+	for name, tail := range cases {
+		t.Run(name, func(t *testing.T) {
+			if _, err := bundle.Load(bundletest.Dir(t, base+tail)); err == nil {
+				t.Fatalf("Load accepted invalid error_messages (%s); want error", name)
+			}
+		})
+	}
+}
+
 func TestLoadParsesStrictFlag(t *testing.T) {
 	versions := strings.Replace(versionsWithErrors,
 		"    error_messages:\n      \"409\": acme.v1.Item\n      \"422\": acme.v1.Meta\n",
