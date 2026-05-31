@@ -8,6 +8,9 @@ import (
 	"strings"
 	"testing"
 
+	"google.golang.org/protobuf/encoding/protojson"
+	"google.golang.org/protobuf/reflect/protoreflect"
+	"google.golang.org/protobuf/types/dynamicpb"
 	"gopkg.in/yaml.v3"
 
 	"github.com/alternet-dev/wavefront/internal/bundle"
@@ -51,6 +54,20 @@ func writeOpenAPI(t *testing.T, body string) string {
 		t.Fatalf("write openapi: %v", err)
 	}
 	return p
+}
+
+// protoName converts a plain string to a protoreflect.Name; a string variable
+// does not implicitly convert at a Fields().ByName call site (only an untyped
+// string literal does).
+func protoName(s string) protoreflect.Name { return protoreflect.Name(s) }
+
+// fullName reports the fully-qualified message name a field references, or a
+// placeholder if the field is nil or not a message field — for failure messages.
+func fullName(f protoreflect.FieldDescriptor) string {
+	if f != nil && f.Message() != nil {
+		return string(f.Message().FullName())
+	}
+	return "<non-message>"
 }
 
 func TestAddFromURL(t *testing.T) {
@@ -143,40 +160,43 @@ func TestAddProducesLoadableLayer(t *testing.T) {
 }
 
 func TestAddIsDeterministic(t *testing.T) {
-	in := writeOpenAPI(t, sampleOpenAPI)
-	o1, o2 := t.TempDir(), t.TempDir()
-	if err := bundlegen.Add(in, o1, false); err != nil {
-		t.Fatalf("add1: %v", err)
-	}
-	if err := bundlegen.Add(in, o2, false); err != nil {
-		t.Fatalf("add2: %v", err)
-	}
-	a, _ := os.ReadFile(filepath.Join(o1, "2026-05-17", "descriptors.binpb"))
-	b, _ := os.ReadFile(filepath.Join(o2, "2026-05-17", "descriptors.binpb"))
-	if string(a) != string(b) {
-		t.Error("descriptors.binpb is not byte-reproducible across runs")
+	// The untagged-union fixture embeds google/protobuf/struct.proto, so it
+	// guards reproducibility of the WKT-injection path alongside the plain one —
+	// the consumer's buf-breaking gate relies on byte-identical output run to run.
+	for name, doc := range map[string]string{"plain": sampleOpenAPI, "with struct.proto": untaggedUnionOpenAPI} {
+		t.Run(name, func(t *testing.T) {
+			in := writeOpenAPI(t, doc)
+			o1, o2 := t.TempDir(), t.TempDir()
+			if err := bundlegen.Add(in, o1, false); err != nil {
+				t.Fatalf("add1: %v", err)
+			}
+			if err := bundlegen.Add(in, o2, false); err != nil {
+				t.Fatalf("add2: %v", err)
+			}
+			a, _ := os.ReadFile(filepath.Join(o1, "2026-05-17", "descriptors.binpb"))
+			b, _ := os.ReadFile(filepath.Join(o2, "2026-05-17", "descriptors.binpb"))
+			if string(a) != string(b) {
+				t.Error("descriptors.binpb is not byte-reproducible across runs")
+			}
+		})
 	}
 }
 
 func TestAddHardErrors(t *testing.T) {
 	cases := map[string]string{
-		"oneOf": `{"openapi":"3.0.0","info":{"version":"1"},"paths":{"/x":{"post":{
-			"requestBody":{"content":{"application/json":{"schema":{"$ref":"#/components/schemas/A"}}}},
-			"responses":{"200":{"content":{"application/json":{"schema":{"$ref":"#/components/schemas/A"}}}}}}}},
-			"components":{"schemas":{"A":{"type":"object","properties":{"x":{"oneOf":[{"type":"string"}]}}}}}}`,
 		"allOf": `{"openapi":"3.0.0","info":{"version":"1"},"paths":{"/x":{"post":{
 			"requestBody":{"content":{"application/json":{"schema":{"$ref":"#/components/schemas/A"}}}},
 			"responses":{"200":{"content":{"application/json":{"schema":{"$ref":"#/components/schemas/A"}}}}}}}},
 			"components":{"schemas":{"A":{"type":"object","properties":{"x":{"allOf":[{"type":"string"}]}}}}}}`,
-		"anyOf": `{"openapi":"3.0.0","info":{"version":"1"},"paths":{"/x":{"post":{
-			"requestBody":{"content":{"application/json":{"schema":{"$ref":"#/components/schemas/A"}}}},
-			"responses":{"200":{"content":{"application/json":{"schema":{"$ref":"#/components/schemas/A"}}}}}}}},
-			"components":{"schemas":{"A":{"type":"object","properties":{"x":{"anyOf":[{"type":"string"}]}}}}}}`,
-		"additionalProperties true": `{"openapi":"3.0.0","info":{"version":"1"},"paths":{"/x":{"post":{
+		// additionalProperties:true alongside declared properties is the mixed
+		// form — an object with known fields PLUS arbitrary extras. A pure open
+		// object (#121) lowers to google.protobuf.Struct, but the mixed form has
+		// no clean proto lowering and stays a hard error.
+		"additionalProperties true mixed with properties": `{"openapi":"3.0.0","info":{"version":"1"},"paths":{"/x":{"post":{
 			"requestBody":{"content":{"application/json":{"schema":{"$ref":"#/components/schemas/A"}}}},
 			"responses":{"200":{"content":{"application/json":{"schema":{"$ref":"#/components/schemas/A"}}}}}}}},
 			"components":{"schemas":{"A":{"type":"object","additionalProperties":true,"properties":{"x":{"type":"string"}}}}}}`,
-		"additionalProperties typed dict": `{"openapi":"3.0.0","info":{"version":"1"},"paths":{"/x":{"post":{
+		"additionalProperties typed dict mixed with properties": `{"openapi":"3.0.0","info":{"version":"1"},"paths":{"/x":{"post":{
 			"requestBody":{"content":{"application/json":{"schema":{"$ref":"#/components/schemas/A"}}}},
 			"responses":{"200":{"content":{"application/json":{"schema":{"$ref":"#/components/schemas/A"}}}}}}}},
 			"components":{"schemas":{"A":{"type":"object","additionalProperties":{"type":"string"},"properties":{"x":{"type":"string"}}}}}}`,
@@ -184,14 +204,30 @@ func TestAddHardErrors(t *testing.T) {
 			"requestBody":{"content":{"application/json":{"schema":{"type":"object","properties":{"x":{"type":"string"}}}}}},
 			"responses":{"200":{"content":{"application/json":{"schema":{"$ref":"#/components/schemas/A"}}}}}}}},
 			"components":{"schemas":{"A":{"type":"object","properties":{"x":{"type":"string"}}}}}}`,
-		"untyped property": `{"openapi":"3.0.0","info":{"version":"1"},"paths":{"/x":{"post":{
+		// A property carrying a keyword but no type and no $ref (here format) is
+		// not the unconstrained {} that #121 lowers to google.protobuf.Value —
+		// it is a malformed leaf and stays a hard error.
+		"typeless non-empty property": `{"openapi":"3.0.0","info":{"version":"1"},"paths":{"/x":{"post":{
 			"requestBody":{"content":{"application/json":{"schema":{"$ref":"#/components/schemas/A"}}}},
 			"responses":{"200":{"content":{"application/json":{"schema":{"$ref":"#/components/schemas/A"}}}}}}}},
-			"components":{"schemas":{"A":{"type":"object","properties":{"x":{}}}}}}`,
+			"components":{"schemas":{"A":{"type":"object","properties":{"x":{"format":"uuid"}}}}}}`,
 		"missing info.version": `{"openapi":"3.0.0","info":{"title":"x"},"paths":{"/x":{"post":{
 			"requestBody":{"content":{"application/json":{"schema":{"$ref":"#/components/schemas/A"}}}},
 			"responses":{"200":{"content":{"application/json":{"schema":{"$ref":"#/components/schemas/A"}}}}}}}},
 			"components":{"schemas":{"A":{"type":"object","properties":{"x":{"type":"string"}}}}}}`,
+		// #121 lowers an open object or untagged union to a struct.proto well-known
+		// type when it is a property or array item. A component bound *directly* as
+		// a request/response body is a different binding — request_message would
+		// have to reference google.protobuf.{Struct,Value} instead of a generated
+		// message — and stays rejected by the object-with-properties guard.
+		"open-object component bound as body": `{"openapi":"3.0.0","info":{"version":"1"},"paths":{"/x":{"post":{
+			"requestBody":{"content":{"application/json":{"schema":{"$ref":"#/components/schemas/Open"}}}},
+			"responses":{"200":{"content":{"application/json":{"schema":{"$ref":"#/components/schemas/Open"}}}}}}}},
+			"components":{"schemas":{"Open":{"type":"object","additionalProperties":true}}}}`,
+		"untagged-union component bound as body": `{"openapi":"3.1.0","info":{"version":"1"},"paths":{"/x":{"post":{
+			"requestBody":{"content":{"application/json":{"schema":{"$ref":"#/components/schemas/Poly"}}}},
+			"responses":{"200":{"content":{"application/json":{"schema":{"$ref":"#/components/schemas/Poly"}}}}}}}},
+			"components":{"schemas":{"Poly":{"anyOf":[{"type":"string"},{"type":"integer"}]}}}}`,
 	}
 	for name, body := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -439,38 +475,260 @@ func TestAddNullableAnyOfLowersToProto3Optional(t *testing.T) {
 	}
 }
 
-// TestAddGenuineAnyOfUnionIsRejected: a real two-member polymorphic union
-// (no null member) stays a hard error, and the message points the operator
-// at the nullable shape rather than the bare "anyOf is unsupported". (#112)
-func TestAddGenuineAnyOfUnionIsRejected(t *testing.T) {
-	const unionOpenAPI = `{
+// untaggedUnionOpenAPI exercises #121's untagged-union and unconstrained-schema
+// lowering. None of these shapes carries a discriminator, so each is a bare JSON
+// value on the wire that proto3 oneof (a tagged union) cannot decode; the
+// correct target is google.protobuf.Value:
+//   - loc: an array whose items are an untagged anyOf of scalars (the FastAPI
+//     ValidationError.loc shape) → repeated google.protobuf.Value;
+//   - code: a property-level untagged oneOf → google.protobuf.Value;
+//   - either: a property-level untagged anyOf of $refs → google.protobuf.Value
+//     (the member messages A/B are absorbed into Value, not collected);
+//   - extra: an unconstrained {} → google.protobuf.Value.
+const untaggedUnionOpenAPI = `{
   "openapi": "3.1.0",
   "info": {"title": "acme", "version": "2026-05-17"},
   "paths": {
-    "/v3/x": {
+    "/v3/poly": {
       "post": {
-        "requestBody": {"content": {"application/json": {"schema": {"$ref": "#/components/schemas/A"}}}},
-        "responses": {"200": {"content": {"application/json": {"schema": {"$ref": "#/components/schemas/A"}}}}}
+        "operationId": "poly",
+        "requestBody": {"content": {"application/json": {"schema": {"$ref": "#/components/schemas/Poly"}}}},
+        "responses": {"200": {"content": {"application/json": {"schema": {"$ref": "#/components/schemas/Poly"}}}}}
       }
     }
   },
   "components": {
     "schemas": {
-      "A": {"type": "object", "properties": {
-        "either": {"anyOf": [{"$ref": "#/components/schemas/B"}, {"$ref": "#/components/schemas/C"}]}
+      "Poly": {"type": "object", "properties": {
+        "loc": {"type": "array", "items": {"anyOf": [{"type": "string"}, {"type": "integer"}]}},
+        "code": {"oneOf": [{"type": "string"}, {"type": "integer"}]},
+        "either": {"anyOf": [{"$ref": "#/components/schemas/A"}, {"$ref": "#/components/schemas/B"}]},
+        "extra": {}
       }},
-      "B": {"type": "object", "properties": {"b": {"type": "string"}}},
-      "C": {"type": "object", "properties": {"c": {"type": "string"}}}
+      "A": {"type": "object", "properties": {"a": {"type": "string"}}},
+      "B": {"type": "object", "properties": {"b": {"type": "string"}}}
     }
   }
 }`
-	in := writeOpenAPI(t, unionOpenAPI)
+
+// TestAddUntaggedUnionAndUnconstrainedLowerToValue: untagged anyOf/oneOf (no
+// discriminator) and the unconstrained {} schema lower to google.protobuf.Value,
+// singular at the property level and repeated as array items. The bundle loads,
+// which proves the synthetic google/protobuf/struct.proto dependency resolves. (#121)
+func TestAddUntaggedUnionAndUnconstrainedLowerToValue(t *testing.T) {
+	in := writeOpenAPI(t, untaggedUnionOpenAPI)
+	out := t.TempDir()
+	if err := bundlegen.Add(in, out, false); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	b, err := bundle.Load(out)
+	if err != nil {
+		t.Fatalf("generated bundle did not load: %v", err)
+	}
+	poly, err := b.Message("wavefront.gen.v2026_05_17.Poly")
+	if err != nil {
+		t.Fatalf("resolve Poly: %v", err)
+	}
+
+	loc := poly.Fields().ByName("loc")
+	if loc == nil || !loc.IsList() {
+		t.Fatal("Poly.loc (array of untagged anyOf) should be a repeated field")
+	}
+	if loc.Message() == nil || string(loc.Message().FullName()) != "google.protobuf.Value" {
+		t.Errorf("Poly.loc element type = %v, want google.protobuf.Value", fullName(loc))
+	}
+
+	for _, name := range []string{"code", "either", "extra"} {
+		f := poly.Fields().ByName(protoName(name))
+		if f == nil || f.IsList() {
+			t.Errorf("Poly.%s should be a singular message field", name)
+			continue
+		}
+		if f.Message() == nil || string(f.Message().FullName()) != "google.protobuf.Value" {
+			t.Errorf("Poly.%s type = %v, want google.protobuf.Value", name, fullName(f))
+		}
+	}
+}
+
+// openObjectOpenAPI exercises #121's open-object lowering: an object property
+// with additionalProperties:true or additionalProperties:{} and no declared
+// properties of its own is dict[str, Any] and lowers to google.protobuf.Struct.
+const openObjectOpenAPI = `{
+  "openapi": "3.0.0",
+  "info": {"title": "acme", "version": "2026-05-17"},
+  "paths": {
+    "/v3/open": {
+      "post": {
+        "operationId": "open",
+        "requestBody": {"content": {"application/json": {"schema": {"$ref": "#/components/schemas/Open"}}}},
+        "responses": {"200": {"content": {"application/json": {"schema": {"$ref": "#/components/schemas/Open"}}}}}
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "Open": {"type": "object", "properties": {
+        "meta": {"type": "object", "additionalProperties": true},
+        "bag": {"type": "object", "additionalProperties": {}}
+      }}
+    }
+  }
+}`
+
+// TestAddOpenObjectLowersToStruct: an open object (additionalProperties:true or
+// {}, no declared properties) lowers to google.protobuf.Struct rather than a
+// proto3 map; a Struct decodes a bare JSON object directly. (#121)
+func TestAddOpenObjectLowersToStruct(t *testing.T) {
+	in := writeOpenAPI(t, openObjectOpenAPI)
+	out := t.TempDir()
+	if err := bundlegen.Add(in, out, false); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	b, err := bundle.Load(out)
+	if err != nil {
+		t.Fatalf("generated bundle did not load: %v", err)
+	}
+	open, err := b.Message("wavefront.gen.v2026_05_17.Open")
+	if err != nil {
+		t.Fatalf("resolve Open: %v", err)
+	}
+	for _, name := range []string{"meta", "bag"} {
+		f := open.Fields().ByName(protoName(name))
+		if f == nil || f.IsMap() || f.IsList() {
+			t.Errorf("Open.%s (open object) should be a singular message field, not a map/list", name)
+			continue
+		}
+		if f.Message() == nil || string(f.Message().FullName()) != "google.protobuf.Struct" {
+			t.Errorf("Open.%s type = %v, want google.protobuf.Struct", name, fullName(f))
+		}
+	}
+}
+
+// TestAddDiscriminatedUnionIsRejected: an anyOf/oneOf that carries a
+// discriminator is a tagged union — it maps to proto3 oneof, which is tracked
+// separately (#129) and not yet generated. It stays a hard error rather than
+// silently collapsing to google.protobuf.Value (which would lose the tag and
+// force a breaking wire change when oneof support lands). (#121)
+func TestAddDiscriminatedUnionIsRejected(t *testing.T) {
+	const discriminatedOpenAPI = `{
+  "openapi": "3.1.0",
+  "info": {"title": "acme", "version": "2026-05-17"},
+  "paths": {
+    "/v3/pet": {
+      "post": {
+        "requestBody": {"content": {"application/json": {"schema": {"$ref": "#/components/schemas/PetEnvelope"}}}},
+        "responses": {"200": {"content": {"application/json": {"schema": {"$ref": "#/components/schemas/PetEnvelope"}}}}}
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "PetEnvelope": {"type": "object", "properties": {
+        "pet": {
+          "anyOf": [{"$ref": "#/components/schemas/Cat"}, {"$ref": "#/components/schemas/Dog"}],
+          "discriminator": {"propertyName": "petType"}
+        }
+      }},
+      "Cat": {"type": "object", "properties": {"meow": {"type": "string"}}},
+      "Dog": {"type": "object", "properties": {"woof": {"type": "string"}}}
+    }
+  }
+}`
+	in := writeOpenAPI(t, discriminatedOpenAPI)
 	err := bundlegen.Add(in, t.TempDir(), false)
 	if err == nil {
-		t.Fatal("a genuine anyOf union: expected a hard error, got nil")
+		t.Fatal("a discriminated anyOf union: expected a hard error, got nil")
 	}
-	if !strings.Contains(err.Error(), "nullable shape") {
-		t.Errorf("union rejection message = %q, want it to mention the nullable shape", err.Error())
+	// The rejection must come from the dedicated discriminated-union path (citing
+	// #129, where tagged-union → proto3 oneof is tracked), not the generic
+	// untagged-union handling that now lowers to Value.
+	if !strings.Contains(err.Error(), "discriminat") || !strings.Contains(err.Error(), "129") {
+		t.Errorf("discriminated-union rejection message = %q, want it to mention the discriminator and #129", err.Error())
+	}
+}
+
+// validationErrorOpenAPI is the FastAPI auto-emitted 422 surface: an operation
+// whose 422 binds HTTPValidationError, whose detail is a list of ValidationError
+// whose loc is an untagged anyOf of string|integer. This is the reference
+// consumer's blocker — the shape #121 exists to type.
+const validationErrorOpenAPI = `{
+  "openapi": "3.1.0",
+  "info": {"title": "acme", "version": "2026-05-17"},
+  "paths": {
+    "/v3/items": {
+      "post": {
+        "operationId": "createItem",
+        "requestBody": {"content": {"application/json": {"schema": {"$ref": "#/components/schemas/Item"}}}},
+        "responses": {
+          "200": {"content": {"application/json": {"schema": {"$ref": "#/components/schemas/Item"}}}},
+          "422": {"content": {"application/json": {"schema": {"$ref": "#/components/schemas/HTTPValidationError"}}}}
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "Item": {"type": "object", "properties": {"name": {"type": "string"}}},
+      "HTTPValidationError": {"type": "object", "properties": {
+        "detail": {"type": "array", "items": {"$ref": "#/components/schemas/ValidationError"}}
+      }},
+      "ValidationError": {"type": "object", "properties": {
+        "loc": {"type": "array", "items": {"anyOf": [{"type": "string"}, {"type": "integer"}]}},
+        "msg": {"type": "string"},
+        "type": {"type": "string"}
+      }}
+    }
+  }
+}`
+
+// TestGeneratedValidationErrorBundleDecodesRealistic422 is the end-to-end proof
+// for #121: a generated bundle whose loc field is repeated google.protobuf.Value
+// actually decodes a realistic FastAPI 422 body through the same dynamicpb +
+// protojson machinery the adapter uses. Before #121 the untagged union lowered
+// to a proto3 oneof and this Unmarshal failed (the transform_failed/502 the
+// consumer hit). The mixed string/integer loc array is the crux. (#121)
+func TestGeneratedValidationErrorBundleDecodesRealistic422(t *testing.T) {
+	in := writeOpenAPI(t, validationErrorOpenAPI)
+	out := t.TempDir()
+	if err := bundlegen.Add(in, out, false); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	b, err := bundle.Load(out)
+	if err != nil {
+		t.Fatalf("generated bundle did not load: %v", err)
+	}
+	md, err := b.Message("wavefront.gen.v2026_05_17.HTTPValidationError")
+	if err != nil {
+		t.Fatalf("resolve HTTPValidationError: %v", err)
+	}
+
+	const body = `{"detail":[{"loc":["body","items",0],"msg":"field required","type":"missing"}]}`
+	msg := dynamicpb.NewMessage(md)
+	if err := protojson.Unmarshal([]byte(body), msg); err != nil {
+		t.Fatalf("decode realistic 422 body: %v", err)
+	}
+
+	detailFD := md.Fields().ByName("detail")
+	detail := msg.Get(detailFD).List()
+	if detail.Len() != 1 {
+		t.Fatalf("detail length = %d, want 1", detail.Len())
+	}
+	ve := detail.Get(0).Message()
+	locFD := detailFD.Message().Fields().ByName("loc")
+	loc := ve.Get(locFD).List()
+	if loc.Len() != 3 {
+		t.Fatalf("loc length = %d, want 3 (mixed string/integer)", loc.Len())
+	}
+
+	// Re-encode and confirm the mixed scalars survived the round-trip.
+	reEncoded, err := protojson.Marshal(msg)
+	if err != nil {
+		t.Fatalf("re-encode: %v", err)
+	}
+	for _, want := range []string{`"body"`, `"items"`, `0`} {
+		if !strings.Contains(string(reEncoded), want) {
+			t.Errorf("re-encoded body %s missing %q", reEncoded, want)
+		}
 	}
 }
 

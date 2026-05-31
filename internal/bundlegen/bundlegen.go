@@ -1,12 +1,17 @@
 // Package bundlegen is the OpenAPI → bundle generator. It is deliberately a
 // constrained, fail-loud subset: request/response must be $ref'd component
-// object schemas; scalars, arrays, $ref, nullable→proto3-optional — both
-// 3.0's `nullable: true` and the 3.1 `anyOf:[T, {type: null}]` idiom — and a
-// typed dict (additionalProperties:<scalar|$ref>) → map<string,V> are
-// supported, and any unsupported construct (allOf, oneOf, a genuine
-// non-nullable anyOf union, an open or mixed additionalProperties, untyped,
-// inline) is a hard error rather than a lossy bundle. Output is byte-reproducible
-// (sorted, deterministic marshal) for the consumer's buf-breaking story.
+// object schemas; scalars, arrays, $ref, and nullable→proto3-optional — both
+// 3.0's `nullable: true` and the 3.1 `anyOf:[T, {type: null}]` idiom — are
+// supported. A typed dict (additionalProperties:<scalar|$ref>) lowers to
+// map<string,V>; an open object (additionalProperties:true|{}) to
+// google.protobuf.Struct; and an untagged anyOf/oneOf union or an unconstrained
+// {} schema to google.protobuf.Value (repeated as array items), with
+// google/protobuf/struct.proto embedded in the layer when any are used. A
+// discriminated anyOf/oneOf union maps to a proto3 oneof and is not yet
+// generated (#129); it — along with allOf, a mixed additionalProperties, an
+// inline (non-$ref) body, and an untyped non-empty leaf — stays a hard error
+// rather than a lossy bundle. Output is byte-reproducible (sorted, deterministic
+// marshal) for the consumer's buf-breaking story.
 //
 // Add emits one immutable layer per call. It walks every
 // paths.<path>.<method> operation in the input OpenAPI document, sorted by
@@ -37,6 +42,7 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protodesc"
 	"google.golang.org/protobuf/types/descriptorpb"
+	"google.golang.org/protobuf/types/known/structpb"
 	"gopkg.in/yaml.v3"
 
 	"github.com/alternet-dev/wavefront/internal/bundle"
@@ -54,6 +60,10 @@ type schema struct {
 	OneOf                []*schema          `json:"oneOf"`
 	AnyOf                []*schema          `json:"anyOf"`
 	AdditionalProperties json.RawMessage    `json:"additionalProperties"`
+	// Discriminator distinguishes a tagged anyOf/oneOf union (which maps to a
+	// proto3 oneof, tracked in #129) from an untagged one (which lowers to
+	// google.protobuf.Value). Held raw — only its presence matters here.
+	Discriminator json.RawMessage `json:"discriminator"`
 }
 
 type mediaType struct {
@@ -265,7 +275,19 @@ func buildDescriptors(doc openAPI, roots []string, pkg, version string) ([]byte,
 		Syntax:      proto.String("proto3"),
 		MessageType: msgs,
 	}
-	fds := &descriptorpb.FileDescriptorSet{File: []*descriptorpb.FileDescriptorProto{fdp}}
+	files := []*descriptorpb.FileDescriptorProto{fdp}
+	// Untagged unions and open objects lower to struct.proto well-known types.
+	// When any are present, embed google/protobuf/struct.proto (a dependency-free
+	// WKT) ahead of the generated file and declare the import, so the layer's
+	// FileDescriptorSet stays self-contained — the loader resolves no external
+	// registry. With no WKT use the set is byte-identical to before, preserving
+	// reproducibility for bundles that don't need it.
+	if messagesUseStructProto(msgs) {
+		structFDP := protodesc.ToFileDescriptorProto(structpb.File_google_protobuf_struct_proto)
+		fdp.Dependency = []string{structFDP.GetName()}
+		files = append([]*descriptorpb.FileDescriptorProto{structFDP}, files...)
+	}
+	fds := &descriptorpb.FileDescriptorSet{File: files}
 	if _, err := protodesc.NewFiles(fds); err != nil {
 		return nil, fmt.Errorf("generated descriptors are invalid: %w", err)
 	}
@@ -530,7 +552,7 @@ func isEmptySchema(sc *schema) bool {
 	return sc.Ref == "" && sc.Type == "" && sc.Format == "" && !sc.Nullable &&
 		len(sc.Properties) == 0 && sc.Items == nil &&
 		len(sc.AllOf) == 0 && len(sc.OneOf) == 0 && len(sc.AnyOf) == 0 &&
-		sc.AdditionalProperties == nil
+		sc.AdditionalProperties == nil && len(sc.Discriminator) == 0
 }
 
 // partitionEmpty splits roots into the real component-schema names (which
@@ -624,26 +646,135 @@ func rejectUnsupported(sc *schema) error {
 	switch {
 	case len(sc.AllOf) > 0:
 		return fmt.Errorf("allOf is unsupported")
-	case len(sc.OneOf) > 0:
-		return fmt.Errorf("oneOf is unsupported")
-	case len(sc.AnyOf) > 0:
-		// The OpenAPI 3.1 nullable idiom anyOf:[T, {type: null}] is supported
-		// (lowered to proto3 optional in buildField); a genuine polymorphic
-		// union is not.
-		if _, ok := nullableAnyOf(sc); !ok {
-			return fmt.Errorf("anyOf is supported only for the nullable shape {T, {type: null}}; refactor true unions to a $ref with a discriminator field")
-		}
+	case isDiscriminatedUnion(sc):
+		// A tagged union maps to a proto3 oneof. Lowering it to
+		// google.protobuf.Value (like an untagged union) would discard the tag
+		// and force a breaking wire change when oneof support lands, so it stays
+		// a hard error until then.
+		return fmt.Errorf("a discriminated anyOf/oneOf union maps to a proto3 oneof, which is not yet generated (tracked in #129); drop the discriminator to lower it to google.protobuf.Value, or refactor to a single $ref")
+	case len(sc.OneOf) > 0 || len(sc.AnyOf) > 0:
+		// Untagged unions and the OpenAPI 3.1 nullable idiom
+		// anyOf:[T, {type: null}] are both accepted: the nullable shape lowers
+		// to proto3 optional and every other untagged union to
+		// google.protobuf.Value, both in buildField. Nothing to reject here.
 	case sc.AdditionalProperties != nil && !additionalPropertiesFalse(sc.AdditionalProperties):
-		// A pure typed dict — additionalProperties carrying a scalar or $ref
-		// value and no declared properties of its own (Dict[str, V]) — lowers
-		// to a proto3 map field. Every other form stays unsupported: true (an
-		// open object), an inline-object value (needs a $ref), and the mixed
-		// form that also declares properties.
-		if _, ok := mapValueSchema(sc.AdditionalProperties); !ok || len(sc.Properties) > 0 {
-			return fmt.Errorf("additionalProperties is unsupported (accepted: the no-op additionalProperties: false, and a typed dict additionalProperties:<scalar|$ref> with no declared properties; rejected: true, an inline-object value, and the mixed properties+additionalProperties form)")
+		// additionalProperties forms, each accepted only with no declared
+		// properties of its own: a typed dict (scalar/$ref value) → proto3 map;
+		// an open object (true or {}) → google.protobuf.Struct. The inline-object
+		// value form, and any additionalProperties mixed with declared
+		// properties, have no clean proto lowering and stay hard errors.
+		_, isMap := mapValueSchema(sc.AdditionalProperties)
+		isOpen := additionalPropertiesOpen(sc.AdditionalProperties)
+		if (!isMap && !isOpen) || len(sc.Properties) > 0 {
+			return fmt.Errorf("additionalProperties is unsupported in this form (accepted, each without declared properties: false (no-op), a typed dict additionalProperties:<scalar|$ref>, and an open object additionalProperties:true|{}; rejected: an inline-object value, and any additionalProperties mixed with declared properties)")
 		}
 	}
 	return nil
+}
+
+// hasDiscriminator reports whether a schema carries an OpenAPI discriminator —
+// the marker of a tagged union. Only presence matters; the contents are unused.
+func hasDiscriminator(sc *schema) bool {
+	t := bytes.TrimSpace(sc.Discriminator)
+	return len(t) > 0 && !bytes.Equal(t, []byte("null"))
+}
+
+// isDiscriminatedUnion reports whether sc is an anyOf/oneOf carrying a
+// discriminator: a tagged union destined for a proto3 oneof (#129).
+func isDiscriminatedUnion(sc *schema) bool {
+	return hasDiscriminator(sc) && (len(sc.OneOf) > 0 || len(sc.AnyOf) > 0)
+}
+
+// isUntaggedUnion reports whether sc is a polymorphic union without a
+// discriminator — a oneOf, or an anyOf that is not the nullable idiom. On the
+// wire it is a bare JSON value that a proto3 oneof (a tagged union) cannot
+// decode, so it lowers to google.protobuf.Value.
+func isUntaggedUnion(sc *schema) bool {
+	if hasDiscriminator(sc) {
+		return false
+	}
+	if len(sc.OneOf) > 0 {
+		return true
+	}
+	if len(sc.AnyOf) > 0 {
+		if _, nullable := nullableAnyOf(sc); nullable {
+			return false
+		}
+		return true
+	}
+	return false
+}
+
+// additionalPropertiesOpen reports whether an additionalProperties value is the
+// open form — the literal true, or an empty schema {} — both meaning "any extra
+// value". The typed-dict form (a scalar/$ref schema) and false are not open.
+func additionalPropertiesOpen(raw json.RawMessage) bool {
+	trimmed := bytes.TrimSpace(raw)
+	if bytes.Equal(trimmed, []byte("true")) {
+		return true
+	}
+	if len(trimmed) > 0 && trimmed[0] == '{' {
+		var v schema
+		if err := json.Unmarshal(trimmed, &v); err == nil && isEmptySchema(&v) {
+			return true
+		}
+	}
+	return false
+}
+
+// isOpenObject reports whether sc is dict[str, Any] — an object with open
+// additionalProperties (true or {}) and no declared properties of its own. It
+// lowers to google.protobuf.Struct, which decodes a bare JSON object directly.
+func isOpenObject(sc *schema) bool {
+	return sc.Type == "object" && len(sc.Properties) == 0 && additionalPropertiesOpen(sc.AdditionalProperties)
+}
+
+// Fully-qualified names of the two struct.proto well-known types this generator
+// targets. One import of google/protobuf/struct.proto covers both.
+const (
+	structFullName = "google.protobuf.Struct"
+	valueFullName  = "google.protobuf.Value"
+)
+
+// wktMessageName returns the fully-qualified well-known-type a schema lowers to,
+// or "" when it is not a WKT shape: an open object → google.protobuf.Struct; an
+// untagged union or an unconstrained {} schema → google.protobuf.Value. A
+// discriminated union is not a WKT shape (it is rejected upstream).
+func wktMessageName(sc *schema) string {
+	switch {
+	case isOpenObject(sc):
+		return structFullName
+	case isUntaggedUnion(sc), isEmptySchema(sc):
+		return valueFullName
+	}
+	return ""
+}
+
+// messagesUseStructProto reports whether any built message (or nested map-entry)
+// references a struct.proto well-known type, meaning the layer must embed and
+// import google/protobuf/struct.proto.
+func messagesUseStructProto(msgs []*descriptorpb.DescriptorProto) bool {
+	for _, m := range msgs {
+		if descriptorUsesStructProto(m) {
+			return true
+		}
+	}
+	return false
+}
+
+func descriptorUsesStructProto(m *descriptorpb.DescriptorProto) bool {
+	for _, f := range m.GetField() {
+		switch f.GetTypeName() {
+		case "." + structFullName, "." + valueFullName:
+			return true
+		}
+	}
+	for _, n := range m.GetNestedType() {
+		if descriptorUsesStructProto(n) {
+			return true
+		}
+	}
+	return false
 }
 
 // additionalPropertiesFalse reports whether the additionalProperties value
@@ -798,6 +929,16 @@ func buildField(msgName, pname string, num int32, sc *schema, pkg string) (*desc
 		JsonName: proto.String(pname),
 	}
 
+	// An untagged union, an unconstrained {} schema, or an open object lowers to
+	// a struct.proto well-known type (Value or Struct) — a singular message
+	// field referencing the external type. protojson decodes either directly
+	// through the same dynamicpb machinery the adapter's success path uses.
+	if wkt := wktMessageName(sc); wkt != "" {
+		f.Type = descriptorpb.FieldDescriptorProto_TYPE_MESSAGE.Enum()
+		f.TypeName = proto.String("." + wkt)
+		return f, false, nil, nil
+	}
+
 	if sc.Ref != "" {
 		f.Type = descriptorpb.FieldDescriptorProto_TYPE_MESSAGE.Enum()
 		f.TypeName = proto.String("." + pkg + "." + refName(sc.Ref))
@@ -826,6 +967,18 @@ func buildField(msgName, pname string, num int32, sc *schema, pkg string) (*desc
 			return nil, false, nil, fmt.Errorf("array without items")
 		}
 		f.Label = descriptorpb.FieldDescriptorProto_LABEL_REPEATED.Enum()
+		if isDiscriminatedUnion(sc.Items) {
+			return nil, false, nil, fmt.Errorf("a discriminated anyOf/oneOf union as an array item maps to a proto3 oneof, which is not yet generated (tracked in #129); drop the discriminator to lower it to repeated google.protobuf.Value, or refactor to a single $ref")
+		}
+		// Array items that are an untagged union, an unconstrained {} schema, or
+		// an open object lower to a repeated struct.proto well-known type
+		// (repeated Value / repeated Struct) — the FastAPI ValidationError.loc
+		// shape (anyOf[string,integer] items) is the motivating case.
+		if wkt := wktMessageName(sc.Items); wkt != "" {
+			f.Type = descriptorpb.FieldDescriptorProto_TYPE_MESSAGE.Enum()
+			f.TypeName = proto.String("." + wkt)
+			return f, false, nil, nil
+		}
 		if sc.Items.Ref != "" {
 			f.Type = descriptorpb.FieldDescriptorProto_TYPE_MESSAGE.Enum()
 			f.TypeName = proto.String("." + pkg + "." + refName(sc.Items.Ref))
