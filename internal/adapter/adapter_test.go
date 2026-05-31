@@ -80,12 +80,19 @@ func (r testResolver) Message(name string) (protoreflect.MessageDescriptor, erro
 	return d.(protoreflect.MessageDescriptor), nil
 }
 
-type tb struct{ method, route, req, resp string }
+type tb struct {
+	method, route, req, resp string
+	errs                     map[int]string
+}
 
 func (b tb) Method() string          { return b.method }
 func (b tb) Route() string           { return b.route }
 func (b tb) RequestMessage() string  { return b.req }
 func (b tb) ResponseMessage() string { return b.resp }
+func (b tb) ErrorMessage(status int) (string, bool) {
+	name, ok := b.errs[status]
+	return name, ok
+}
 
 func msgOf(t *testing.T, files *protoregistry.Files, name string) protoreflect.MessageDescriptor {
 	t.Helper()
@@ -110,7 +117,7 @@ func TestDecodeRequestProtoToJSON(t *testing.T) {
 		t.Fatalf("marshal ping: %v", err)
 	}
 
-	call, werr := a.DecodeRequest(tb{"POST", "/v3/x", "acme.v1.Ping", "acme.v1.Pong"}, in)
+	call, werr := a.DecodeRequest(tb{method: "POST", route: "/v3/x", req: "acme.v1.Ping", resp: "acme.v1.Pong"}, in)
 	if werr != nil {
 		t.Fatalf("DecodeRequest: %v", werr)
 	}
@@ -134,7 +141,7 @@ func TestDecodeRequestProtoToJSON(t *testing.T) {
 
 func TestDecodeRequestInvalidProtobuf(t *testing.T) {
 	a := NewProtoJSON(testResolver{testFiles(t)})
-	_, werr := a.DecodeRequest(tb{"POST", "/x", "acme.v1.Ping", "acme.v1.Pong"}, []byte("\xde\xad\xbe\xef not proto"))
+	_, werr := a.DecodeRequest(tb{method: "POST", route: "/x", req: "acme.v1.Ping", resp: "acme.v1.Pong"}, []byte("\xde\xad\xbe\xef not proto"))
 	if werr == nil || werr.Code() != "decode_failed" {
 		t.Fatalf("want decode_failed, got %v", werr)
 	}
@@ -147,7 +154,7 @@ func TestDecodeRequestInvalidProtobuf(t *testing.T) {
 func TestDecodeRequestEmptyMessageSendsNoBody(t *testing.T) {
 	a := NewProtoJSON(testResolver{testFiles(t)})
 
-	call, werr := a.DecodeRequest(tb{"GET", "/v3/items/{id}", "acme.v1.Empty", "acme.v1.Pong"}, nil)
+	call, werr := a.DecodeRequest(tb{method: "GET", route: "/v3/items/{id}", req: "acme.v1.Empty", resp: "acme.v1.Pong"}, nil)
 	if werr != nil {
 		t.Fatalf("DecodeRequest: %v", werr)
 	}
@@ -169,7 +176,7 @@ func TestDecodeRequestEmptyMessageSendsNoBody(t *testing.T) {
 func TestEncodeResponseEmptyMessageReturnsNoBody(t *testing.T) {
 	a := NewProtoJSON(testResolver{testFiles(t)})
 
-	out, ct, werr := a.EncodeResponse(tb{"DELETE", "/v3/items/{id}", "acme.v1.Empty", "acme.v1.Empty"}, nil)
+	out, ct, werr := a.EncodeResponse(tb{method: "DELETE", route: "/v3/items/{id}", req: "acme.v1.Empty", resp: "acme.v1.Empty"}, nil)
 	if werr != nil {
 		t.Fatalf("EncodeResponse: %v", werr)
 	}
@@ -186,7 +193,7 @@ func TestEncodeResponseJSONToProtoWithWKT(t *testing.T) {
 	a := NewProtoJSON(testResolver{files})
 
 	upstream := []byte(`{"text":"ok","at":"2026-05-17T00:00:00Z"}`)
-	out, ct, werr := a.EncodeResponse(tb{"POST", "/x", "acme.v1.Ping", "acme.v1.Pong"}, upstream)
+	out, ct, werr := a.EncodeResponse(tb{method: "POST", route: "/x", req: "acme.v1.Ping", resp: "acme.v1.Pong"}, upstream)
 	if werr != nil {
 		t.Fatalf("EncodeResponse: %v", werr)
 	}
@@ -210,7 +217,7 @@ func TestEncodeResponseJSONToProtoWithWKT(t *testing.T) {
 
 func TestEncodeResponseInvalidJSON(t *testing.T) {
 	a := NewProtoJSON(testResolver{testFiles(t)})
-	_, _, werr := a.EncodeResponse(tb{"POST", "/x", "acme.v1.Ping", "acme.v1.Pong"}, []byte("definitely not json"))
+	_, _, werr := a.EncodeResponse(tb{method: "POST", route: "/x", req: "acme.v1.Ping", resp: "acme.v1.Pong"}, []byte("definitely not json"))
 	if werr == nil || werr.Code() != "upstream_error" {
 		t.Fatalf("want upstream_error, got %v", werr)
 	}
@@ -218,9 +225,41 @@ func TestEncodeResponseInvalidJSON(t *testing.T) {
 
 func TestUnresolvableBindingIsTypedError(t *testing.T) {
 	a := NewProtoJSON(testResolver{testFiles(t)})
-	_, werr := a.DecodeRequest(tb{"POST", "/x", "acme.v1.Ghost", "acme.v1.Pong"}, []byte{})
+	_, werr := a.DecodeRequest(tb{method: "POST", route: "/x", req: "acme.v1.Ghost", resp: "acme.v1.Pong"}, []byte{})
 	var we *wireerror.Error
 	if !errors.As(error(werr), &we) {
 		t.Fatalf("want *wireerror.Error, got %v", werr)
+	}
+}
+
+func TestEncodeErrorTypesDeclaredStatus(t *testing.T) {
+	files := testFiles(t)
+	a := NewProtoJSON(testResolver{files})
+	// Use acme.v1.Ping (int32 n=2) as the declared error message type.
+	b := tb{method: "POST", route: "/v3/echo", req: "acme.v1.Ping", resp: "acme.v1.Pong",
+		errs: map[int]string{409: "acme.v1.Ping"}}
+
+	out, ct, werr := a.EncodeError(b, 409, []byte(`{"n":42,"text":"conflict"}`))
+	if werr != nil {
+		t.Fatalf("EncodeError: %v", werr)
+	}
+	if ct != "application/protobuf" {
+		t.Errorf("content-type = %q, want application/protobuf", ct)
+	}
+	msg := dynamicpb.NewMessage(msgOf(t, files, "acme.v1.Ping"))
+	if err := proto.Unmarshal(out, msg); err != nil {
+		t.Fatalf("output is not acme.v1.Ping: %v", err)
+	}
+	if got := msg.Get(msgOf(t, files, "acme.v1.Ping").Fields().ByName("n")).Int(); got != 42 {
+		t.Errorf("decoded n = %d, want 42", got)
+	}
+}
+
+func TestEncodeErrorUnboundStatusIsUpstreamError(t *testing.T) {
+	files := testFiles(t)
+	a := NewProtoJSON(testResolver{files})
+	b := tb{method: "POST", route: "/v3/echo", resp: "acme.v1.Pong", errs: nil}
+	if _, _, werr := a.EncodeError(b, 409, []byte(`{}`)); werr == nil {
+		t.Fatal("EncodeError on an unbound status returned nil error; want upstream_error")
 	}
 }

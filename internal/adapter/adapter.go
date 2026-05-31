@@ -7,6 +7,8 @@
 package adapter
 
 import (
+	"strconv"
+
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
@@ -22,6 +24,7 @@ type Binding interface {
 	Route() string
 	RequestMessage() string
 	ResponseMessage() string
+	ErrorMessage(status int) (string, bool)
 }
 
 // UpstreamCall is the adapter's product: the intent of one upstream call. The
@@ -39,6 +42,7 @@ type UpstreamCall struct {
 type Adapter interface {
 	DecodeRequest(b Binding, in []byte) (UpstreamCall, *wireerror.Error)
 	EncodeResponse(b Binding, upstreamJSON []byte) (out []byte, contentType string, err *wireerror.Error)
+	EncodeError(b Binding, status int, upstreamJSON []byte) (out []byte, contentType string, err *wireerror.Error)
 }
 
 // MessageResolver resolves a fully-qualified proto name to its descriptor.
@@ -85,9 +89,28 @@ func (p *ProtoJSON) DecodeRequest(b Binding, in []byte) (UpstreamCall, *wireerro
 }
 
 func (p *ProtoJSON) EncodeResponse(b Binding, upstreamJSON []byte) ([]byte, string, *wireerror.Error) {
-	md, err := p.resolver.Message(b.ResponseMessage())
+	return p.encodeMessage(b.ResponseMessage(), upstreamJSON)
+}
+
+// EncodeError encodes an upstream non-success body into the message the bundle
+// binds for (route, status). The adapter is generic over descriptors, so a
+// typed error body reuses the success-path machinery. The caller resolves
+// declared-ness before calling; an unbound status is a programmer error and
+// yields upstream_error.
+func (p *ProtoJSON) EncodeError(b Binding, status int, upstreamJSON []byte) ([]byte, string, *wireerror.Error) {
+	name, ok := b.ErrorMessage(status)
+	if !ok {
+		return nil, "", wireerror.UpstreamError("no declared error message for status " + strconv.Itoa(status))
+	}
+	return p.encodeMessage(name, upstreamJSON)
+}
+
+// encodeMessage resolves name and encodes upstreamJSON into it. A zero-field
+// synthetic Empty yields no body; any other message round-trips JSON→proto.
+func (p *ProtoJSON) encodeMessage(name string, upstreamJSON []byte) ([]byte, string, *wireerror.Error) {
+	md, err := p.resolver.Message(name)
 	if err != nil {
-		return nil, "", wireerror.UpstreamError("response_message " + b.ResponseMessage() + " is not resolvable")
+		return nil, "", wireerror.UpstreamError("message " + name + " is not resolvable")
 	}
 	// A zero-field message is the synthetic Empty, bound to a bodyless response
 	// (e.g. an operation whose only declared response is 204). Encode no body
@@ -97,7 +120,7 @@ func (p *ProtoJSON) EncodeResponse(b Binding, upstreamJSON []byte) ([]byte, stri
 	}
 	msg := dynamicpb.NewMessage(md)
 	if err := protojson.Unmarshal(upstreamJSON, msg); err != nil {
-		return nil, "", wireerror.UpstreamError("upstream response did not match " + b.ResponseMessage())
+		return nil, "", wireerror.UpstreamError("upstream response did not match " + name)
 	}
 	out, err := proto.Marshal(msg)
 	if err != nil {
