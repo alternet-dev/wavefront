@@ -274,3 +274,87 @@ func TestAidEnvelopeRelaysInvalidUTF8Body(t *testing.T) {
 		t.Errorf("relayed message = %q, want it to contain the upstream body prefix", got)
 	}
 }
+
+// TestDeclaredErrorTransformAppliesAcrossChain proves the per-status error
+// transform walks the whole version chain in reverse, not just the negotiated
+// head. The chain is [2024-01 → 2024-12]: only the terminal (2024-12) binds an
+// error_responses op for 409, and the head (2024-01) binds none. The terminal's
+// rename (detail→text) must still fire, and the head's nil ops must be a clean
+// passthrough. Without the full-chain reverse walk only the head's (empty) ops
+// would run, the upstream `detail` would stay unknown to acme.v1.Item, the
+// encode would fail, and the response would collapse to 502 — so this test is
+// red without the chain loop.
+func TestDeclaredErrorTransformAppliesAcrossChain(t *testing.T) {
+	fds := bundletest.FDSBytes(t)
+	mk := func(cv string) bundletest.Layer {
+		return bundletest.Layer{
+			Name:        cv,
+			Descriptors: fds,
+			OpenAPI:     bundletest.ValidOpenAPI,
+			Versions: "version: 1\ncontracts:\n  - contract_version: \"" + cv + "\"\n" +
+				"    route: /v3/echo\n    method: POST\n" +
+				"    request_message: acme.v1.Ping\n    response_message: acme.v1.Pong\n" +
+				"    error_messages:\n      \"409\": acme.v1.Item\n",
+		}
+	}
+	dir := bundletest.MultiDir(t, mk("2024-01"), mk("2024-12"))
+	// 2024-01 (head) only chains to the terminal — it binds NO error_responses,
+	// so its ErrorResponseOps(409) is nil (the passthrough link). 2024-12
+	// (terminal) renames the upstream `detail` onto the bound acme.v1.Item.text.
+	bundletest.WriteResolution(t, dir, `version: 1
+overrides:
+  - contract_version: "2024-01"
+    transform:
+      target: "2024-12"
+  - contract_version: "2024-12"
+    transform:
+      error_responses:
+        "409":
+          - rename:
+              from: detail
+              to: text
+`)
+	b, err := bundle.Load(dir)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusConflict)
+		_, _ = w.Write([]byte(`{"id":7,"detail":"already exists"}`))
+	}))
+	defer upstream.Close()
+
+	s := server.New(baseCfg(upstream.URL))
+	s.SetBundle(b)
+	front := httptest.NewServer(s.DataHandler())
+	defer front.Close()
+
+	req, _ := http.NewRequest(http.MethodPost, front.URL+"/v3/echo", strings.NewReader(string(pingBytes(t, b, "hi", 1))))
+	req.Header.Set("Content-Type", "application/protobuf")
+	req.Header.Set("X-Api-Contract-Version", "2024-01")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("status = %d, want 409 (declared status preserved through the chained transform)", resp.StatusCode)
+	}
+	if got := resp.Header.Get("X-Wavefront-Error"); got != "" {
+		t.Errorf("X-Wavefront-Error = %q on a declared (route,status), want empty", got)
+	}
+	out, _ := io.ReadAll(resp.Body)
+	itemMD, _ := b.Message("acme.v1.Item")
+	item := dynamicpb.NewMessage(itemMD)
+	if err := proto.Unmarshal(out, item); err != nil {
+		t.Fatalf("body is not acme.v1.Item: %v", err)
+	}
+	if got := item.Get(itemMD.Fields().ByName("text")).String(); got != "already exists" {
+		t.Errorf("decoded text = %q, want %q (terminal rename detail→text must fire across the chain)", got, "already exists")
+	}
+	if got := item.Get(itemMD.Fields().ByName("id")).Int(); got != 7 {
+		t.Errorf("decoded id = %d, want 7", got)
+	}
+}
