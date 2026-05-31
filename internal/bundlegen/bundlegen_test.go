@@ -604,18 +604,21 @@ func TestAddOpenObjectLowersToStruct(t *testing.T) {
 	}
 }
 
-// TestAddDiscriminatedUnionIsRejected: an anyOf/oneOf that carries a
-// discriminator is a tagged union — it maps to proto3 oneof, which is tracked
-// separately (#129) and not yet generated. It stays a hard error rather than
-// silently collapsing to google.protobuf.Value (which would lose the tag and
-// force a breaking wire change when oneof support lands). (#121)
-func TestAddDiscriminatedUnionIsRejected(t *testing.T) {
-	const discriminatedOpenAPI = `{
+// discriminatedUnionOpenAPI exercises #129's discriminated-union lowering. A
+// tagged anyOf/oneOf (one carrying a sibling discriminator) is always a JSON
+// object, but its wire shape is flattened — the discriminator is a sibling
+// property and the member's fields sit at the top level. A proto3 oneof encodes
+// the other way (wrapped under the member key, {"cat":{...}}), so protojson
+// cannot bridge the two; the faithful lowering is google.protobuf.Struct, which
+// relays the object verbatim. pet is a property-level discriminated anyOf; pets
+// is an array whose items are a discriminated oneOf.
+const discriminatedUnionOpenAPI = `{
   "openapi": "3.1.0",
   "info": {"title": "acme", "version": "2026-05-17"},
   "paths": {
     "/v3/pet": {
       "post": {
+        "operationId": "pet",
         "requestBody": {"content": {"application/json": {"schema": {"$ref": "#/components/schemas/PetEnvelope"}}}},
         "responses": {"200": {"content": {"application/json": {"schema": {"$ref": "#/components/schemas/PetEnvelope"}}}}}
       }
@@ -626,24 +629,99 @@ func TestAddDiscriminatedUnionIsRejected(t *testing.T) {
       "PetEnvelope": {"type": "object", "properties": {
         "pet": {
           "anyOf": [{"$ref": "#/components/schemas/Cat"}, {"$ref": "#/components/schemas/Dog"}],
-          "discriminator": {"propertyName": "petType"}
-        }
+          "discriminator": {"propertyName": "petType", "mapping": {"cat": "#/components/schemas/Cat", "dog": "#/components/schemas/Dog"}}
+        },
+        "pets": {"type": "array", "items": {
+          "oneOf": [{"$ref": "#/components/schemas/Cat"}, {"$ref": "#/components/schemas/Dog"}],
+          "discriminator": {"propertyName": "petType", "mapping": {"cat": "#/components/schemas/Cat", "dog": "#/components/schemas/Dog"}}
+        }}
       }},
-      "Cat": {"type": "object", "properties": {"meow": {"type": "string"}}},
-      "Dog": {"type": "object", "properties": {"woof": {"type": "string"}}}
+      "Cat": {"type": "object", "properties": {"petType": {"type": "string"}, "meow": {"type": "string"}}},
+      "Dog": {"type": "object", "properties": {"petType": {"type": "string"}, "woof": {"type": "string"}}}
     }
   }
 }`
-	in := writeOpenAPI(t, discriminatedOpenAPI)
-	err := bundlegen.Add(in, t.TempDir(), false)
-	if err == nil {
-		t.Fatal("a discriminated anyOf union: expected a hard error, got nil")
+
+// TestAddDiscriminatedUnionLowersToStruct: a discriminated anyOf/oneOf lowers to
+// google.protobuf.Struct (singular at the property level, repeated as array
+// items) — the same WKT-fallback open objects get, because proto3 oneof's wire
+// shape is incompatible with OpenAPI's flattened discriminator. The union
+// members are absorbed into Struct, not collected as messages. (#129)
+func TestAddDiscriminatedUnionLowersToStruct(t *testing.T) {
+	in := writeOpenAPI(t, discriminatedUnionOpenAPI)
+	out := t.TempDir()
+	if err := bundlegen.Add(in, out, false); err != nil {
+		t.Fatalf("Add: %v", err)
 	}
-	// The rejection must come from the dedicated discriminated-union path (citing
-	// #129, where tagged-union → proto3 oneof is tracked), not the generic
-	// untagged-union handling that now lowers to Value.
-	if !strings.Contains(err.Error(), "discriminat") || !strings.Contains(err.Error(), "129") {
-		t.Errorf("discriminated-union rejection message = %q, want it to mention the discriminator and #129", err.Error())
+	b, err := bundle.Load(out)
+	if err != nil {
+		t.Fatalf("generated bundle did not load: %v", err)
+	}
+	env, err := b.Message("wavefront.gen.v2026_05_17.PetEnvelope")
+	if err != nil {
+		t.Fatalf("resolve PetEnvelope: %v", err)
+	}
+
+	pet := env.Fields().ByName("pet")
+	if pet == nil || pet.IsList() {
+		t.Fatal("PetEnvelope.pet (discriminated anyOf) should be a singular message field")
+	}
+	if pet.Message() == nil || string(pet.Message().FullName()) != "google.protobuf.Struct" {
+		t.Errorf("PetEnvelope.pet type = %v, want google.protobuf.Struct", fullName(pet))
+	}
+
+	pets := env.Fields().ByName("pets")
+	if pets == nil || !pets.IsList() {
+		t.Fatal("PetEnvelope.pets (array of discriminated oneOf) should be a repeated field")
+	}
+	if pets.Message() == nil || string(pets.Message().FullName()) != "google.protobuf.Struct" {
+		t.Errorf("PetEnvelope.pets element type = %v, want google.protobuf.Struct", fullName(pets))
+	}
+
+	// The union members are absorbed into Struct, so they are not collected.
+	for _, name := range []string{"Cat", "Dog"} {
+		if _, err := b.Message("wavefront.gen.v2026_05_17." + name); err == nil {
+			t.Errorf("union member %s should not be collected (absorbed into Struct)", name)
+		}
+	}
+}
+
+// TestGeneratedDiscriminatedUnionDecodesFlattenedUpstream is the end-to-end proof
+// for #129: a generated bundle whose discriminated-union fields are Struct
+// actually decodes a realistic flattened upstream body — discriminator as a
+// sibling property, member fields at the top level — through the same dynamicpb +
+// protojson machinery the adapter uses. A proto3 oneof would hard-error on this
+// shape (unknown field "petType"); Struct relays it verbatim. (#129)
+func TestGeneratedDiscriminatedUnionDecodesFlattenedUpstream(t *testing.T) {
+	in := writeOpenAPI(t, discriminatedUnionOpenAPI)
+	out := t.TempDir()
+	if err := bundlegen.Add(in, out, false); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	b, err := bundle.Load(out)
+	if err != nil {
+		t.Fatalf("generated bundle did not load: %v", err)
+	}
+	md, err := b.Message("wavefront.gen.v2026_05_17.PetEnvelope")
+	if err != nil {
+		t.Fatalf("resolve PetEnvelope: %v", err)
+	}
+
+	const body = `{"pet":{"petType":"cat","meow":"purr"},"pets":[{"petType":"dog","woof":"bark"}]}`
+	msg := dynamicpb.NewMessage(md)
+	if err := protojson.Unmarshal([]byte(body), msg); err != nil {
+		t.Fatalf("decode flattened discriminated-union body: %v", err)
+	}
+
+	// Re-encode and confirm both members survived the round-trip verbatim.
+	reEncoded, err := protojson.Marshal(msg)
+	if err != nil {
+		t.Fatalf("re-encode: %v", err)
+	}
+	for _, want := range []string{`"petType"`, `"cat"`, `"meow"`, `"purr"`, `"dog"`, `"woof"`, `"bark"`} {
+		if !strings.Contains(string(reEncoded), want) {
+			t.Errorf("re-encoded body %s missing %q", reEncoded, want)
+		}
 	}
 }
 

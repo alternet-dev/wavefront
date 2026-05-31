@@ -3,15 +3,16 @@
 // object schemas; scalars, arrays, $ref, and nullable→proto3-optional — both
 // 3.0's `nullable: true` and the 3.1 `anyOf:[T, {type: null}]` idiom — are
 // supported. A typed dict (additionalProperties:<scalar|$ref>) lowers to
-// map<string,V>; an open object (additionalProperties:true|{}) to
+// map<string,V>; an open object (additionalProperties:true|{}) and a
+// discriminated (tagged) anyOf/oneOf union — always a JSON object, but with a
+// flattened wire shape no proto3 oneof can carry — both to
 // google.protobuf.Struct; and an untagged anyOf/oneOf union or an unconstrained
 // {} schema to google.protobuf.Value (repeated as array items), with
-// google/protobuf/struct.proto embedded in the layer when any are used. A
-// discriminated anyOf/oneOf union maps to a proto3 oneof and is not yet
-// generated (#129); it — along with allOf, a mixed additionalProperties, an
-// inline (non-$ref) body, and an untyped non-empty leaf — stays a hard error
-// rather than a lossy bundle. Output is byte-reproducible (sorted, deterministic
-// marshal) for the consumer's buf-breaking story.
+// google/protobuf/struct.proto embedded in the layer when any are used. allOf, a
+// mixed additionalProperties, an inline (non-$ref) body, and an untyped
+// non-empty leaf stay hard errors rather than a lossy bundle. Output is
+// byte-reproducible (sorted, deterministic marshal) for the consumer's
+// buf-breaking story.
 //
 // Add emits one immutable layer per call. It walks every
 // paths.<path>.<method> operation in the input OpenAPI document, sorted by
@@ -60,8 +61,8 @@ type schema struct {
 	OneOf                []*schema          `json:"oneOf"`
 	AnyOf                []*schema          `json:"anyOf"`
 	AdditionalProperties json.RawMessage    `json:"additionalProperties"`
-	// Discriminator distinguishes a tagged anyOf/oneOf union (which maps to a
-	// proto3 oneof, tracked in #129) from an untagged one (which lowers to
+	// Discriminator distinguishes a tagged anyOf/oneOf union (which lowers to
+	// google.protobuf.Struct) from an untagged one (which lowers to
 	// google.protobuf.Value). Held raw — only its presence matters here.
 	Discriminator json.RawMessage `json:"discriminator"`
 }
@@ -646,17 +647,11 @@ func rejectUnsupported(sc *schema) error {
 	switch {
 	case len(sc.AllOf) > 0:
 		return fmt.Errorf("allOf is unsupported")
-	case isDiscriminatedUnion(sc):
-		// A tagged union maps to a proto3 oneof. Lowering it to
-		// google.protobuf.Value (like an untagged union) would discard the tag
-		// and force a breaking wire change when oneof support lands, so it stays
-		// a hard error until then.
-		return fmt.Errorf("a discriminated anyOf/oneOf union maps to a proto3 oneof, which is not yet generated (tracked in #129); drop the discriminator to lower it to google.protobuf.Value, or refactor to a single $ref")
 	case len(sc.OneOf) > 0 || len(sc.AnyOf) > 0:
-		// Untagged unions and the OpenAPI 3.1 nullable idiom
-		// anyOf:[T, {type: null}] are both accepted: the nullable shape lowers
-		// to proto3 optional and every other untagged union to
-		// google.protobuf.Value, both in buildField. Nothing to reject here.
+		// Every anyOf/oneOf is accepted and lowered in buildField: the OpenAPI
+		// 3.1 nullable idiom anyOf:[T, {type: null}] to proto3 optional, a
+		// discriminated (tagged) union to google.protobuf.Struct, and every
+		// other untagged union to google.protobuf.Value. Nothing to reject here.
 	case sc.AdditionalProperties != nil && !additionalPropertiesFalse(sc.AdditionalProperties):
 		// additionalProperties forms, each accepted only with no declared
 		// properties of its own: a typed dict (scalar/$ref value) → proto3 map;
@@ -680,7 +675,8 @@ func hasDiscriminator(sc *schema) bool {
 }
 
 // isDiscriminatedUnion reports whether sc is an anyOf/oneOf carrying a
-// discriminator: a tagged union destined for a proto3 oneof (#129).
+// discriminator: a tagged union. Its flattened wire shape is incompatible with
+// a proto3 oneof, so it lowers to google.protobuf.Struct (#129).
 func isDiscriminatedUnion(sc *schema) bool {
 	return hasDiscriminator(sc) && (len(sc.OneOf) > 0 || len(sc.AnyOf) > 0)
 }
@@ -737,12 +733,15 @@ const (
 )
 
 // wktMessageName returns the fully-qualified well-known-type a schema lowers to,
-// or "" when it is not a WKT shape: an open object → google.protobuf.Struct; an
-// untagged union or an unconstrained {} schema → google.protobuf.Value. A
-// discriminated union is not a WKT shape (it is rejected upstream).
+// or "" when it is not a WKT shape: an open object or a discriminated (tagged)
+// union → google.protobuf.Struct (both are always JSON objects); an untagged
+// union or an unconstrained {} schema → google.protobuf.Value. A discriminated
+// union targets Struct rather than a proto3 oneof because its flattened wire
+// shape — discriminator as a sibling property, member fields at the top level —
+// is not what protojson encodes a oneof as (wrapped under the member key).
 func wktMessageName(sc *schema) string {
 	switch {
-	case isOpenObject(sc):
+	case isOpenObject(sc), isDiscriminatedUnion(sc):
 		return structFullName
 	case isUntaggedUnion(sc), isEmptySchema(sc):
 		return valueFullName
@@ -967,13 +966,11 @@ func buildField(msgName, pname string, num int32, sc *schema, pkg string) (*desc
 			return nil, false, nil, fmt.Errorf("array without items")
 		}
 		f.Label = descriptorpb.FieldDescriptorProto_LABEL_REPEATED.Enum()
-		if isDiscriminatedUnion(sc.Items) {
-			return nil, false, nil, fmt.Errorf("a discriminated anyOf/oneOf union as an array item maps to a proto3 oneof, which is not yet generated (tracked in #129); drop the discriminator to lower it to repeated google.protobuf.Value, or refactor to a single $ref")
-		}
-		// Array items that are an untagged union, an unconstrained {} schema, or
-		// an open object lower to a repeated struct.proto well-known type
-		// (repeated Value / repeated Struct) — the FastAPI ValidationError.loc
-		// shape (anyOf[string,integer] items) is the motivating case.
+		// Array items that are an untagged union, an unconstrained {} schema, an
+		// open object, or a discriminated (tagged) union lower to a repeated
+		// struct.proto well-known type (repeated Value / repeated Struct) — the
+		// FastAPI ValidationError.loc shape (anyOf[string,integer] items) is the
+		// motivating untagged case; a discriminated oneOf item lowers to Struct.
 		if wkt := wktMessageName(sc.Items); wkt != "" {
 			f.Type = descriptorpb.FieldDescriptorProto_TYPE_MESSAGE.Enum()
 			f.TypeName = proto.String("." + wkt)
