@@ -363,47 +363,81 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// HTTP status matrix (issue #39): the upstream's status determines how
-	// wavefront shapes the response.
+	// HTTP status dispatch (issue #39 and #53): the upstream's status
+	// determines how wavefront shapes the response.
 	//
-	//   200/201/202/203 → status preserved, body = encoded response_message.
+	//   200–203         → success: status preserved, body = encoded
+	//                     response_message, success transforms run.
 	//   204/205         → status preserved, NO body (wavefront must not
 	//                     encode an empty response_message; the protocol
 	//                     contract is that 204/205 carry no body, period).
-	//   206/207/208/226 → out of contract (no Range, no WebDAV, no delta
-	//                     encoding) → upstream_error (502).
-	//   {401, 403, 404, 405, 409, 410, 422, 429, 451}
-	//                   → upstream_status passthrough: upstream's status is
-	//                     preserved; X-Wavefront-Error: upstream_status; body
-	//                     is the standard wavefront.v0.Error envelope (the
-	//                     upstream's raw body is intentionally NOT relayed —
-	//                     the v0.1 body-type invariant requires every non-
-	//                     success body to be a wavefront.v0.Error proto).
-	//                     For 429, the upstream's Retry-After (if any) is
-	//                     relayed verbatim.
-	//   any other non-2xx → upstream_error (502).
+	//   capability ceiling (206/207/208/226 + any 3xx)
+	//                   → hard 502 upstream_error at every strictness,
+	//                     regardless of any declared binding.
+	//   declared (route, status) in error_messages
+	//                   → first-class typed response: upstream status
+	//                     preserved, body = bound message encoded from the
+	//                     upstream JSON, NO X-Wavefront-Error, contract-
+	//                     version header set. Declared-error bodies do not
+	//                     run the 2xx-scoped ResponseOps.
+	//   undeclared + strict:true
+	//                   → hard 502 upstream_error.
+	//   undeclared + non-strict (aid envelope)
+	//                   → upstream status preserved,
+	//                     X-Wavefront-Error: upstream_status, upstream body
+	//                     relayed verbatim (UTF-8-coerced) in message. For
+	//                     429 the upstream Retry-After is relayed.
 	//
 	// 404 and 422 are dual-origin: a 404 from wavefront's own route gate is
 	// `unknown_route` (see the route lookup above); a 404 from the upstream
-	// is `upstream_status` here. Likewise 422 is either `transform_failed`
-	// (if a request transform stanza failed earlier) or `upstream_status`
-	// (here). Clients disambiguate via X-Wavefront-Error.
-	switch uresp.StatusCode {
-	case http.StatusOK, http.StatusCreated, http.StatusAccepted, http.StatusNonAuthoritativeInfo:
-		// fall through to transform + encode below.
-	case http.StatusNoContent, http.StatusResetContent:
-		// No body bytes — write status + the contract-version header and
-		// stop. Do NOT call EncodeResponse on the empty upstream body: the
-		// protocol contract is that 204/205 have no body, and encoding an
-		// empty response_message would violate it.
+	// is `upstream_status` here (unless declared, in which case it is typed).
+	// Likewise 422 is either `transform_failed` (if a request transform
+	// stanza failed earlier) or typed/upstream_status (here). Clients
+	// disambiguate via X-Wavefront-Error.
+	switch {
+	case uresp.StatusCode >= 200 && uresp.StatusCode <= 203:
+		// Success — fall through to transform + encode below.
+	case uresp.StatusCode == http.StatusNoContent || uresp.StatusCode == http.StatusResetContent:
+		// 204/205 carry no body; encoding an empty response_message would
+		// violate the protocol contract.
 		w.Header().Set(headerContractVersion, version)
 		w.WriteHeader(uresp.StatusCode)
 		return
-	case http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound,
-		http.StatusMethodNotAllowed, http.StatusConflict, http.StatusGone,
-		http.StatusUnprocessableEntity, http.StatusTooManyRequests,
-		http.StatusUnavailableForLegalReasons:
-		werr := wireerror.UpstreamStatus(uresp.StatusCode, "")
+	case wireerror.IsCapabilityCeiling(uresp.StatusCode):
+		// 206/207/208/226 + any 3xx: a wire feature wavefront does not model.
+		// Hard 502 at every strictness, regardless of any declared binding.
+		fail(wireerror.UpstreamError("upstream returned unsupported status "+strconv.Itoa(uresp.StatusCode)), "")
+		return
+	default:
+		// Non-success, non-ceiling. A declared (route, status) is a first-class
+		// typed contract response — status preserved, typed body, NO
+		// X-Wavefront-Error, exactly like a 2xx. Declared-error bodies do not
+		// run the 2xx-scoped ResponseOps (status-scoped error transforms are a
+		// separate concern). An undeclared status falls to the aid envelope,
+		// unless the contract is strict (hard 502).
+		if _, declared := c.ErrorMessage(uresp.StatusCode); declared {
+			out, ct, eerr := s.adapter.EncodeError(c, uresp.StatusCode, upBody)
+			if eerr != nil {
+				fail(eerr, "")
+				return
+			}
+			if ct == "" {
+				ct = wireerror.MediaTypeProtobuf
+			}
+			w.Header().Set(headerContentType, ct)
+			w.Header().Set(headerContractVersion, version)
+			w.WriteHeader(uresp.StatusCode)
+			_, _ = w.Write(out)
+			return
+		}
+		if c.Strict() {
+			fail(wireerror.UpstreamError("upstream returned undeclared status "+strconv.Itoa(uresp.StatusCode)+" (strict)"), "")
+			return
+		}
+		// Aid envelope: relay the upstream body verbatim as the message (the
+		// envelope coerces it to valid UTF-8). Empty body falls back to the
+		// default "upstream returned X" message via msgOr.
+		werr := wireerror.UpstreamStatus(uresp.StatusCode, string(upBody))
 		// For 429, relay the upstream's Retry-After verbatim if present.
 		// WithRetryAfter("") is a no-op so we don't need to branch on
 		// presence — and we never fabricate a Retry-After ourselves.
@@ -411,9 +445,6 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request) {
 			werr = werr.WithRetryAfter(uresp.Header.Get("Retry-After"))
 		}
 		fail(werr, "")
-		return
-	default:
-		fail(wireerror.UpstreamError("upstream returned status "+strconv.Itoa(uresp.StatusCode)), "")
 		return
 	}
 
