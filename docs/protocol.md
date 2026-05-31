@@ -140,8 +140,11 @@ zero times (silent no-op).
 At bundle load, paths are validated against the proto descriptors for the
 **external-targeting** stanza fields — `rename.from`, `coerce.field`,
 `optionalize.field` on request stanzas; `rename.to`, `default.field` on
-response stanzas. Internal-targeting paths get only grammar validation;
-the live upstream is the gate.
+response stanzas. `error_responses` stanzas (which transform declared error
+bodies — see the upstream status dispatch below) validate those same
+response-side fields against the message `error_messages` binds for that
+status. Internal-targeting paths get only grammar validation; the live
+upstream is the gate.
 
 ## Version negotiation
 
@@ -216,7 +219,27 @@ response is a first-class typed contract response: the upstream's status is
 preserved, the body is the bound message encoded from the upstream JSON, no
 `X-Wavefront-Error` header is set, and `X-Wavefront-Contract-Version` is set —
 exactly like a 2xx success. The declared-error body does not run the 2xx-scoped
-response transforms.
+`response` transforms; it runs the per-status `error_responses` transforms
+instead (below).
+
+**Transforming declared error bodies.** A `resolution.yaml` `transform` may
+carry an `error_responses` map — numeric status → the same four verbs
+(`rename`, `default`, `optionalize`, `coerce`) — applied only to declared
+`(route, status)` bodies, scoped per status and chained across versions like
+the `response` stanzas. Each status's ops are validated at load against that
+status's bound `error_messages` message. Undeclared statuses take the aid
+envelope, which carries no typed body to transform; keying `error_responses`
+on an undeclared status or a non-numeric key is refused at load.
+
+```yaml
+# resolution.yaml — transform a declared error body, per status
+overrides:
+  - contract_version: "2024-11"
+    transform:
+      error_responses:
+        "409":
+          - rename: { from: detail, to: message }
+```
 
 **Undeclared + `strict: true` — hard 502.** When the upstream returns a status
 not declared in `error_messages` and the contract carries `strict: true`, the
