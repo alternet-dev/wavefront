@@ -16,8 +16,8 @@ import (
 )
 
 // loadBundleWithErrors loads the fixture bundle with a 409 bound to a typed
-// error message (acme.v1.Item stands in for a domain error type) and a 503
-// declared strict-irrelevant, exercising the declared-typed path.
+// error message (acme.v1.Item stands in for a domain error type), exercising
+// the declared-typed path.
 func loadBundleWithErrors(t *testing.T) *bundle.Bundle {
 	t.Helper()
 	versions := `version: 1
@@ -84,6 +84,42 @@ func TestDeclaredErrorStatusIsTyped(t *testing.T) {
 	}
 	if got := item.Get(itemMD.Fields().ByName("id")).Int(); got != 7 {
 		t.Errorf("decoded id = %d, want 7", got)
+	}
+}
+
+// TestDeclaredErrorBodyMismatchIs502: a declared (route,status) whose upstream
+// body cannot decode into the bound message is not a typed response — the
+// encode fails and the request collapses to a hard 502 upstream_error. Here the
+// upstream sends a 409 (declared acme.v1.Item) but `id` arrives as an array,
+// which cannot decode into the int32 field.
+func TestDeclaredErrorBodyMismatchIs502(t *testing.T) {
+	b := loadBundleWithErrors(t)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusConflict)
+		_, _ = w.Write([]byte(`{"id":[1,2,3]}`))
+	}))
+	defer upstream.Close()
+
+	s := server.New(baseCfg(upstream.URL))
+	s.SetBundle(b)
+	front := httptest.NewServer(s.DataHandler())
+	defer front.Close()
+
+	req, _ := http.NewRequest(http.MethodPost, front.URL+"/v3/echo", strings.NewReader(string(pingBytes(t, b, "hi", 1))))
+	req.Header.Set("Content-Type", "application/protobuf")
+	req.Header.Set("X-Api-Contract-Version", "2024-11")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502 (declared status but unmatchable body)", resp.StatusCode)
+	}
+	if got := resp.Header.Get("X-Wavefront-Error"); got != "upstream_error" {
+		t.Errorf("X-Wavefront-Error = %q, want upstream_error", got)
 	}
 }
 

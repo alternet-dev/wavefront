@@ -120,7 +120,7 @@ func (p *ProtoJSON) encodeMessage(name string, upstreamJSON []byte) ([]byte, str
 	}
 	msg := dynamicpb.NewMessage(md)
 	if err := protojson.Unmarshal(upstreamJSON, msg); err != nil {
-		return nil, "", wireerror.UpstreamError("upstream response did not match " + name)
+		return nil, "", wireerror.UpstreamError("upstream body did not match " + name)
 	}
 	out, err := proto.Marshal(msg)
 	if err != nil {
