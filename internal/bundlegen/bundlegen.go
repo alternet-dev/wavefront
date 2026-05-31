@@ -306,6 +306,7 @@ func renderVersionsYAML(version string, entries []contractEntry) string {
 			for code := range e.ErrorMessages {
 				codes = append(codes, code)
 			}
+			// codes are all numeric: errorSchemaNames skips non-numeric status keys.
 			sort.Slice(codes, func(i, j int) bool {
 				ni, _ := strconv.Atoi(codes[i])
 				nj, _ := strconv.Atoi(codes[j])

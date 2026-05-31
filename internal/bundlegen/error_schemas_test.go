@@ -20,6 +20,7 @@ func TestErrorSchemaNames(t *testing.T) {
 			"200":     {Content: jsonRef("#/components/schemas/Item")},
 			"404":     {Content: jsonRef("#/components/schemas/Problem")},
 			"409":     {Content: jsonRef("#/components/schemas/Conflict")},
+			"503":     {Content: map[string]mediaType{}},              // bodyless → Empty
 			"206":     {Content: jsonRef("#/components/schemas/Partial")}, // ceiling → skipped
 			"default": {Content: jsonRef("#/components/schemas/Problem")}, // non-numeric → skipped
 		},
@@ -28,7 +29,7 @@ func TestErrorSchemaNames(t *testing.T) {
 	if err != nil {
 		t.Fatalf("errorSchemaNames: %v", err)
 	}
-	want := map[string]string{"404": "Problem", "409": "Conflict"}
+	want := map[string]string{"404": "Problem", "409": "Conflict", "503": emptyMessageName}
 	if len(got) != len(want) {
 		t.Fatalf("got %v, want %v", got, want)
 	}
@@ -115,6 +116,67 @@ func TestAddBindsErrorMessages(t *testing.T) {
 	name, ok := c.ErrorMessage(409)
 	if !ok || name != "wavefront.gen.v2027_01_01.Problem" {
 		t.Fatalf("ErrorMessage(409) = %q, %v; want wavefront.gen.v2027_01_01.Problem, true", name, ok)
+	}
+	if _, err := b.Message(name); err != nil {
+		t.Fatalf("error message %q not in descriptor set: %v", name, err)
+	}
+}
+
+// A declared error response with no body (no application/json content) must
+// bind the synthetic Empty, appear in versions.yaml, and be present in the
+// descriptor set — identical treatment to a bodyless 204 success side.
+const bodylessErrorOpenAPI = `{
+  "openapi": "3.0.0",
+  "info": {"title": "acme", "version": "2027-03-01"},
+  "paths": {
+    "/v3/widgets": {
+      "post": {
+        "operationId": "createWidget",
+        "requestBody": {"content": {"application/json": {"schema": {"$ref": "#/components/schemas/Widget"}}}},
+        "responses": {
+          "200": {"content": {"application/json": {"schema": {"$ref": "#/components/schemas/Widget"}}}},
+          "503": {"description": "Service Unavailable"}
+        }
+      }
+    }
+  },
+  "components": {"schemas": {
+    "Widget": {"type": "object", "properties": {"id": {"type": "string"}}}
+  }}
+}`
+
+func TestAddBindsBodylessErrorToEmpty(t *testing.T) {
+	in := filepath.Join(t.TempDir(), "openapi.json")
+	if err := os.WriteFile(in, []byte(bodylessErrorOpenAPI), 0o600); err != nil {
+		t.Fatalf("write openapi: %v", err)
+	}
+	out := t.TempDir()
+	if err := Add(in, out, false); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+
+	vy, err := os.ReadFile(filepath.Join(out, "2027-03-01", "versions.yaml"))
+	if err != nil {
+		t.Fatalf("read versions.yaml: %v", err)
+	}
+	wantBinding := `"503": wavefront.gen.v2027_03_01.Empty`
+	if !strings.Contains(string(vy), "error_messages:") ||
+		!strings.Contains(string(vy), wantBinding) {
+		t.Fatalf("versions.yaml missing bodyless 503→Empty binding:\n%s", vy)
+	}
+
+	b, err := bundle.Load(out)
+	if err != nil {
+		t.Fatalf("bundle.Load: %v", err)
+	}
+	c, ok := b.LookupRoute("/v3/widgets", "POST")
+	if !ok {
+		t.Fatal("route not bound")
+	}
+	name, ok := c.ErrorMessage(503)
+	wantName := "wavefront.gen.v2027_03_01.Empty"
+	if !ok || name != wantName {
+		t.Fatalf("ErrorMessage(503) = %q, %v; want %q, true", name, ok, wantName)
 	}
 	if _, err := b.Message(name); err != nil {
 		t.Fatalf("error message %q not in descriptor set: %v", name, err)
