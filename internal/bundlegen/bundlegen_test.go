@@ -1255,6 +1255,189 @@ overrides:
 	}
 }
 
+// sanitizeNamesOpenAPI carries names that are illegal proto identifiers: a
+// dotted field key (a Pydantic alias to a namespaced wire key) and a hyphenated
+// component name (Pydantic v2's -Input/-Output split). Both abort descriptor
+// validation on v0.7.0; the generator must sanitize the proto identifier while
+// preserving the original wire key via json_name. (#135)
+const sanitizeNamesOpenAPI = `{
+  "openapi": "3.1.0",
+  "info": {"title": "t", "version": "0"},
+  "paths": {"/x": {"get": {"operationId": "x", "responses": {"200": {"description": "ok",
+    "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Out"}}}}}}}},
+  "components": {"schemas": {
+    "Out": {"type": "object", "properties": {
+      "a.b": {"type": "string"},
+      "child": {"$ref": "#/components/schemas/My-Model"}
+    }},
+    "My-Model": {"type": "object", "properties": {"id": {"type": "string"}}}
+  }}
+}`
+
+// TestAddSanitizesIllegalFieldAndMessageNames: a dotted field key sanitizes to a
+// legal proto name with the original key preserved as json_name; a hyphenated
+// component sanitizes to a legal message name, the $ref field is rewritten to
+// point at it, and the binding resolves (the bundle loads). (#135)
+func TestAddSanitizesIllegalFieldAndMessageNames(t *testing.T) {
+	in := writeOpenAPI(t, sanitizeNamesOpenAPI)
+	out := t.TempDir()
+	if err := bundlegen.Add(in, out, false); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	b, err := bundle.Load(out)
+	if err != nil {
+		t.Fatalf("generated bundle did not load: %v", err)
+	}
+	outMsg, err := b.Message("wavefront.gen.v0.Out")
+	if err != nil {
+		t.Fatalf("resolve Out: %v", err)
+	}
+
+	// Dotted field key: proto Name sanitized, JSON (wire) key preserved.
+	ab := outMsg.Fields().ByJSONName("a.b")
+	if ab == nil {
+		t.Fatal(`Out has no field with json_name "a.b"`)
+	}
+	if got := string(ab.Name()); got != "a_b" {
+		t.Errorf(`dotted field proto name = %q, want "a_b"`, got)
+	}
+	if got := ab.JSONName(); got != "a.b" {
+		t.Errorf(`dotted field json_name = %q, want "a.b" (wire key must be preserved)`, got)
+	}
+
+	// Hyphenated message: sanitized, resolvable, and the $ref field points at it.
+	if _, err := b.Message("wavefront.gen.v0.My_Model"); err != nil {
+		t.Errorf("sanitized message My_Model not resolvable: %v", err)
+	}
+	child := outMsg.Fields().ByName(protoName("child"))
+	if child == nil || child.Message() == nil || string(child.Message().FullName()) != "wavefront.gen.v0.My_Model" {
+		t.Errorf("child field should reference wavefront.gen.v0.My_Model, got %v", fullName(child))
+	}
+
+	// Wire round-trip: the original dotted key survives through protojson.
+	const body = `{"a.b":"hi","child":{"id":"x"}}`
+	msg := dynamicpb.NewMessage(outMsg)
+	if err := protojson.Unmarshal([]byte(body), msg); err != nil {
+		t.Fatalf("decode body with dotted key: %v", err)
+	}
+	re, err := protojson.Marshal(msg)
+	if err != nil {
+		t.Fatalf("re-encode: %v", err)
+	}
+	if !strings.Contains(string(re), `"a.b"`) {
+		t.Errorf(`re-encoded body %s lost the dotted wire key "a.b"`, re)
+	}
+}
+
+// sanitizeCollisionOpenAPI: two distinct keys ("a.b", "a-b") both sanitize to
+// "a_b". They must get distinct proto field names (disambiguation) while keeping
+// their distinct wire keys, never silently fused. (#135)
+const sanitizeCollisionOpenAPI = `{
+  "openapi": "3.1.0",
+  "info": {"title": "t", "version": "0"},
+  "paths": {"/x": {"get": {"operationId": "x", "responses": {"200": {"description": "ok",
+    "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Out"}}}}}}}},
+  "components": {"schemas": {
+    "Out": {"type": "object", "properties": {
+      "a.b": {"type": "string"},
+      "a-b": {"type": "integer"}
+    }}
+  }}
+}`
+
+// TestAddDisambiguatesSanitizedFieldNameCollisions: colliding sanitized names
+// are disambiguated, not fused — both wire keys survive. (#135)
+func TestAddDisambiguatesSanitizedFieldNameCollisions(t *testing.T) {
+	in := writeOpenAPI(t, sanitizeCollisionOpenAPI)
+	out := t.TempDir()
+	if err := bundlegen.Add(in, out, false); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	b, err := bundle.Load(out)
+	if err != nil {
+		t.Fatalf("generated bundle did not load: %v", err)
+	}
+	outMsg, err := b.Message("wavefront.gen.v0.Out")
+	if err != nil {
+		t.Fatalf("resolve Out: %v", err)
+	}
+	dot := outMsg.Fields().ByJSONName("a.b")
+	hyphen := outMsg.Fields().ByJSONName("a-b")
+	if dot == nil || hyphen == nil {
+		t.Fatal(`both "a.b" and "a-b" fields must be present by json_name`)
+	}
+	if dot.Name() == hyphen.Name() {
+		t.Errorf("colliding fields share proto name %q; must be disambiguated", dot.Name())
+	}
+	for _, f := range []protoreflect.FieldDescriptor{dot, hyphen} {
+		if name := string(f.Name()); strings.ContainsAny(name, ".-") {
+			t.Errorf("proto field name %q still contains illegal characters", name)
+		}
+	}
+	const body = `{"a.b":"hi","a-b":7}`
+	msg := dynamicpb.NewMessage(outMsg)
+	if err := protojson.Unmarshal([]byte(body), msg); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	re, _ := protojson.Marshal(msg)
+	for _, want := range []string{`"a.b"`, `"a-b"`} {
+		if !strings.Contains(string(re), want) {
+			t.Errorf("re-encoded %s missing wire key %s", re, want)
+		}
+	}
+}
+
+// sanitizeMessageCollisionOpenAPI: two distinct components ("My-Model",
+// "My_Model") both sanitize to "My_Model". They must remain two distinct
+// messages, each $ref resolving to the right one. (#135)
+const sanitizeMessageCollisionOpenAPI = `{
+  "openapi": "3.1.0",
+  "info": {"title": "t", "version": "0"},
+  "paths": {"/x": {"get": {"operationId": "x", "responses": {"200": {"description": "ok",
+    "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Out"}}}}}}}},
+  "components": {"schemas": {
+    "Out": {"type": "object", "properties": {
+      "a": {"$ref": "#/components/schemas/My-Model"},
+      "b": {"$ref": "#/components/schemas/My_Model"}
+    }},
+    "My-Model": {"type": "object", "properties": {"x": {"type": "string"}}},
+    "My_Model": {"type": "object", "properties": {"y": {"type": "string"}}}
+  }}
+}`
+
+// TestAddDisambiguatesSanitizedMessageNameCollisions: colliding component names
+// stay two distinct messages, and each $ref resolves to the correct one. (#135)
+func TestAddDisambiguatesSanitizedMessageNameCollisions(t *testing.T) {
+	in := writeOpenAPI(t, sanitizeMessageCollisionOpenAPI)
+	out := t.TempDir()
+	if err := bundlegen.Add(in, out, false); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	b, err := bundle.Load(out)
+	if err != nil {
+		t.Fatalf("generated bundle did not load: %v", err)
+	}
+	outMsg, err := b.Message("wavefront.gen.v0.Out")
+	if err != nil {
+		t.Fatalf("resolve Out: %v", err)
+	}
+	a := outMsg.Fields().ByName(protoName("a"))
+	bb := outMsg.Fields().ByName(protoName("b"))
+	if a == nil || a.Message() == nil || bb == nil || bb.Message() == nil {
+		t.Fatal("both a and b should be message fields")
+	}
+	if a.Message().FullName() == bb.Message().FullName() {
+		t.Fatalf("colliding components fused to one message %q", a.Message().FullName())
+	}
+	// My-Model carries x, My_Model carries y; each $ref must reach its own.
+	if a.Message().Fields().ByName(protoName("x")) == nil {
+		t.Errorf("field a ($ref My-Model) resolved to %q, which lacks field x", a.Message().FullName())
+	}
+	if bb.Message().Fields().ByName(protoName("y")) == nil {
+		t.Errorf("field b ($ref My_Model) resolved to %q, which lacks field y", bb.Message().FullName())
+	}
+}
+
 // bareObjectOpenAPI carries a bare {"type":"object"} — type present, no
 // properties, no additionalProperties — as a singular property (ctx) and an
 // array item (extras). It is semantically identical to additionalProperties:

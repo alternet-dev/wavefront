@@ -161,7 +161,15 @@ func Add(openapiSrc, bundleDir string, force bool) error {
 	// deterministically.
 	pkg := protoPackage(version)
 	roots := make([]string, 0, 2*len(ops))
-	entries := make([]contractEntry, 0, len(ops))
+	// rawBinding holds one operation's component names before sanitization. The
+	// binding message names are filled in after buildDescriptors, from the same
+	// sanitized-name map the descriptors use, so a renamed component (e.g. an
+	// illegal-identifier component) still resolves at load.
+	type rawBinding struct {
+		route, method, req, resp string
+		errs                     map[string]string // numeric status -> raw component name
+	}
+	raws := make([]rawBinding, 0, len(ops))
 	for _, o := range ops {
 		reqName, rerr := refSchemaName(o.op, true)
 		if rerr != nil {
@@ -176,26 +184,33 @@ func Add(openapiSrc, bundleDir string, force bool) error {
 			return fmt.Errorf("%s %s: %w", strings.ToUpper(o.method), o.route, eerr)
 		}
 		roots = append(roots, reqName, respName)
-		errMsgs := make(map[string]string, len(errNames))
-		for code, name := range errNames {
+		for _, name := range errNames {
 			roots = append(roots, name)
-			errMsgs[code] = pkg + "." + name
 		}
-		if len(errMsgs) == 0 {
-			errMsgs = nil
-		}
-		entries = append(entries, contractEntry{
-			Route:           o.route,
-			Method:          strings.ToUpper(o.method),
-			RequestMessage:  pkg + "." + reqName,
-			ResponseMessage: pkg + "." + respName,
-			ErrorMessages:   errMsgs,
-		})
+		raws = append(raws, rawBinding{o.route, strings.ToUpper(o.method), reqName, respName, errNames})
 	}
 
-	descBytes, err := buildDescriptors(doc, roots, pkg, version)
+	descBytes, msgNames, err := buildDescriptors(doc, roots, pkg, version)
 	if err != nil {
 		return err
+	}
+
+	entries := make([]contractEntry, 0, len(raws))
+	for _, r := range raws {
+		var errMsgs map[string]string
+		if len(r.errs) > 0 {
+			errMsgs = make(map[string]string, len(r.errs))
+			for code, name := range r.errs {
+				errMsgs[code] = pkg + "." + msgNames[name]
+			}
+		}
+		entries = append(entries, contractEntry{
+			Route:           r.route,
+			Method:          r.method,
+			RequestMessage:  pkg + "." + msgNames[r.req],
+			ResponseMessage: pkg + "." + msgNames[r.resp],
+			ErrorMessages:   errMsgs,
+		})
 	}
 
 	versions := renderVersionsYAML(version, entries)
@@ -235,13 +250,13 @@ func protoPackage(version string) string {
 // touched schema against the fail-loud doctrine, and returns the
 // deterministic wire bytes of a FileDescriptorSet that holds one
 // FileDescriptorProto for the package.
-func buildDescriptors(doc openAPI, roots []string, pkg, version string) ([]byte, error) {
+func buildDescriptors(doc openAPI, roots []string, pkg, version string) ([]byte, map[string]string, error) {
 	// The synthetic Empty message has no OpenAPI component, so split it out
 	// before walking the document and inject it directly below.
 	realRoots, needEmpty := partitionEmpty(roots)
 	needed, err := collectSchemas(doc, realRoots)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	// Sort schema names so descriptor message order is stable: the
@@ -257,16 +272,22 @@ func buildDescriptors(doc openAPI, roots []string, pkg, version string) ([]byte,
 	}
 	sort.Strings(names)
 
+	// Map every message name to a unique legal proto identifier (identity for
+	// already-legal, collision-free names). Threaded through field and TypeName
+	// emission so the descriptors, internal references, and the versions.yaml
+	// bindings all agree on the sanitized name.
+	msgNames := sanitizeMessageNames(names)
+
 	msgs := make([]*descriptorpb.DescriptorProto, 0, len(names))
 	for _, n := range names {
 		if needed[n] == nil {
 			// Synthetic zero-field Empty message.
-			msgs = append(msgs, &descriptorpb.DescriptorProto{Name: proto.String(n)})
+			msgs = append(msgs, &descriptorpb.DescriptorProto{Name: proto.String(msgNames[n])})
 			continue
 		}
-		dp, derr := buildMessage(n, needed[n], pkg)
+		dp, derr := buildMessage(msgNames[n], needed[n], pkg, msgNames)
 		if derr != nil {
-			return nil, derr
+			return nil, nil, derr
 		}
 		msgs = append(msgs, dp)
 	}
@@ -291,13 +312,13 @@ func buildDescriptors(doc openAPI, roots []string, pkg, version string) ([]byte,
 	}
 	fds := &descriptorpb.FileDescriptorSet{File: files}
 	if _, err := protodesc.NewFiles(fds); err != nil {
-		return nil, fmt.Errorf("generated descriptors are invalid: %w", err)
+		return nil, nil, fmt.Errorf("generated descriptors are invalid: %w", err)
 	}
 	descBytes, err := proto.MarshalOptions{Deterministic: true}.Marshal(fds)
 	if err != nil {
-		return nil, fmt.Errorf("marshal descriptors: %w", err)
+		return nil, nil, fmt.Errorf("marshal descriptors: %w", err)
 	}
-	return descBytes, nil
+	return descBytes, msgNames, nil
 }
 
 // contractEntry is one row in versions.yaml.contracts. Fields are written
@@ -884,7 +905,7 @@ func isNullableLeaf(sc *schema) bool {
 	return false
 }
 
-func buildMessage(name string, sc *schema, pkg string) (*descriptorpb.DescriptorProto, error) {
+func buildMessage(name string, sc *schema, pkg string, msgNames map[string]string) (*descriptorpb.DescriptorProto, error) {
 	props := make([]string, 0, len(sc.Properties))
 	for p := range sc.Properties {
 		props = append(props, p)
@@ -893,15 +914,19 @@ func buildMessage(name string, sc *schema, pkg string) (*descriptorpb.Descriptor
 
 	dp := &descriptorpb.DescriptorProto{Name: proto.String(name)}
 	num := int32(1)
+	usedFields := make(map[string]bool, len(props))
 	for _, pname := range props {
-		f, optional, nested, err := buildField(name, pname, num, sc.Properties[pname], pkg)
+		// Sanitize the proto field name (buildField preserves the original key
+		// as json_name); disambiguate within this message's field set.
+		fname := uniqueIdent(pname, usedFields)
+		f, optional, nested, err := buildField(name, pname, fname, num, sc.Properties[pname], pkg, msgNames)
 		if err != nil {
 			return nil, fmt.Errorf("message %q field %q: %w", name, pname, err)
 		}
 		if optional {
 			idx := int32(len(dp.OneofDecl))
 			dp.OneofDecl = append(dp.OneofDecl, &descriptorpb.OneofDescriptorProto{
-				Name: proto.String("_" + pname),
+				Name: proto.String("_" + fname),
 			})
 			f.OneofIndex = proto.Int32(idx)
 			f.Proto3Optional = proto.Bool(true)
@@ -915,20 +940,22 @@ func buildMessage(name string, sc *schema, pkg string) (*descriptorpb.Descriptor
 	return dp, nil
 }
 
-func buildField(msgName, pname string, num int32, sc *schema, pkg string) (*descriptorpb.FieldDescriptorProto, bool, *descriptorpb.DescriptorProto, error) {
+func buildField(msgName, pname, fname string, num int32, sc *schema, pkg string, msgNames map[string]string) (*descriptorpb.FieldDescriptorProto, bool, *descriptorpb.DescriptorProto, error) {
 	// OpenAPI 3.1 nullable idiom: anyOf:[T, {type: null}] lowers the same as
 	// 3.0's nullable:true — build the field from the non-null member T and
 	// mark it proto3 optional.
 	if inner, ok := nullableAnyOf(sc); ok {
-		f, _, nested, err := buildField(msgName, pname, num, inner, pkg)
+		f, _, nested, err := buildField(msgName, pname, fname, num, inner, pkg, msgNames)
 		if err != nil {
 			return nil, false, nil, err
 		}
 		return f, true, nested, nil
 	}
 
+	// Name is the sanitized proto identifier; json_name preserves the original
+	// OpenAPI key, which is what protojson reads and writes on the wire.
 	f := &descriptorpb.FieldDescriptorProto{
-		Name:     proto.String(pname),
+		Name:     proto.String(fname),
 		Number:   proto.Int32(num),
 		Label:    descriptorpb.FieldDescriptorProto_LABEL_OPTIONAL.Enum(),
 		JsonName: proto.String(pname),
@@ -946,7 +973,7 @@ func buildField(msgName, pname string, num int32, sc *schema, pkg string) (*desc
 
 	if sc.Ref != "" {
 		f.Type = descriptorpb.FieldDescriptorProto_TYPE_MESSAGE.Enum()
-		f.TypeName = proto.String("." + pkg + "." + refName(sc.Ref))
+		f.TypeName = proto.String("." + pkg + "." + msgNames[refName(sc.Ref)])
 		return f, false, nil, nil
 	}
 
@@ -984,7 +1011,7 @@ func buildField(msgName, pname string, num int32, sc *schema, pkg string) (*desc
 		}
 		if sc.Items.Ref != "" {
 			f.Type = descriptorpb.FieldDescriptorProto_TYPE_MESSAGE.Enum()
-			f.TypeName = proto.String("." + pkg + "." + refName(sc.Items.Ref))
+			f.TypeName = proto.String("." + pkg + "." + msgNames[refName(sc.Items.Ref)])
 			return f, false, nil, nil
 		}
 		switch sc.Items.Type {
@@ -1006,7 +1033,7 @@ func buildField(msgName, pname string, num int32, sc *schema, pkg string) (*desc
 		// must be promoted to a $ref. rejectUnsupported has already screened
 		// out the mixed and untyped forms.
 		if value, ok := mapValueSchema(sc.AdditionalProperties); ok && len(sc.Properties) == 0 {
-			return buildMapField(msgName, pname, num, value, pkg)
+			return buildMapField(msgName, pname, fname, num, value, pkg, msgNames)
 		}
 		return nil, false, nil, fmt.Errorf("inline object properties are unsupported (use a $ref)")
 	case "":
@@ -1023,7 +1050,7 @@ func buildField(msgName, pname string, num int32, sc *schema, pkg string) (*desc
 // (key=1 string, value=2 V) nested in the containing message. This is
 // exactly the shape proto3's map<string,V> compiles to. The returned entry
 // is attached to the containing message's NestedType by the caller.
-func buildMapField(msgName, pname string, num int32, value *schema, pkg string) (*descriptorpb.FieldDescriptorProto, bool, *descriptorpb.DescriptorProto, error) {
+func buildMapField(msgName, pname, fname string, num int32, value *schema, pkg string, msgNames map[string]string) (*descriptorpb.FieldDescriptorProto, bool, *descriptorpb.DescriptorProto, error) {
 	valueField := &descriptorpb.FieldDescriptorProto{
 		Name:     proto.String("value"),
 		Number:   proto.Int32(2),
@@ -1032,7 +1059,7 @@ func buildMapField(msgName, pname string, num int32, value *schema, pkg string) 
 	}
 	if value.Ref != "" {
 		valueField.Type = descriptorpb.FieldDescriptorProto_TYPE_MESSAGE.Enum()
-		valueField.TypeName = proto.String("." + pkg + "." + refName(value.Ref))
+		valueField.TypeName = proto.String("." + pkg + "." + msgNames[refName(value.Ref)])
 	} else {
 		switch value.Type {
 		case "string":
@@ -1056,7 +1083,7 @@ func buildMapField(msgName, pname string, num int32, value *schema, pkg string) 
 		}
 	}
 
-	entryName := mapEntryName(pname)
+	entryName := mapEntryName(fname)
 	entry := &descriptorpb.DescriptorProto{
 		Name: proto.String(entryName),
 		Field: []*descriptorpb.FieldDescriptorProto{
@@ -1072,7 +1099,7 @@ func buildMapField(msgName, pname string, num int32, value *schema, pkg string) 
 		Options: &descriptorpb.MessageOptions{MapEntry: proto.Bool(true)},
 	}
 	f := &descriptorpb.FieldDescriptorProto{
-		Name:     proto.String(pname),
+		Name:     proto.String(fname),
 		Number:   proto.Int32(num),
 		Label:    descriptorpb.FieldDescriptorProto_LABEL_REPEATED.Enum(),
 		Type:     descriptorpb.FieldDescriptorProto_TYPE_MESSAGE.Enum(),
@@ -1080,6 +1107,52 @@ func buildMapField(msgName, pname string, num int32, value *schema, pkg string) 
 		JsonName: proto.String(pname),
 	}
 	return f, false, entry, nil
+}
+
+// sanitizeIdent maps an OpenAPI key or component name to a legal proto3
+// identifier ([A-Za-z_][A-Za-z0-9_]*): every character outside [A-Za-z0-9_]
+// becomes '_', and a leading digit (or an empty result) is prefixed with '_'.
+// OpenAPI keys and component names are far less restricted than proto
+// identifiers (dotted aliases, Pydantic's -Input/-Output split), so this is a
+// routine collision. The mapping is frozen — changing it would change emitted
+// descriptors. The original wire key is preserved separately via json_name.
+func sanitizeIdent(s string) string {
+	out := nonIdent.ReplaceAllString(s, "_")
+	if out == "" {
+		return "_"
+	}
+	if out[0] >= '0' && out[0] <= '9' {
+		return "_" + out
+	}
+	return out
+}
+
+// uniqueIdent returns sanitizeIdent(raw) made unique within used by appending a
+// stable numeric suffix on collision, so two distinct raw names never silently
+// fuse (e.g. "a.b" and "a-b" both sanitize to "a_b"). It records the result in
+// used. Callers must iterate raw names in a deterministic (sorted) order so the
+// suffix assignment is reproducible.
+func uniqueIdent(raw string, used map[string]bool) string {
+	base := sanitizeIdent(raw)
+	name := base
+	for i := 2; used[name]; i++ {
+		name = base + "_" + strconv.Itoa(i)
+	}
+	used[name] = true
+	return name
+}
+
+// sanitizeMessageNames maps every component/message name to a unique legal proto
+// identifier. names must be sorted so the collision suffixes are deterministic.
+// A name that is already legal and collision-free maps to itself, so a spec
+// with no illegal names yields byte-identical descriptors.
+func sanitizeMessageNames(names []string) map[string]string {
+	used := make(map[string]bool, len(names))
+	m := make(map[string]string, len(names))
+	for _, n := range names {
+		m[n] = uniqueIdent(n, used)
+	}
+	return m
 }
 
 func sanitize(version string) string {
