@@ -1498,3 +1498,115 @@ func TestAddBareObjectLowersToStruct(t *testing.T) {
 		t.Fatalf("decode bare-object body: %v", err)
 	}
 }
+
+// kindOf reports a field's proto kind, nil-safe, for failure messages.
+func kindOf(f protoreflect.FieldDescriptor) string {
+	if f == nil {
+		return "<nil>"
+	}
+	return f.Kind().String()
+}
+
+// nonObjectComponentsOpenAPI: the shapes that already lower inline (enum,
+// typed-dict, union, open-object) but appear as named top-level components and
+// are $ref'd by properties — exactly how FastAPI emits a `str, Enum` (Mode) or a
+// dict alias. v0.7.0 hard-rejects these components at the collection gate
+// ("must be an object with properties"); they must lower the same as inline. (#133)
+const nonObjectComponentsOpenAPI = `{
+  "openapi": "3.1.0",
+  "info": {"title": "t", "version": "0"},
+  "paths": {"/x": {"get": {"operationId": "x", "responses": {"200": {"description": "ok",
+    "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Out"}}}}}}}},
+  "components": {"schemas": {
+    "Mode": {"type": "string", "enum": ["a", "b"]},
+    "Count": {"type": "integer", "enum": [1, 2]},
+    "Bag": {"type": "object", "additionalProperties": true},
+    "Poly": {"anyOf": [{"type": "string"}, {"type": "integer"}]},
+    "Labels": {"type": "object", "additionalProperties": {"type": "string"}},
+    "Out": {"type": "object", "properties": {
+      "mode": {"$ref": "#/components/schemas/Mode"},
+      "modes": {"type": "array", "items": {"$ref": "#/components/schemas/Mode"}},
+      "count": {"$ref": "#/components/schemas/Count"},
+      "bag": {"$ref": "#/components/schemas/Bag"},
+      "poly": {"$ref": "#/components/schemas/Poly"},
+      "labels": {"$ref": "#/components/schemas/Labels"}
+    }}
+  }}
+}`
+
+// TestAddLowersNonObjectComponentsLikeInline: a component that is an enum,
+// typed-dict, union, or open-object lowers at each $ref site exactly as the
+// inline form would — scalar (enum → underlying scalar), map, Value, Struct —
+// rather than a dangling message reference. The non-object components are
+// absorbed, not built as messages. (#133)
+func TestAddLowersNonObjectComponentsLikeInline(t *testing.T) {
+	in := writeOpenAPI(t, nonObjectComponentsOpenAPI)
+	out := t.TempDir()
+	if err := bundlegen.Add(in, out, false); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	b, err := bundle.Load(out)
+	if err != nil {
+		t.Fatalf("generated bundle did not load: %v", err)
+	}
+	outMsg, err := b.Message("wavefront.gen.v0.Out")
+	if err != nil {
+		t.Fatalf("resolve Out: %v", err)
+	}
+
+	// enum component → underlying scalar (NOT a proto enum; protojson rejects
+	// unknown enum names, which would re-introduce version skew). singular + array.
+	if f := outMsg.Fields().ByName(protoName("mode")); f == nil || f.Kind().String() != "string" {
+		t.Errorf("mode (enum component) kind = %v, want string", kindOf(f))
+	}
+	if f := outMsg.Fields().ByName(protoName("modes")); f == nil || !f.IsList() || f.Kind().String() != "string" {
+		t.Errorf("modes (array of enum component) should be repeated string, got %v", kindOf(f))
+	}
+	if f := outMsg.Fields().ByName(protoName("count")); f == nil || f.Kind().String() != "int32" {
+		t.Errorf("count (integer-enum component) kind = %v, want int32", kindOf(f))
+	}
+
+	// open-object component → Struct; untagged-union component → Value.
+	if f := outMsg.Fields().ByName(protoName("bag")); f == nil || f.Message() == nil || string(f.Message().FullName()) != "google.protobuf.Struct" {
+		t.Errorf("bag (open-object component) = %v, want google.protobuf.Struct", fullName(f))
+	}
+	if f := outMsg.Fields().ByName(protoName("poly")); f == nil || f.Message() == nil || string(f.Message().FullName()) != "google.protobuf.Value" {
+		t.Errorf("poly (union component) = %v, want google.protobuf.Value", fullName(f))
+	}
+
+	// typed-dict component → proto3 map.
+	if f := outMsg.Fields().ByName(protoName("labels")); f == nil || !f.IsMap() {
+		t.Error("labels (typed-dict component) should be a map field")
+	}
+
+	// The non-object components are absorbed, not built as standalone messages.
+	for _, name := range []string{"Mode", "Count", "Bag", "Poly", "Labels"} {
+		if _, err := b.Message("wavefront.gen.v0." + name); err == nil {
+			t.Errorf("non-object component %s should not be built as a message", name)
+		}
+	}
+}
+
+// TestAddRejectsNonObjectComponentAsBody: a non-object component bound directly
+// as a request/response body stays a hard error — body-direct scalar/WKT binding
+// is a separate, deferred surface. #133 lowers non-object components only at
+// nested $ref sites; this boundary is preserved. (#133)
+func TestAddRejectsNonObjectComponentAsBody(t *testing.T) {
+	const bodyDirectOpenAPI = `{
+  "openapi": "3.1.0",
+  "info": {"title": "t", "version": "0"},
+  "paths": {"/x": {"get": {"operationId": "x", "responses": {"200": {"description": "ok",
+    "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Poly"}}}}}}}},
+  "components": {"schemas": {
+    "Poly": {"anyOf": [{"type": "string"}, {"type": "integer"}]}
+  }}
+}`
+	in := writeOpenAPI(t, bodyDirectOpenAPI)
+	err := bundlegen.Add(in, t.TempDir(), false)
+	if err == nil {
+		t.Fatal("a non-object component bound as a body: expected a hard error, got nil")
+	}
+	if !strings.Contains(err.Error(), "must be an object with properties") {
+		t.Errorf("body-direct rejection = %q, want it to mention 'must be an object with properties'", err.Error())
+	}
+}

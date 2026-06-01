@@ -9,7 +9,11 @@
 // flattened wire shape no proto3 oneof can carry — both to
 // google.protobuf.Struct; and an untagged anyOf/oneOf union or an unconstrained
 // {} schema to google.protobuf.Value (repeated as array items), with
-// google/protobuf/struct.proto embedded in the layer when any are used. allOf, a
+// google/protobuf/struct.proto embedded in the layer when any are used. These
+// lowerings apply inline or via a $ref: a non-object component (enum, typed
+// dict, union, open object) referenced by a field lowers the same as the
+// equivalent inline schema; only an object-with-properties component becomes a
+// proto message, which is what a request/response body must $ref. allOf, a
 // mixed additionalProperties, an inline (non-$ref) body, and an untyped
 // non-empty leaf stay hard errors rather than a lossy bundle. Output is
 // byte-reproducible (sorted, deterministic marshal) for the consumer's
@@ -259,6 +263,17 @@ func buildDescriptors(doc openAPI, roots []string, pkg, version string) ([]byte,
 		return nil, nil, err
 	}
 
+	// A request/response/error body must be an object component (a proto
+	// message). A non-object component bound directly as a body — a bare scalar,
+	// union, or open object — is a separate, deferred surface; reject it cleanly
+	// rather than emitting a binding to a message that was never built. Nested
+	// non-object $refs lower inline (#133); only the body position is constrained.
+	for _, r := range realRoots {
+		if needed[r] == nil {
+			return nil, nil, fmt.Errorf("schema %q must be an object with properties", r)
+		}
+	}
+
 	// Sort schema names so descriptor message order is stable: the
 	// byte-reproducibility invariant the consumer's buf-breaking gate
 	// relies on. The synthetic Empty is sorted in alongside the real ones
@@ -285,7 +300,7 @@ func buildDescriptors(doc openAPI, roots []string, pkg, version string) ([]byte,
 			msgs = append(msgs, &descriptorpb.DescriptorProto{Name: proto.String(msgNames[n])})
 			continue
 		}
-		dp, derr := buildMessage(msgNames[n], needed[n], pkg, msgNames)
+		dp, derr := buildMessage(msgNames[n], needed[n], pkg, msgNames, doc.Components.Schemas)
 		if derr != nil {
 			return nil, nil, derr
 		}
@@ -601,13 +616,46 @@ func refName(ref string) string {
 
 // collectSchemas walks from the roots, validating each touched schema, and
 // returns every component object schema that must become a message.
+// isMessageComponent reports whether a component schema becomes a proto message:
+// an object with a properties key (the explicitly-empty {} object included — it
+// is a zero-field message). Every other shape — scalar (incl. enum), typed dict,
+// union, open object — is a non-object component that lowers inline at each $ref
+// site rather than being built as a message (#133).
+func isMessageComponent(sc *schema) bool {
+	return sc.Type == "object" && sc.Properties != nil
+}
+
 func collectSchemas(doc openAPI, roots []string) (map[string]*schema, error) {
-	out := map[string]*schema{}
+	out := map[string]*schema{}  // object components that become proto messages
+	visited := map[string]bool{} // guard across messages and non-message components
 	var visit func(name string) error
+	// walkRefs visits the component($refs) a schema would pull into the descriptor
+	// set when it is lowered: a $ref, an array of $ref, a typed-dict $ref value, or
+	// a nullable $ref. It applies equally to a message's property and to a
+	// non-message component lowered inline. Union members are deliberately not
+	// walked — they are absorbed into google.protobuf.{Value,Struct}.
+	walkRefs := func(s *schema) error {
+		switch {
+		case s.Ref != "":
+			return visit(refName(s.Ref))
+		case s.Type == "array" && s.Items != nil && s.Items.Ref != "":
+			return visit(refName(s.Items.Ref))
+		case s.Type == "object":
+			if value, ok := mapValueSchema(s.AdditionalProperties); ok && value.Ref != "" {
+				return visit(refName(value.Ref))
+			}
+		default:
+			if inner, ok := nullableAnyOf(s); ok && inner.Ref != "" {
+				return visit(refName(inner.Ref))
+			}
+		}
+		return nil
+	}
 	visit = func(name string) error {
-		if _, done := out[name]; done {
+		if visited[name] {
 			return nil
 		}
+		visited[name] = true
 		sc := doc.Components.Schemas[name]
 		if sc == nil {
 			return fmt.Errorf("schema %q referenced but not defined", name)
@@ -615,44 +663,20 @@ func collectSchemas(doc openAPI, roots []string) (map[string]*schema, error) {
 		if err := rejectUnsupported(sc); err != nil {
 			return fmt.Errorf("schema %q: %w", name, err)
 		}
-		// An explicitly-empty object ("properties": {}) is a deliberately-closed
-		// zero-field message and is accepted; a bare {"type":"object"} with no
-		// properties key is an open/untyped object and stays rejected. The two
-		// differ only by whether the properties key is present: encoding/json
-		// leaves an absent map nil and allocates a non-nil map for {}.
-		if sc.Type != "object" || sc.Properties == nil {
-			return fmt.Errorf("schema %q must be an object with properties", name)
+		// A non-object component (scalar incl. enum, typed dict, union, open
+		// object) lowers inline at each $ref site, so it is not built as a message
+		// — only walked for transitively-referenced message components. An object
+		// with a properties key becomes a message and its properties are walked.
+		if !isMessageComponent(sc) {
+			return walkRefs(sc)
 		}
 		out[name] = sc
 		for _, prop := range sc.Properties {
 			if err := rejectUnsupported(prop); err != nil {
 				return fmt.Errorf("schema %q property: %w", name, err)
 			}
-			switch {
-			case prop.Ref != "":
-				if err := visit(refName(prop.Ref)); err != nil {
-					return err
-				}
-			case prop.Type == "array" && prop.Items != nil && prop.Items.Ref != "":
-				if err := visit(refName(prop.Items.Ref)); err != nil {
-					return err
-				}
-			case prop.Type == "object":
-				// A typed-dict map whose value is a $ref (Dict[str, Item])
-				// names a component that must be pulled into the descriptor set.
-				if value, ok := mapValueSchema(prop.AdditionalProperties); ok && value.Ref != "" {
-					if err := visit(refName(value.Ref)); err != nil {
-						return err
-					}
-				}
-			default:
-				// A nullable $ref (anyOf:[{$ref}, {type: null}]) still names a
-				// component that must be pulled into the descriptor set.
-				if inner, ok := nullableAnyOf(prop); ok && inner.Ref != "" {
-					if err := visit(refName(inner.Ref)); err != nil {
-						return err
-					}
-				}
+			if err := walkRefs(prop); err != nil {
+				return err
 			}
 		}
 		return nil
@@ -905,7 +929,7 @@ func isNullableLeaf(sc *schema) bool {
 	return false
 }
 
-func buildMessage(name string, sc *schema, pkg string, msgNames map[string]string) (*descriptorpb.DescriptorProto, error) {
+func buildMessage(name string, sc *schema, pkg string, msgNames map[string]string, components map[string]*schema) (*descriptorpb.DescriptorProto, error) {
 	props := make([]string, 0, len(sc.Properties))
 	for p := range sc.Properties {
 		props = append(props, p)
@@ -919,7 +943,7 @@ func buildMessage(name string, sc *schema, pkg string, msgNames map[string]strin
 		// Sanitize the proto field name (buildField preserves the original key
 		// as json_name); disambiguate within this message's field set.
 		fname := uniqueIdent(pname, usedFields)
-		f, optional, nested, err := buildField(name, pname, fname, num, sc.Properties[pname], pkg, msgNames)
+		f, optional, nested, err := buildField(name, pname, fname, num, sc.Properties[pname], pkg, msgNames, components)
 		if err != nil {
 			return nil, fmt.Errorf("message %q field %q: %w", name, pname, err)
 		}
@@ -940,12 +964,12 @@ func buildMessage(name string, sc *schema, pkg string, msgNames map[string]strin
 	return dp, nil
 }
 
-func buildField(msgName, pname, fname string, num int32, sc *schema, pkg string, msgNames map[string]string) (*descriptorpb.FieldDescriptorProto, bool, *descriptorpb.DescriptorProto, error) {
+func buildField(msgName, pname, fname string, num int32, sc *schema, pkg string, msgNames map[string]string, components map[string]*schema) (*descriptorpb.FieldDescriptorProto, bool, *descriptorpb.DescriptorProto, error) {
 	// OpenAPI 3.1 nullable idiom: anyOf:[T, {type: null}] lowers the same as
 	// 3.0's nullable:true — build the field from the non-null member T and
 	// mark it proto3 optional.
 	if inner, ok := nullableAnyOf(sc); ok {
-		f, _, nested, err := buildField(msgName, pname, fname, num, inner, pkg, msgNames)
+		f, _, nested, err := buildField(msgName, pname, fname, num, inner, pkg, msgNames, components)
 		if err != nil {
 			return nil, false, nil, err
 		}
@@ -972,6 +996,12 @@ func buildField(msgName, pname, fname string, num int32, sc *schema, pkg string,
 	}
 
 	if sc.Ref != "" {
+		// A $ref to a non-object component (scalar incl. enum, typed dict, union,
+		// open object) lowers inline, exactly as the inline form would, rather than
+		// as a message reference. Only object components remain message references.
+		if target := components[refName(sc.Ref)]; target != nil && !isMessageComponent(target) {
+			return buildField(msgName, pname, fname, num, target, pkg, msgNames, components)
+		}
 		f.Type = descriptorpb.FieldDescriptorProto_TYPE_MESSAGE.Enum()
 		f.TypeName = proto.String("." + pkg + "." + msgNames[refName(sc.Ref)])
 		return f, false, nil, nil
@@ -999,22 +1029,30 @@ func buildField(msgName, pname, fname string, num int32, sc *schema, pkg string,
 			return nil, false, nil, fmt.Errorf("array without items")
 		}
 		f.Label = descriptorpb.FieldDescriptorProto_LABEL_REPEATED.Enum()
+		item := sc.Items
+		// An item that $refs a non-object component lowers inline (repeated scalar
+		// / Value / Struct), exactly as an inline item of that shape would.
+		if item.Ref != "" {
+			if target := components[refName(item.Ref)]; target != nil && !isMessageComponent(target) {
+				item = target
+			}
+		}
 		// Array items that are an untagged union, an unconstrained {} schema, an
 		// open object, or a discriminated (tagged) union lower to a repeated
 		// struct.proto well-known type (repeated Value / repeated Struct) — the
 		// FastAPI ValidationError.loc shape (anyOf[string,integer] items) is the
 		// motivating untagged case; a discriminated oneOf item lowers to Struct.
-		if wkt := wktMessageName(sc.Items); wkt != "" {
+		if wkt := wktMessageName(item); wkt != "" {
 			f.Type = descriptorpb.FieldDescriptorProto_TYPE_MESSAGE.Enum()
 			f.TypeName = proto.String("." + wkt)
 			return f, false, nil, nil
 		}
-		if sc.Items.Ref != "" {
+		if item.Ref != "" {
 			f.Type = descriptorpb.FieldDescriptorProto_TYPE_MESSAGE.Enum()
-			f.TypeName = proto.String("." + pkg + "." + msgNames[refName(sc.Items.Ref)])
+			f.TypeName = proto.String("." + pkg + "." + msgNames[refName(item.Ref)])
 			return f, false, nil, nil
 		}
-		switch sc.Items.Type {
+		switch item.Type {
 		case "string":
 			f.Type = descriptorpb.FieldDescriptorProto_TYPE_STRING.Enum()
 		case "boolean":
@@ -1024,7 +1062,7 @@ func buildField(msgName, pname, fname string, num int32, sc *schema, pkg string,
 		case "number":
 			f.Type = descriptorpb.FieldDescriptorProto_TYPE_DOUBLE.Enum()
 		default:
-			return nil, false, nil, fmt.Errorf("array item type %q is unsupported", sc.Items.Type)
+			return nil, false, nil, fmt.Errorf("array item type %q is unsupported", item.Type)
 		}
 		return f, false, nil, nil
 	case "object":
@@ -1033,7 +1071,7 @@ func buildField(msgName, pname, fname string, num int32, sc *schema, pkg string,
 		// must be promoted to a $ref. rejectUnsupported has already screened
 		// out the mixed and untyped forms.
 		if value, ok := mapValueSchema(sc.AdditionalProperties); ok && len(sc.Properties) == 0 {
-			return buildMapField(msgName, pname, fname, num, value, pkg, msgNames)
+			return buildMapField(msgName, pname, fname, num, value, pkg, msgNames, components)
 		}
 		return nil, false, nil, fmt.Errorf("inline object properties are unsupported (use a $ref)")
 	case "":
@@ -1050,12 +1088,19 @@ func buildField(msgName, pname, fname string, num int32, sc *schema, pkg string,
 // (key=1 string, value=2 V) nested in the containing message. This is
 // exactly the shape proto3's map<string,V> compiles to. The returned entry
 // is attached to the containing message's NestedType by the caller.
-func buildMapField(msgName, pname, fname string, num int32, value *schema, pkg string, msgNames map[string]string) (*descriptorpb.FieldDescriptorProto, bool, *descriptorpb.DescriptorProto, error) {
+func buildMapField(msgName, pname, fname string, num int32, value *schema, pkg string, msgNames map[string]string, components map[string]*schema) (*descriptorpb.FieldDescriptorProto, bool, *descriptorpb.DescriptorProto, error) {
 	valueField := &descriptorpb.FieldDescriptorProto{
 		Name:     proto.String("value"),
 		Number:   proto.Int32(2),
 		Label:    descriptorpb.FieldDescriptorProto_LABEL_OPTIONAL.Enum(),
 		JsonName: proto.String("value"),
+	}
+	// A map value that $refs a non-object component lowers inline (a scalar), the
+	// same as the inline value form.
+	if value.Ref != "" {
+		if target := components[refName(value.Ref)]; target != nil && !isMessageComponent(target) {
+			value = target
+		}
 	}
 	if value.Ref != "" {
 		valueField.Type = descriptorpb.FieldDescriptorProto_TYPE_MESSAGE.Enum()
