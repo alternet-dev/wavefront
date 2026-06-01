@@ -3,8 +3,9 @@
 // object schemas; scalars, arrays, $ref, and nullable→proto3-optional — both
 // 3.0's `nullable: true` and the 3.1 `anyOf:[T, {type: null}]` idiom — are
 // supported. A typed dict (additionalProperties:<scalar|$ref>) lowers to
-// map<string,V>; an open object (additionalProperties:true|{}) and a
-// discriminated (tagged) anyOf/oneOf union — always a JSON object, but with a
+// map<string,V>; an open object (additionalProperties:true|{}, or a bare
+// {type:object} with no properties) and a discriminated (tagged) anyOf/oneOf
+// union — always a JSON object, but with a
 // flattened wire shape no proto3 oneof can carry — both to
 // google.protobuf.Struct; and an untagged anyOf/oneOf union or an unconstrained
 // {} schema to google.protobuf.Value (repeated as array items), with
@@ -739,11 +740,16 @@ func additionalPropertiesOpen(raw json.RawMessage) bool {
 	return false
 }
 
-// isOpenObject reports whether sc is dict[str, Any] — an object with open
-// additionalProperties (true or {}) and no declared properties of its own. It
-// lowers to google.protobuf.Struct, which decodes a bare JSON object directly.
+// isOpenObject reports whether sc is dict[str, Any] — an object with no declared
+// properties of its own that admits arbitrary fields. That covers open
+// additionalProperties (true or {}) and a bare {"type":"object"} with no
+// additionalProperties key at all: the latter is semantically identical to
+// additionalProperties:true and is the shape FastAPI emits for
+// ValidationError.ctx. It lowers to google.protobuf.Struct, which decodes a bare
+// JSON object directly.
 func isOpenObject(sc *schema) bool {
-	return sc.Type == "object" && len(sc.Properties) == 0 && additionalPropertiesOpen(sc.AdditionalProperties)
+	return sc.Type == "object" && len(sc.Properties) == 0 &&
+		(sc.AdditionalProperties == nil || additionalPropertiesOpen(sc.AdditionalProperties))
 }
 
 // Fully-qualified names of the two struct.proto well-known types this generator

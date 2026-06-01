@@ -1437,3 +1437,64 @@ func TestAddDisambiguatesSanitizedMessageNameCollisions(t *testing.T) {
 		t.Errorf("field b ($ref My_Model) resolved to %q, which lacks field y", bb.Message().FullName())
 	}
 }
+
+// bareObjectOpenAPI carries a bare {"type":"object"} — type present, no
+// properties, no additionalProperties — as a singular property (ctx) and an
+// array item (extras). It is semantically identical to additionalProperties:
+// true ("an object with arbitrary fields") and is the exact shape FastAPI emits
+// for ValidationError.ctx. v0.7.0 rejected it; it must lower to
+// google.protobuf.Struct like any open object. (#134)
+const bareObjectOpenAPI = `{
+  "openapi": "3.1.0",
+  "info": {"title": "t", "version": "0"},
+  "paths": {"/x": {"get": {"operationId": "x", "responses": {"200": {"description": "ok",
+    "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Out"}}}}}}}},
+  "components": {"schemas": {
+    "Out": {"type": "object", "properties": {
+      "ctx": {"type": "object"},
+      "extras": {"type": "array", "items": {"type": "object"}}
+    }}
+  }}
+}`
+
+// TestAddBareObjectLowersToStruct: a bare {"type":"object"} lowers to
+// google.protobuf.Struct — singular as a property, repeated as an array item —
+// exactly like additionalProperties:true. (#134)
+func TestAddBareObjectLowersToStruct(t *testing.T) {
+	in := writeOpenAPI(t, bareObjectOpenAPI)
+	out := t.TempDir()
+	if err := bundlegen.Add(in, out, false); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	b, err := bundle.Load(out)
+	if err != nil {
+		t.Fatalf("generated bundle did not load: %v", err)
+	}
+	outMsg, err := b.Message("wavefront.gen.v0.Out")
+	if err != nil {
+		t.Fatalf("resolve Out: %v", err)
+	}
+
+	ctx := outMsg.Fields().ByName(protoName("ctx"))
+	if ctx == nil || ctx.IsList() || ctx.IsMap() {
+		t.Fatal(`Out.ctx (bare {"type":"object"}) should be a singular message field`)
+	}
+	if ctx.Message() == nil || string(ctx.Message().FullName()) != "google.protobuf.Struct" {
+		t.Errorf("Out.ctx type = %v, want google.protobuf.Struct", fullName(ctx))
+	}
+
+	extras := outMsg.Fields().ByName(protoName("extras"))
+	if extras == nil || !extras.IsList() {
+		t.Fatal("Out.extras (array of bare objects) should be a repeated field")
+	}
+	if extras.Message() == nil || string(extras.Message().FullName()) != "google.protobuf.Struct" {
+		t.Errorf("Out.extras element type = %v, want google.protobuf.Struct", fullName(extras))
+	}
+
+	// A Struct decodes an arbitrary object verbatim, like additionalProperties:true.
+	const body = `{"ctx":{"limit":5,"why":"too big"},"extras":[{"k":"v"}]}`
+	msg := dynamicpb.NewMessage(outMsg)
+	if err := protojson.Unmarshal([]byte(body), msg); err != nil {
+		t.Fatalf("decode bare-object body: %v", err)
+	}
+}
