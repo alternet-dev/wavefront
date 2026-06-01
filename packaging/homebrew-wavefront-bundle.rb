@@ -16,16 +16,22 @@
 class WavefrontBundle < Formula
   desc "Build and maintain versioned layers in a wavefront edge-proxy bundle"
   homepage "https://github.com/alternet-dev/wavefront"
-  version "0.0.0"
-  license "MIT OR Apache-2.0"
+  license any_of: ["MIT", "Apache-2.0"]
 
   on_macos do
+    # We only ship an arm64-mac binary. `depends_on arch: :arm64` aborts
+    # `brew install` on Intel macOS before any URL is fetched. The
+    # `on_intel` block below reuses the arm64 URL as a stub so that
+    # `brew readall --os=all --arch=all` (which requires a URL for every
+    # OS/arch combination it evaluates) is satisfied; that URL is never
+    # actually downloaded in a real install on Intel macOS.
+    depends_on arch: :arm64
     on_arm do
       url "https://github.com/alternet-dev/wavefront/releases/download/v0.0.0/wavefront-bundle-v0.0.0-aarch64-apple-darwin.tar.gz"
       sha256 "0000000000000000000000000000000000000000000000000000000000000000"
     end
     on_intel do
-      url "https://github.com/alternet-dev/wavefront/releases/download/v0.0.0/wavefront-bundle-v0.0.0-x86_64-apple-darwin.tar.gz"
+      url "https://github.com/alternet-dev/wavefront/releases/download/v0.0.0/wavefront-bundle-v0.0.0-aarch64-apple-darwin.tar.gz"
       sha256 "0000000000000000000000000000000000000000000000000000000000000000"
     end
   end
