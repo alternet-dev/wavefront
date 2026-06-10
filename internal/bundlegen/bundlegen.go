@@ -81,9 +81,11 @@ type operation struct {
 	RequestBody *struct {
 		Content map[string]mediaType `json:"content"`
 	} `json:"requestBody"`
-	Responses map[string]struct {
-		Content map[string]mediaType `json:"content"`
-	} `json:"responses"`
+	Responses map[string]responseBody `json:"responses"`
+}
+
+type responseBody struct {
+	Content map[string]mediaType `json:"content"`
 }
 
 type openAPI struct {
@@ -503,16 +505,40 @@ func allOperations(doc openAPI) ([]foundOperation, error) {
 }
 
 // emptyMessageName is the synthetic message bound by a bodyless side of an
-// operation — a GET/path-only POST with no requestBody, or a response with
-// no 200 body (e.g. an HTTP 204). One zero-field `Empty` message is emitted
+// operation — a GET/path-only POST with no requestBody, or a success response
+// with no body (e.g. an HTTP 204). One zero-field `Empty` message is emitted
 // per layer into the version's package and shared by every bodyless side.
 const emptyMessageName = "Empty"
 
+// successResponse returns the operation's success response: the declared 2xx.
+// FastAPI emits exactly one 2xx per operation (the route's status_code); when a
+// hand-authored spec declares several, the numerically-lowest 2xx wins,
+// deterministically, and the rest are ignored. Non-numeric keys ("2XX",
+// "default") are not considered — wavefront binds concrete statuses.
+func successResponse(op operation) (responseBody, bool) {
+	best := -1
+	for code := range op.Responses {
+		status, err := strconv.Atoi(code)
+		if err != nil || status < 200 || status > 299 {
+			continue
+		}
+		if best == -1 || status < best {
+			best = status
+		}
+	}
+	if best == -1 {
+		return responseBody{}, false
+	}
+	return op.Responses[strconv.Itoa(best)], true
+}
+
 // refSchemaName resolves the component-schema name a side of an operation
-// binds to. A bodyless side — no requestBody on the request side, or no 200
-// response on the response side — binds the synthetic Empty message; the
-// fail-loud rejection of inline (non-$ref) schemas still applies to bodied
-// sides.
+// binds to. The response side binds the declared 2xx (see successResponse) —
+// not the literal "200" key, which silently dropped a 201/202-style success. A
+// bodyless side — no requestBody on the request side, or no declared 2xx (or a
+// content-less one, e.g. 204) on the response side — binds the synthetic Empty
+// message; the fail-loud rejection of inline (non-$ref) schemas still applies
+// to bodied sides.
 func refSchemaName(op operation, request bool) (string, error) {
 	var mt map[string]mediaType
 	if request {
@@ -521,8 +547,15 @@ func refSchemaName(op operation, request bool) (string, error) {
 		}
 		mt = op.RequestBody.Content
 	} else {
-		resp, ok := op.Responses["200"]
+		resp, ok := successResponse(op)
 		if !ok {
+			return emptyMessageName, nil
+		}
+		// A declared 2xx with no content at all (a 204, or a bare
+		// {"description": ...}) is genuinely bodyless and binds Empty, the same
+		// as an absent success entry. A 2xx that declares content in some other
+		// media type still falls through to the fail-loud rejection below.
+		if len(resp.Content) == 0 {
 			return emptyMessageName, nil
 		}
 		mt = resp.Content
