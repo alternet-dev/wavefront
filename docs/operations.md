@@ -58,6 +58,13 @@ request.
 - `/health` (liveness) always returns 200 once the process is up;
   `/ready` (readiness) returns 200 only once a valid bundle is loaded, 503
   before. Both served on the metrics listener.
+- The container image ships a built-in `HEALTHCHECK` that execs
+  `wavefront probe --ready` — the binary GETs its own `/ready` (on the
+  configured `WAVEFRONT_METRICS_ADDR`) and exits 0 only on a 200. The image is
+  distroless (no shell, no wget/curl), so an exec-style shell healthcheck
+  (`CMD-SHELL wget …`) cannot run in-container; inherit the built-in
+  healthcheck, or probe the ops port from outside the container (a Kubernetes
+  `httpGet` probe hits the port directly and needs no exec).
 - Lifecycle events — config, bundle load, listen, shutdown — are logged as
   structured JSON.
 - Distributed tracing is opt-in via `WAVEFRONT_TRACES_OTLP_ENDPOINT` (unset =
