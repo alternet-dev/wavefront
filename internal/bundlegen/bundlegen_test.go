@@ -1610,3 +1610,86 @@ func TestAddRejectsNonObjectComponentAsBody(t *testing.T) {
 		t.Errorf("body-direct rejection = %q, want it to mention 'must be an object with properties'", err.Error())
 	}
 }
+
+// success2xxOpenAPI declares its success under 202 — the way FastAPI emits a
+// route with status_code=202 (an async / saga-kickoff endpoint). v0.7.1 only
+// looked at the literal "200" key, silently dropped the declared schema, and
+// bound the synthetic Empty. The success must bind from the declared 2xx. (#143)
+const success2xxOpenAPI = `{
+  "openapi": "3.1.0",
+  "info": {"title": "t", "version": "0"},
+  "paths": {"/x": {"post": {"operationId": "x", "responses": {
+    "202": {"description": "accepted",
+      "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Accepted"}}}},
+    "422": {"description": "invalid",
+      "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Err"}}}}
+  }}}},
+  "components": {"schemas": {
+    "Accepted": {"type": "object", "properties": {"id": {"type": "string"}}},
+    "Err": {"type": "object", "properties": {"msg": {"type": "string"}}}
+  }}
+}`
+
+// TestAddBindsSuccessFromDeclared2xx: a route whose only success is a non-200
+// 2xx binds that response's declared schema, not the synthetic Empty; the
+// non-2xx statuses still bind as error_messages. (#143)
+func TestAddBindsSuccessFromDeclared2xx(t *testing.T) {
+	in := writeOpenAPI(t, success2xxOpenAPI)
+	out := t.TempDir()
+	if err := bundlegen.Add(in, out, false); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	b, err := bundle.Load(out)
+	if err != nil {
+		t.Fatalf("generated bundle did not load: %v", err)
+	}
+	c, ok := b.Contract("0")
+	if !ok {
+		t.Fatal(`Contract("0") not found`)
+	}
+	if !strings.HasSuffix(c.ResponseMessage(), ".Accepted") {
+		t.Errorf("response_message = %q, want it to bind .Accepted (the declared 202 schema)", c.ResponseMessage())
+	}
+	if _, err := b.Message("wavefront.gen.v0.Accepted"); err != nil {
+		t.Errorf("Accepted not collected into the descriptor set: %v", err)
+	}
+	if name, ok := c.ErrorMessage(422); !ok || !strings.HasSuffix(name, ".Err") {
+		t.Errorf("error_messages[422] = %q (ok=%v), want .Err", name, ok)
+	}
+}
+
+// TestAddBindsLowestDeclared2xx: when a hand-authored spec declares several 2xx
+// for one operation (FastAPI never does), the numerically-lowest 2xx is the
+// success — deterministically, so re-bundles are byte-identical. (#143)
+func TestAddBindsLowestDeclared2xx(t *testing.T) {
+	const multi2xxOpenAPI = `{
+  "openapi": "3.1.0",
+  "info": {"title": "t", "version": "0"},
+  "paths": {"/x": {"post": {"operationId": "x", "responses": {
+    "202": {"description": "accepted",
+      "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Later"}}}},
+    "201": {"description": "created",
+      "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Created"}}}}
+  }}}},
+  "components": {"schemas": {
+    "Created": {"type": "object", "properties": {"id": {"type": "string"}}},
+    "Later": {"type": "object", "properties": {"id": {"type": "string"}}}
+  }}
+}`
+	in := writeOpenAPI(t, multi2xxOpenAPI)
+	out := t.TempDir()
+	if err := bundlegen.Add(in, out, false); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	b, err := bundle.Load(out)
+	if err != nil {
+		t.Fatalf("generated bundle did not load: %v", err)
+	}
+	c, ok := b.Contract("0")
+	if !ok {
+		t.Fatal(`Contract("0") not found`)
+	}
+	if !strings.HasSuffix(c.ResponseMessage(), ".Created") {
+		t.Errorf("response_message = %q, want .Created (201 is the numerically-lowest declared 2xx)", c.ResponseMessage())
+	}
+}

@@ -14,9 +14,7 @@ import (
 // capability ceiling (always 502), and non-numeric keys like "default".
 func TestErrorSchemaNames(t *testing.T) {
 	op := operation{
-		Responses: map[string]struct {
-			Content map[string]mediaType `json:"content"`
-		}{
+		Responses: map[string]responseBody{
 			"200":     {Content: jsonRef("#/components/schemas/Item")},
 			"404":     {Content: jsonRef("#/components/schemas/Problem")},
 			"409":     {Content: jsonRef("#/components/schemas/Conflict")},
@@ -44,9 +42,7 @@ func TestErrorSchemaNames(t *testing.T) {
 // bodied success side.
 func TestErrorSchemaNamesRejectsInline(t *testing.T) {
 	op := operation{
-		Responses: map[string]struct {
-			Content map[string]mediaType `json:"content"`
-		}{
+		Responses: map[string]responseBody{
 			"422": {Content: map[string]mediaType{
 				"application/json": {Schema: &schema{Type: "object", Properties: map[string]*schema{"x": {Type: "string"}}}},
 			}},
