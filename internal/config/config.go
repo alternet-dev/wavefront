@@ -100,6 +100,26 @@ type loader struct {
 	lookup Lookuper
 }
 
+// OpsAddr resolves the ops/metrics listen address exactly as Load does —
+// WAVEFRONT_METRICS_ADDR, or its default when unset/blank — without touching
+// the rest of the configuration. The container self-probe uses it: a probe
+// must reach the same configured ops port the server bound, and must not fail
+// because serving-only required vars (bundle path, upstream URL) are absent.
+// No validation: a malformed value simply fails the probe's dial, which is the
+// correct healthcheck outcome.
+func OpsAddr(opts ...Option) string {
+	l := &loader{lookup: os.LookupEnv}
+	for _, o := range opts {
+		o(l)
+	}
+	if v, ok := l.lookup("WAVEFRONT_METRICS_ADDR"); ok {
+		if v = strings.TrimSpace(v); v != "" {
+			return v
+		}
+	}
+	return defMetricsAddr
+}
+
 // Load parses the WAVEFRONT_* environment once into an immutable Config.
 // Production: config.Load(). Tests: config.Load(config.WithLookup(fake)).
 func Load(opts ...Option) (*Config, error) {

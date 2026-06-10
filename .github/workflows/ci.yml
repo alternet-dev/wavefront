@@ -45,6 +45,55 @@ jobs:
           go-version-file: go.mod
       - run: test -z "$(gofmt -l .)"
 
+  # Builds the runtime image and asserts the built-in HEALTHCHECK flips the
+  # container to healthy once /ready serves 200 — the distroless self-probe
+  # contract (#145). Generates a one-route bundle with wavefront-bundle so the
+  # server passes its fail-fast bundle load; the upstream URL only needs to be
+  # syntactically valid (nothing dials it at boot).
+  image-health:
+    name: image-health
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - name: Generate a minimal bundle
+        run: |
+          go build -o /tmp/wavefront-bundle ./cmd/wavefront-bundle
+          cat > /tmp/openapi.json <<'EOF'
+          {
+            "openapi": "3.1.0",
+            "info": {"title": "ci", "version": "1"},
+            "paths": {"/v1/echo": {"post": {"operationId": "echo",
+              "requestBody": {"content": {"application/json": {"schema": {"$ref": "#/components/schemas/Echo"}}}},
+              "responses": {"200": {"content": {"application/json": {"schema": {"$ref": "#/components/schemas/Echo"}}}}}}}},
+            "components": {"schemas": {"Echo": {"type": "object", "properties": {"text": {"type": "string"}}}}}
+          }
+          EOF
+          mkdir -p /tmp/bundle
+          /tmp/wavefront-bundle add --openapi /tmp/openapi.json --bundle /tmp/bundle
+          chmod -R a+rX /tmp/bundle
+      - name: Build image
+        run: docker build -t wavefront:ci .
+      - name: Healthcheck flips the container to healthy
+        run: |
+          docker run -d --name wf \
+            -v /tmp/bundle:/bundle:ro \
+            -e WAVEFRONT_BUNDLE_PATH=/bundle \
+            -e WAVEFRONT_UPSTREAM_BASE_URL=http://upstream.invalid:8000 \
+            wavefront:ci
+          for i in $(seq 1 20); do
+            s=$(docker inspect -f '{{.State.Health.Status}}' wf)
+            echo "t+$((i*3))s health=$s"
+            [ "$s" = healthy ] && exit 0
+            sleep 3
+          done
+          echo "container never became healthy"
+          docker logs wf
+          docker inspect -f '{{json .State.Health}}' wf
+          exit 1
+
   buf-breaking:
     name: buf-breaking
     runs-on: ubuntu-latest

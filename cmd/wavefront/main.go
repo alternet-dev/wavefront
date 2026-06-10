@@ -19,6 +19,13 @@ import (
 )
 
 func main() {
+	// `wavefront probe --ready` is the container self-probe (the distroless
+	// image has no shell or wget for an exec healthcheck); it never loads the
+	// full config or bundle.
+	if len(os.Args) > 1 && os.Args[1] == "probe" {
+		os.Exit(runProbe(os.Args[2:]))
+	}
+
 	cfg, err := config.Load()
 	if err != nil {
 		slog.Error("invalid configuration", "err", err)

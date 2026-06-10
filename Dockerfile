@@ -25,4 +25,12 @@ FROM gcr.io/distroless/static-debian12:nonroot
 COPY --from=builder /out/wavefront /wavefront
 
 EXPOSE 8080 9090
+
+# Distroless has no shell or wget, so an exec-style healthcheck must be the
+# binary probing itself: `probe --ready` GETs the ops listener's /ready (the
+# configured WAVEFRONT_METRICS_ADDR) and exits 0 only on 200. Exec form is
+# required — there is no /bin/sh for CMD-SHELL.
+HEALTHCHECK --interval=10s --timeout=3s --start-period=5s \
+  CMD ["/wavefront", "probe", "--ready"]
+
 ENTRYPOINT ["/wavefront"]
