@@ -321,6 +321,19 @@ header value, or the literal `unknown` if the client sent none. Only this
 response header echoes raw values — the metric label and structured log line
 stay at bundle-known versions so the Prometheus cardinality stays bounded.
 
+### CORS
+
+wavefront is browser-facing but does not own CORS — the upstream is the single
+source of truth. A CORS preflight (`OPTIONS` with `Origin` +
+`Access-Control-Request-Method`) is forwarded to the default upstream and its
+response relayed, bypassing routing and the codec; it never 404s as an unbound
+route. On a proxied response, the upstream's `Access-Control-*` and `Vary`
+headers are carried through verbatim. The one gap is deliberate: a
+wavefront-originated response (an error synthesized before any upstream call —
+`unsupported_contract_version`, `unknown_route`, `unsupported_media_type`) has no
+upstream CORS to mirror and carries none, so a browser cannot read it
+cross-origin. Those are misconfigured-request conditions, not the normal flow.
+
 ## Forward compatibility
 
 Removing or renaming a schema field or a transform verb is a breaking change.

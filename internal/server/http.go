@@ -120,7 +120,40 @@ func isProtobufContentType(v string) bool {
 	return strings.EqualFold(mt, wireerror.MediaTypeProtobuf)
 }
 
+// isCORSPreflight reports whether r is a CORS preflight: an OPTIONS request
+// carrying the browser's preflight markers (Origin + Access-Control-Request-
+// Method). wavefront forwards these to the upstream rather than routing them as
+// a contract request (#147).
+func isCORSPreflight(r *http.Request) bool {
+	return r.Method == http.MethodOptions &&
+		r.Header.Get("Origin") != "" &&
+		r.Header.Get("Access-Control-Request-Method") != ""
+}
+
+// copyCORSHeaders carries the upstream's CORS response headers (Access-Control-*
+// and the accompanying Vary) onto dst. wavefront does not own CORS — the
+// upstream is the single source of truth (#147) — so these are relayed verbatim
+// whenever the upstream actually responded. A response wavefront synthesizes
+// without calling an upstream carries none (the documented pass-through gap).
+func copyCORSHeaders(dst, src http.Header) {
+	for k, vs := range src {
+		if k == "Vary" || strings.HasPrefix(k, "Access-Control-") {
+			for _, v := range vs {
+				dst.Add(k, v)
+			}
+		}
+	}
+}
+
 func (s *Server) proxy(w http.ResponseWriter, r *http.Request) {
+	// CORS preflight: forward to the upstream and relay its CORS answer. A
+	// preflight is not a contract request, so it is handled before tracing,
+	// metrics, routing, and negotiation (#147).
+	if isCORSPreflight(r) {
+		s.proxyPreflight(w, r)
+		return
+	}
+
 	start := time.Now()
 	// One wavefront-attributed span per request, continuing the inbound W3C
 	// traceparent when present. nil (tracing disabled / unsampled) is a safe
@@ -363,6 +396,13 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Carry the upstream's CORS headers onto whatever response we derive from
+	// its reply — success, 204/205, declared-error, aid envelope, and the
+	// capability-ceiling 502 all flow from here. Set before the status dispatch
+	// so every later write (including writeError via fail()) already has them.
+	// wavefront does not own CORS; the upstream is the source of truth (#147).
+	copyCORSHeaders(w.Header(), uresp.Header)
+
 	// HTTP status dispatch (issue #39 and #53): the upstream's status
 	// determines how wavefront shapes the response.
 	//
@@ -474,6 +514,45 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set(headerContractVersion, version)
 	w.WriteHeader(uresp.StatusCode)
 	_, _ = w.Write(out)
+}
+
+// proxyPreflight forwards a CORS preflight to the default upstream and relays
+// its CORS response (#147). A preflight carries no body, no contract-version
+// header, and resolves no route, so it bypasses routing, negotiation, and the
+// codec entirely. It is sent to the default upstream (WAVEFRONT_UPSTREAM_BASE_URL):
+// a deployment's allowed origins are uniform, so one upstream's answer suffices
+// even for a multi-target bundle.
+func (s *Server) proxyPreflight(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), s.cfg.RequestTimeout)
+	defer cancel()
+
+	url := strings.TrimRight(s.cfg.UpstreamBaseURL, "/") + r.URL.Path
+	if r.URL.RawQuery != "" {
+		url += "?" + r.URL.RawQuery
+	}
+	ureq, err := http.NewRequestWithContext(ctx, http.MethodOptions, url, nil)
+	if err != nil {
+		http.Error(w, "preflight request build failed", http.StatusBadGateway)
+		return
+	}
+	// Origin and Access-Control-Request-* must reach the upstream so its CORS
+	// middleware can decide the answer.
+	forwardClientHeaders(ureq.Header, r.Header)
+
+	uresp, err := s.client.Do(ureq)
+	if err != nil {
+		http.Error(w, "preflight upstream unreachable", http.StatusBadGateway)
+		return
+	}
+	defer uresp.Body.Close()
+
+	copyCORSHeaders(w.Header(), uresp.Header)
+	// A preflight response may also advertise the allowed methods via Allow.
+	if allow := uresp.Header.Get("Allow"); allow != "" {
+		w.Header().Set("Allow", allow)
+	}
+	w.WriteHeader(uresp.StatusCode)
+	_, _ = io.Copy(w, uresp.Body)
 }
 
 // describeResolution classifies a contract's resolution for the structured
