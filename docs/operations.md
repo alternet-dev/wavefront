@@ -29,11 +29,19 @@ and `WAVEFRONT_UPSTREAM_BASE_URL`.
 
 ## Bundle rollout
 
-The bundle is loaded at boot. A missing or invalid bundle at boot is fatal —
-`wavefront` refuses to start (fail-fast), so a bad bundle cannot take
-traffic. Because replicas are stateless, a normal rolling deploy is a clean
-swap — readiness gates on the bundle, so the load balancer does not send
-traffic to a fresh pod until it has loaded.
+The bundle is loaded at boot from either its canonical directory or an
+optional gzip-compressed tar archive produced by `wavefront-bundle pack`. A
+packed archive is a derived delivery artifact: keep using the directory for
+`add`, `remove`, `retire`, and consumer descriptor generation, then pack it
+for an image or mount. The proxy decompresses an archive in memory during
+load; it does not extract files onto disk. Expanded archive file content is
+capped at 1 GiB; use the canonical directory directly for a larger bundle.
+
+A missing, invalid, or malformed compressed bundle at boot is fatal —
+`wavefront` refuses to start (fail-fast), so a bad bundle cannot take traffic.
+Because replicas are stateless, a normal rolling deploy is a clean swap —
+readiness gates on the bundle, so the load balancer does not send traffic to
+a fresh pod until it has loaded.
 
 For in-place updates without a redeploy, `wavefront` accepts `SIGHUP`: on
 the signal it re-reads `WAVEFRONT_BUNDLE_PATH` and atomically swaps the
@@ -120,7 +128,7 @@ request.
 | Symptom | Cause | Fix |
 |---|---|---|
 | Process refuses to start | bad/missing bundle or required env unset | stderr logs the specific error; check `WAVEFRONT_BUNDLE_PATH`, `WAVEFRONT_UPSTREAM_BASE_URL` |
-| `/ready` stays 503 forever | bundle didn't load at boot | check the fail-fast log line; verify the bundle directory |
+| `/ready` stays 503 forever | bundle didn't load at boot | check the fail-fast log line; verify the bundle directory or archive |
 | Spike of `unsupported_contract_version` (400) | client header value not in the bundle | check the bundle has that version; check `WAVEFRONT_CONTRACT_VERSION_HEADER` matches between ingress and the proxy |
 | Spike of `transform_failed` (422) on one version | a request stanza can't apply to live payloads | inspect that version's `resolution.yaml` entry; the source field is absent or unparseable |
 | Spike of `transform_failed` (502) on one version | the live upstream shape drifted from that version's response stanzas | regenerate the bundle or update the version's response stanzas to the new shape |

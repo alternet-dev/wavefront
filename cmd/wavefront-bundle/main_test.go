@@ -35,6 +35,30 @@ func TestRunAddCreatesALayer(t *testing.T) {
 	}
 }
 
+func TestRunPackCreatesAVerifiableArchive(t *testing.T) {
+	in := writeSampleOpenAPI(t)
+	bundleDir := t.TempDir()
+	if code := run([]string{"add", "--openapi", in, "--bundle", bundleDir}, io.Discard); code != 0 {
+		t.Fatalf("run add: exit code %d, want 0", code)
+	}
+	archive := filepath.Join(t.TempDir(), "bundle.tar.gz")
+	if code := run([]string{"pack", "--bundle", bundleDir, "--out", archive}, io.Discard); code != 0 {
+		t.Fatalf("run pack: exit code %d, want 0", code)
+	}
+	if code := run([]string{"verify", "--bundle", archive}, io.Discard); code != 0 {
+		t.Fatalf("verify packed archive: exit code %d, want 0", code)
+	}
+}
+
+func TestRunPackRequiresBundleAndOutput(t *testing.T) {
+	if code := run([]string{"pack", "--bundle", t.TempDir()}, io.Discard); code != 2 {
+		t.Fatalf("pack without --out: exit code %d, want 2", code)
+	}
+	if code := run([]string{"pack", "--out", filepath.Join(t.TempDir(), "bundle.tar.gz")}, io.Discard); code != 2 {
+		t.Fatalf("pack without --bundle: exit code %d, want 2", code)
+	}
+}
+
 // TestRunAddRefusesReAddWithoutForce confirms the default behaviour: a
 // second add against the same info.version is a hard error.
 func TestRunAddRefusesReAddWithoutForce(t *testing.T) {

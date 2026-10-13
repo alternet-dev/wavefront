@@ -128,13 +128,30 @@ bundle/
 `retire` take a version out of service, and `verify` gates the bundle's
 consistency in your CI.
 
+To ship a smaller derived artifact while keeping the canonical bundle
+directory available to descriptor tooling, pack it after verification:
+
+```bash
+wavefront-bundle pack --bundle ./bundle --out ./bundle.tar.gz
+
+WAVEFRONT_BUNDLE_PATH=./bundle.tar.gz \
+WAVEFRONT_UPSTREAM_BASE_URL=http://localhost:9000 \
+./wavefront
+```
+
+Packing is opt-in, uses gzip from the Go standard library, and does not change
+the in-memory bundle. The proxy decompresses the archive once at load (and
+again on an explicit `SIGHUP` reload). `verify` and `draft-shim` accept either
+the directory or archive; bundle mutation commands continue to use the
+directory.
+
 ## Configuration
 
 All configuration is environment variables, read once at startup.
 
 | Var | Default | Meaning |
 |---|---|---|
-| `WAVEFRONT_BUNDLE_PATH` | — (required) | path to the descriptor bundle dir |
+| `WAVEFRONT_BUNDLE_PATH` | — (required) | path to the descriptor bundle directory or packed `.tar.gz` archive |
 | `WAVEFRONT_UPSTREAM_BASE_URL` | — (required) | the default internal backend base URL |
 | `WAVEFRONT_TARGETS` | (none) | named backend targets, comma-separated `name=url` pairs |
 | `WAVEFRONT_LISTEN_ADDR` | `0.0.0.0:8080` | bind address for HTTP |
