@@ -32,7 +32,7 @@ import (
 // slow-header path — the captured status stays zero and the metric records
 // the literal `"unknown"`.
 //
-// State model (HTTP/1.1; wavefront is plaintext-only, no HTTP/2):
+// State model (plaintext HTTP/1.1 mode only):
 //
 //   StateNew      — connection accepted; no entry yet (keeps the map small
 //                   when a client connects and drops without sending bytes).
@@ -173,7 +173,9 @@ func (s *Server) markHandlerSeen(next http.Handler) http.Handler {
 // WireDataServer covers the half of the observability that lives on the
 // *http.Server. The other half — wrapping the listener so every accepted
 // conn is a *sniffingConn that captures the first response status line —
-// is WrapDataListener. Run wires both; boundary tests wrap the
+// is WrapDataListener. Run wires both only in the dedicated `http1` inbound
+// mode; h2c and TLS/QUIC modes use multiplexed or encrypted framing this
+// observer does not parse. Boundary tests wrap the
 // httptest.Server.Listener before Start() so the same path is exercised.
 func (s *Server) WireDataServer(srv *http.Server) {
 	srv.ConnContext = s.connContext

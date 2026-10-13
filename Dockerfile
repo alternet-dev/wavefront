@@ -24,7 +24,7 @@ FROM gcr.io/distroless/static-debian12:nonroot
 
 COPY --from=builder /out/wavefront /wavefront
 
-EXPOSE 8080 9090
+EXPOSE 8080 8080/udp 9090
 
 # Distroless has no shell or wget, so an exec-style healthcheck must be the
 # binary probing itself: `probe --ready` GETs the ops listener's /ready (the

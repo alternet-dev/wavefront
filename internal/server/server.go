@@ -6,7 +6,9 @@ package server
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -17,6 +19,7 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"github.com/quic-go/quic-go/http3"
 	"google.golang.org/protobuf/reflect/protoreflect"
 
 	"github.com/alternet-dev/wavefront/internal/adapter"
@@ -179,20 +182,37 @@ func (s *Server) OpsHandler() http.Handler {
 
 // Run starts both listeners and shuts them down gracefully when ctx is done.
 func (s *Server) Run(ctx context.Context) error {
-	data := &http.Server{
-		Addr:              s.cfg.ListenAddr,
-		Handler:           s.DataHandler(),
-		ReadHeaderTimeout: s.cfg.ReadHeaderTimeout,
-		ReadTimeout:       s.cfg.ReadTimeout,
-		IdleTimeout:       srvIdleTimeout,
-		// WriteTimeout intentionally unset — see the timeout consts.
+	mode := s.inboundProtocol()
+	if !mode.Valid() {
+		return fmt.Errorf("unsupported inbound protocol %q", mode)
 	}
-	// Wire ConnContext + ConnState on the data plane so the
-	// wavefront_stdlib_boundary_total counter observes responses net/http
-	// emitted before the wavefront handler ran. The ops listener is
-	// deliberately NOT wired — its responses are wavefront-served and a
-	// boundary counter on /metrics traffic would be meaningless.
-	s.WireDataServer(data)
+	dataHandler := s.DataHandler()
+	if mode.UsesHTTP3() {
+		var err error
+		dataHandler, err = withHTTP3Advertisement(s.cfg.ListenAddr, dataHandler)
+		if err != nil {
+			return err
+		}
+	}
+	data := s.newDataHTTPServer(dataHandler)
+
+	var tlsConfig *tls.Config
+	if mode.UsesTLS() {
+		var err error
+		tlsConfig, err = s.loadTLSConfig()
+		if err != nil {
+			return err
+		}
+		data.TLSConfig = tlsConfig.Clone()
+	}
+
+	// The stdlib-boundary observer models one request at a time per connection
+	// and sniffs plaintext HTTP/1.x response lines. Keep it on the dedicated
+	// HTTP/1 mode; multiplexed and encrypted transports retain handler-level
+	// metrics without feeding incompatible framing into that observer.
+	if mode == config.InboundHTTP1 {
+		s.WireDataServer(data)
+	}
 	// Open the data-plane listener explicitly so we can wrap it before
 	// handing it to Serve. Wrapping AT the listener (rather than re-wrapping
 	// inside net/http) is the only way to make the conn that lands in
@@ -203,9 +223,11 @@ func (s *Server) Run(ctx context.Context) error {
 	// `net.Listen("tcp", Addr) + Serve` shape here.
 	dataLn, err := net.Listen("tcp", s.cfg.ListenAddr)
 	if err != nil {
-		return err
+		return fmt.Errorf("listen on data-plane TCP address: %w", err)
 	}
-	dataLn = s.WrapDataListener(dataLn)
+	if mode == config.InboundHTTP1 {
+		dataLn = s.WrapDataListener(dataLn)
+	}
 	ops := &http.Server{
 		Addr:              s.cfg.MetricsAddr,
 		Handler:           s.OpsHandler(),
@@ -214,20 +236,63 @@ func (s *Server) Run(ctx context.Context) error {
 		WriteTimeout:      opsWriteTimeout,
 		IdleTimeout:       srvIdleTimeout,
 	}
+	opsLn, err := net.Listen("tcp", s.cfg.MetricsAddr)
+	if err != nil {
+		_ = dataLn.Close()
+		return fmt.Errorf("listen on ops TCP address: %w", err)
+	}
 
-	errc := make(chan error, 2)
-	go func() { errc <- data.Serve(dataLn) }()
-	go func() { errc <- ops.ListenAndServe() }()
+	var h3 *http3.Server
+	var h3Conn net.PacketConn
+	if mode.UsesHTTP3() {
+		h3Conn, err = net.ListenPacket("udp", s.cfg.ListenAddr)
+		if err != nil {
+			_ = dataLn.Close()
+			_ = opsLn.Close()
+			return fmt.Errorf("listen on data-plane UDP address: %w", err)
+		}
+		h3 = &http3.Server{
+			Handler:     dataHandler,
+			TLSConfig:   tlsConfig.Clone(),
+			IdleTimeout: srvIdleTimeout,
+		}
+	}
 
-	select {
-	case <-ctx.Done():
+	serverCount := 2
+	if h3 != nil {
+		serverCount++
+	}
+	errc := make(chan error, serverCount)
+	go func() {
+		if mode.UsesTLS() {
+			errc <- data.ServeTLS(dataLn, "", "")
+			return
+		}
+		errc <- data.Serve(dataLn)
+	}()
+	go func() { errc <- ops.Serve(opsLn) }()
+	if h3 != nil {
+		go func() { errc <- h3.Serve(h3Conn) }()
+	}
+
+	shutdown := func() {
 		shutCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 		defer cancel()
 		_ = data.Shutdown(shutCtx)
 		_ = ops.Shutdown(shutCtx)
+		if h3 != nil {
+			_ = h3.Shutdown(shutCtx)
+			_ = h3Conn.Close()
+		}
 		_ = s.tracer.Shutdown(shutCtx)
+	}
+
+	select {
+	case <-ctx.Done():
+		shutdown()
 		return nil
 	case err := <-errc:
+		shutdown()
 		return err
 	}
 }

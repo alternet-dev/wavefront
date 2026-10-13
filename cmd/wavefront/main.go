@@ -59,7 +59,7 @@ func main() {
 		}
 	}()
 
-	slog.Info("wavefront listening", "data", cfg.ListenAddr, "ops", cfg.MetricsAddr)
+	slog.Info("wavefront listening", "data", cfg.ListenAddr, "ops", cfg.MetricsAddr, "inbound_protocol", cfg.InboundProtocol)
 	if err := srv.Run(ctx); err != nil {
 		slog.Error("server stopped with error", "err", err)
 		os.Exit(1)

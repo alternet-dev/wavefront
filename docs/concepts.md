@@ -90,8 +90,9 @@ is wire-format); **query-param transforms** — cross-version param-shape
 differences belong to the routing layer (each contract routes to its own
 internal version, whose OpenAPI owns that version's param names), so the
 proxy forwards `r.URL.RawQuery` verbatim and never translates it; message
-broker / database / persistence; TLS/cert/host routing; service discovery
-(upstreams are statically configured); WebSocket/streaming.
+broker / database / persistence; certificate issuance or renewal; host
+routing; service discovery (upstreams are statically configured);
+WebSocket/streaming.
 
 ## What `wavefront` is, in one sentence
 

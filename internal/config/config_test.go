@@ -43,6 +43,12 @@ func TestLoadsWithMinimalRequiredEnv(t *testing.T) {
 	if cfg.MetricsAddr != "0.0.0.0:9090" {
 		t.Errorf("MetricsAddr default = %q", cfg.MetricsAddr)
 	}
+	if cfg.InboundProtocol != InboundHTTP1 {
+		t.Errorf("InboundProtocol default = %q", cfg.InboundProtocol)
+	}
+	if cfg.TLSCertFile != "" || cfg.TLSKeyFile != "" {
+		t.Errorf("TLS files should be empty in default mode, got cert=%q key=%q", cfg.TLSCertFile, cfg.TLSKeyFile)
+	}
 	if cfg.ContractVersionHeader != "X-Api-Contract-Version" {
 		t.Errorf("ContractVersionHeader default = %q", cfg.ContractVersionHeader)
 	}
@@ -73,6 +79,7 @@ func TestOverridesParse(t *testing.T) {
 	p["WAVEFRONT_READ_TIMEOUT_MS"] = "5000"
 	p["WAVEFRONT_MAX_BODY_BYTES"] = "2048"
 	p["WAVEFRONT_LOG_LEVEL"] = "debug"
+	p["WAVEFRONT_PROTOCOL_INBOUND"] = "h2c"
 	cfg, err := load(p)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -100,6 +107,76 @@ func TestOverridesParse(t *testing.T) {
 	}
 	if cfg.LogLevel != slog.LevelDebug {
 		t.Errorf("LogLevel = %v", cfg.LogLevel)
+	}
+	if cfg.InboundProtocol != InboundH2C {
+		t.Errorf("InboundProtocol = %q", cfg.InboundProtocol)
+	}
+}
+
+func TestInboundProtocolsParse(t *testing.T) {
+	for _, want := range []InboundProtocol{InboundHTTP1, InboundH2C, InboundHTTPS, InboundHTTPSH3} {
+		t.Run(string(want), func(t *testing.T) {
+			p := minimal()
+			p["WAVEFRONT_PROTOCOL_INBOUND"] = string(want)
+			if want.UsesTLS() {
+				p["WAVEFRONT_TLS_CERT_FILE"] = "/run/tls/tls.crt"
+				p["WAVEFRONT_TLS_KEY_FILE"] = "/run/tls/tls.key"
+			}
+			cfg, err := load(p)
+			if err != nil {
+				t.Fatalf("load: %v", err)
+			}
+			if cfg.InboundProtocol != want {
+				t.Errorf("InboundProtocol = %q, want %q", cfg.InboundProtocol, want)
+			}
+		})
+	}
+}
+
+func TestInboundProtocolIsCaseInsensitive(t *testing.T) {
+	p := minimal()
+	p["WAVEFRONT_PROTOCOL_INBOUND"] = "H2C"
+	cfg, err := load(p)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.InboundProtocol != InboundH2C {
+		t.Errorf("InboundProtocol = %q, want %q", cfg.InboundProtocol, InboundH2C)
+	}
+}
+
+func TestInvalidInboundProtocolIsError(t *testing.T) {
+	p := minimal()
+	p["WAVEFRONT_PROTOCOL_INBOUND"] = "spdy"
+	_, err := load(p)
+	var ie *InvalidError
+	if !errors.As(err, &ie) || ie.Var != "WAVEFRONT_PROTOCOL_INBOUND" {
+		t.Fatalf("want InvalidError(WAVEFRONT_PROTOCOL_INBOUND), got %v", err)
+	}
+}
+
+func TestTLSModesRequireCertificateAndKey(t *testing.T) {
+	for _, mode := range []InboundProtocol{InboundHTTPS, InboundHTTPSH3} {
+		t.Run(string(mode)+" missing certificate", func(t *testing.T) {
+			p := minimal()
+			p["WAVEFRONT_PROTOCOL_INBOUND"] = string(mode)
+			_, err := load(p)
+			var me *MissingError
+			if !errors.As(err, &me) || me.Var != "WAVEFRONT_TLS_CERT_FILE" {
+				t.Fatalf("want MissingError(WAVEFRONT_TLS_CERT_FILE), got %v", err)
+			}
+		})
+
+		t.Run(string(mode)+" missing key", func(t *testing.T) {
+			p := minimal()
+			p["WAVEFRONT_PROTOCOL_INBOUND"] = string(mode)
+			p["WAVEFRONT_TLS_CERT_FILE"] = "/run/tls/tls.crt"
+			_, err := load(p)
+			var me *MissingError
+			if !errors.As(err, &me) || me.Var != "WAVEFRONT_TLS_KEY_FILE" {
+				t.Fatalf("want MissingError(WAVEFRONT_TLS_KEY_FILE), got %v", err)
+			}
+		})
 	}
 }
 
