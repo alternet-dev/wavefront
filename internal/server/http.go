@@ -6,12 +6,12 @@ import (
 	"errors"
 	"io"
 	"log/slog"
-	"mime"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/alternet-dev/wavefront/internal/adapter"
 	"github.com/alternet-dev/wavefront/internal/bundle"
 	"github.com/alternet-dev/wavefront/internal/negotiate"
 	"github.com/alternet-dev/wavefront/internal/tracing"
@@ -25,6 +25,7 @@ import (
 const (
 	headerContentType     = wireerror.HeaderContentType
 	headerContractVersion = wireerror.HeaderContractVersion
+	headerAccept          = "Accept"
 )
 
 // versionUnknown is the contract_version label value (and response-header
@@ -39,14 +40,16 @@ const versionUnknown = wireerror.VersionUnknown
 const outcomeOK = "ok"
 
 // hopByHop are the RFC 7230 §6.1 connection-scoped headers plus the
-// framing/content headers net/http owns for the freshly-built upstream
-// request. wavefront forwards every OTHER client header through untouched —
-// it is an auth-transparent edge proxy, not a policy/authz engine; header
-// policy, if a deployment wants it, belongs to the ingress, not here. These
-// are withheld purely for HTTP correctness, never as policy: hop-by-hop must
-// not cross a proxy boundary; Host/Content-Length/Transfer-Encoding are
-// framing net/http manages; Content-Type is set to the codec's output type.
+// framing/representation headers wavefront owns for the freshly-built upstream
+// request. wavefront forwards every OTHER client header through untouched — it
+// is an auth-transparent edge proxy, not a policy/authz engine; header policy,
+// if a deployment wants it, belongs to the ingress, not here. These are
+// withheld purely for HTTP correctness, never as policy: hop-by-hop must not
+// cross a proxy boundary; Host/Content-Length/Transfer-Encoding are framing
+// net/http manages; Content-Type and Accept describe the internal JSON side of
+// the selected codecs.
 var hopByHop = map[string]bool{
+	"Accept":              true,
 	"Connection":          true,
 	"Keep-Alive":          true,
 	"Proxy-Authenticate":  true,
@@ -61,8 +64,9 @@ var hopByHop = map[string]bool{
 }
 
 // forwardClientHeaders copies every client header to the upstream request
-// except hopByHop and any header the client itself named in Connection
-// (RFC 7230 §6.1 — connection-scoped by the sender's declaration).
+// except the connection/framing/representation fields in hopByHop and any
+// header the client itself named in Connection (RFC 7230 §6.1 —
+// connection-scoped by the sender's declaration).
 func forwardClientHeaders(dst, src http.Header) {
 	skip := map[string]bool{}
 	for _, c := range src["Connection"] {
@@ -105,21 +109,6 @@ func hasRequestBody(r *http.Request) bool {
 	return false
 }
 
-// isProtobufContentType reports whether v names the codec's protobuf media
-// type. Media-type comparison is case-insensitive (RFC 9110 §8.3.1) and
-// parameter-tolerant: `application/protobuf; charset=binary` is still the
-// protobuf media type. An unparseable or absent value is rejected.
-func isProtobufContentType(v string) bool {
-	if v == "" {
-		return false
-	}
-	mt, _, err := mime.ParseMediaType(v)
-	if err != nil {
-		return false
-	}
-	return strings.EqualFold(mt, wireerror.MediaTypeProtobuf)
-}
-
 // isCORSPreflight reports whether r is a CORS preflight: an OPTIONS request
 // carrying the browser's preflight markers (Origin + Access-Control-Request-
 // Method). wavefront forwards these to the upstream rather than routing them as
@@ -130,14 +119,46 @@ func isCORSPreflight(r *http.Request) bool {
 		r.Header.Get("Access-Control-Request-Method") != ""
 }
 
+// addVary merges comma-separated Vary tokens into one deduplicated field. A
+// wildcard replaces named tokens because `Vary: *` already covers every
+// request field. Keeping one field also makes additions from codec negotiation
+// and the upstream compose predictably.
+func addVary(h http.Header, values ...string) {
+	tokens := make([]string, 0)
+	seen := make(map[string]bool)
+	for _, value := range append(h.Values("Vary"), values...) {
+		for _, token := range strings.Split(value, ",") {
+			token = strings.TrimSpace(token)
+			if token == "" {
+				continue
+			}
+			if token == "*" {
+				h.Set("Vary", "*")
+				return
+			}
+			key := strings.ToLower(token)
+			if !seen[key] {
+				seen[key] = true
+				tokens = append(tokens, token)
+			}
+		}
+	}
+	h.Set("Vary", strings.Join(tokens, ", "))
+}
+
 // copyCORSHeaders carries the upstream's CORS response headers (Access-Control-*
 // and the accompanying Vary) onto dst. wavefront does not own CORS — the
-// upstream is the single source of truth (#147) — so these are relayed verbatim
-// whenever the upstream actually responded. A response wavefront synthesizes
-// without calling an upstream carries none (the documented pass-through gap).
+// upstream is the single source of truth (#147) — so Access-Control-* values
+// are relayed verbatim and Vary is merged with wavefront's Accept token. A
+// response wavefront synthesizes without calling an upstream carries none (the
+// documented pass-through gap).
 func copyCORSHeaders(dst, src http.Header) {
 	for k, vs := range src {
-		if k == "Vary" || strings.HasPrefix(k, "Access-Control-") {
+		if k == "Vary" {
+			addVary(dst, vs...)
+			continue
+		}
+		if strings.HasPrefix(k, "Access-Control-") {
 			for _, v := range vs {
 				dst.Add(k, v)
 			}
@@ -259,31 +280,33 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Pre-decode envelope check: a request that carries a body must declare
-	// the codec's media type. The v0.1 codec is `application/protobuf`
-	// (wireerror.MediaTypeProtobuf); a wrong declaration is rejected here
-	// with the 415 unsupported_media_type envelope rather than being folded
-	// into the downstream 400 decode_failed. This keeps the two failure modes
-	// distinct on the wire: 415 = wrong envelope, 400 = valid envelope whose
-	// bytes don't parse.
+	// Content negotiation is transport work and happens before the body read.
+	// Content-Type selects the request decoder whenever bytes are present;
+	// Accept independently selects the response encoder. A wrong request
+	// envelope is 415 rather than downstream decode_failed, while an Accept
+	// value that excludes every shipped codec is 406.
 	//
 	// Ordering: AFTER the route gate (so unknown_route still wins on an
 	// unmatched path) and BEFORE the body read/decode (so decode_failed stays
 	// reserved for malformed protobuf inside a valid envelope).
 	//
-	// No-body rule: if there is no body, no envelope has been declared and
-	// the check is a no-op. The simplest, safest rule is to only require a
-	// Content-Type when the request actually presents bytes — a no-body
-	// request that lacks Content-Type is accepted. A request that DOES carry
-	// a body but lacks Content-Type is rejected (an empty string is not the
-	// protobuf media type either, so the same comparison handles it). When a
-	// future multi-codec selector lands (issue #44) this comparison becomes
-	// table-driven against the negotiated codec.
-	if hasRequestBody(r) {
-		if !isProtobufContentType(r.Header.Get(headerContentType)) {
-			fail(wireerror.UnsupportedMediaType("request Content-Type is not "+wireerror.MediaTypeProtobuf), "")
-			return
-		}
+	// No-body rule: with no bytes there is no request envelope to negotiate;
+	// protobuf is the compatibility fallback decoder, and Accept still chooses
+	// the response. With bytes, an absent Content-Type is unsupported just like
+	// any other media type not present in the registry.
+	requestCodec, ok := s.codecs.requestAdapter(r.Header.Get(headerContentType), hasRequestBody(r))
+	if !ok {
+		fail(wireerror.UnsupportedMediaType("request Content-Type must be "+adapter.MediaTypeProtobuf+" or "+adapter.MediaTypeJSON), "")
+		return
+	}
+	// A cache must not reuse one negotiated representation for a request with a
+	// different Accept value. Set this before response negotiation so the 406
+	// alternative is covered too; later upstream Vary values are appended.
+	addVary(w.Header(), headerAccept)
+	responseCodec, ok := s.codecs.responseAdapter(r.Header.Values(headerAccept), requestCodec)
+	if !ok {
+		fail(wireerror.NotAcceptable("request Accept does not permit "+adapter.MediaTypeProtobuf+" or "+adapter.MediaTypeJSON), "")
+		return
 	}
 
 	// Early Content-Length size check: if the client declared a length that
@@ -336,7 +359,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request) {
 	route = c.Route()
 	resolutionKind = describeResolution(c)
 
-	call, werr := s.adapter.DecodeRequest(c, body)
+	call, werr := requestCodec.DecodeRequest(c, body)
 	if werr != nil {
 		fail(werr, "")
 		return
@@ -371,9 +394,12 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	forwardClientHeaders(ureq.Header, r.Header)
+	// Both external codecs target the internal HTTP/JSON backend. Do not leak
+	// the client's external Accept through: explicitly request JSON upstream.
+	ureq.Header.Set(headerAccept, adapter.MediaTypeJSON)
 	// A bodyless upstream call (synthetic Empty request_message) declares no
 	// envelope: leave Content-Type unset so the upstream GET/path-only POST is
-	// clean. Content-Type is hop-by-hop here, so no client value leaks through.
+	// clean. Content-Type is codec-owned here, so no client value leaks through.
 	if call.ContentType != "" {
 		ureq.Header.Set(headerContentType, call.ContentType)
 	}
@@ -465,13 +491,13 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 			}
-			out, ct, eerr := s.adapter.EncodeError(c, uresp.StatusCode, upBody)
+			out, ct, eerr := responseCodec.EncodeError(c, uresp.StatusCode, upBody)
 			if eerr != nil {
 				fail(eerr, "")
 				return
 			}
 			if ct == "" {
-				ct = wireerror.MediaTypeProtobuf
+				ct = responseCodec.MediaType()
 			}
 			w.Header().Set(headerContentType, ct)
 			w.Header().Set(headerContractVersion, version)
@@ -505,7 +531,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	out, ct, werr := s.adapter.EncodeResponse(c, upBody)
+	out, ct, werr := responseCodec.EncodeResponse(c, upBody)
 	if werr != nil {
 		fail(werr, "")
 		return

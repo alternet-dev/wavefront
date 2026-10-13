@@ -112,38 +112,57 @@ func runSkewScenario(t *testing.T, dir string) {
 	if err != nil {
 		t.Fatalf("marshal request proto: %v", err)
 	}
-
-	req, _ := http.NewRequest(contract.Method(), h.Proxy.URL+contract.Route(), bytes.NewReader(reqBytes))
-	req.Header.Set("Content-Type", "application/protobuf")
-	req.Header.Set("X-Api-Contract-Version", version)
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatalf("do: %v", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		t.Fatalf("status=%d body=%q", resp.StatusCode, body)
-	}
-
-	if expectedBackendReq != nil {
-		jsonEqualMaps(t, "backend request", h.Backend.Last().Body, expectedBackendReq)
-	}
-
-	rawResp, _ := io.ReadAll(resp.Body)
 	respMD, err := h.Bundle.Message(contract.ResponseMessage())
 	if err != nil {
 		t.Fatalf("resolve %s: %v", contract.ResponseMessage(), err)
 	}
-	respMsg := dynamicpb.NewMessage(respMD)
-	if err := proto.Unmarshal(rawResp, respMsg); err != nil {
-		t.Fatalf("unmarshal response proto: %v", err)
+
+	codecs := []struct {
+		name        string
+		contentType string
+		requestBody []byte
+	}{
+		{name: "protobuf", contentType: "application/protobuf", requestBody: reqBytes},
+		{name: "json", contentType: "application/json", requestBody: requestPayload},
 	}
-	gotJSON, err := protojson.Marshal(respMsg)
-	if err != nil {
-		t.Fatalf("marshal response json: %v", err)
+	for _, codec := range codecs {
+		t.Run(codec.name, func(t *testing.T) {
+			req, _ := http.NewRequest(contract.Method(), h.Proxy.URL+contract.Route(), bytes.NewReader(codec.requestBody))
+			req.Header.Set("Content-Type", codec.contentType)
+			req.Header.Set("Accept", codec.contentType)
+			req.Header.Set("X-Api-Contract-Version", version)
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatalf("do: %v", err)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				body, _ := io.ReadAll(resp.Body)
+				t.Fatalf("status=%d body=%q", resp.StatusCode, body)
+			}
+			if got := resp.Header.Get("Content-Type"); got != codec.contentType {
+				t.Errorf("Content-Type=%q want %q", got, codec.contentType)
+			}
+
+			if expectedBackendReq != nil {
+				jsonEqualMaps(t, "backend request", h.Backend.Last().Body, expectedBackendReq)
+			}
+
+			rawResp, _ := io.ReadAll(resp.Body)
+			gotJSON := rawResp
+			if codec.contentType == "application/protobuf" {
+				respMsg := dynamicpb.NewMessage(respMD)
+				if err := proto.Unmarshal(rawResp, respMsg); err != nil {
+					t.Fatalf("unmarshal response proto: %v", err)
+				}
+				gotJSON, err = protojson.Marshal(respMsg)
+				if err != nil {
+					t.Fatalf("marshal response json: %v", err)
+				}
+			}
+			jsonEqualMaps(t, "client response", gotJSON, expectedResponse)
+		})
 	}
-	jsonEqualMaps(t, "client response", gotJSON, expectedResponse)
 }
 
 func mustReadJSONFixture(t *testing.T, path string) []byte {
