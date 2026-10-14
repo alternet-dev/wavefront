@@ -19,6 +19,7 @@ bundle/
     descriptors.binpb        #   proto FileDescriptorSet — this version's message shapes
     openapi.json             #   the frozen OpenAPI surface the version was cut from
     versions.yaml            #   the route bindings (one or more contracts)
+    discriminators.yaml      #   OPTIONAL: discriminator wire-transform metadata (#132)
 ```
 
 A layer is emitted once and never rewritten — that immutability is the
@@ -89,6 +90,60 @@ link's stanzas in turn, out to the version that terminates the chain at a
 backend. A `route.target` names a backend from the deployment's target table
 (`WAVEFRONT_TARGETS`); `WAVEFRONT_UPSTREAM_BASE_URL` is the default target a
 version uses with no override.
+
+### Typed discriminated unions
+
+A discriminated `anyOf` / `oneOf` whose sibling `discriminator` carries an
+explicit `mapping` lowers to a generated wrapper message holding a proto3
+`oneof` — the client decodes a typed variant instead of the opaque
+`google.protobuf.Struct` fallback. The wrapper is nested in the containing
+message, named `<FieldNameCamelCase>Variant`, and its single `oneof variant`
+carries one field per mapped member.
+
+```yaml
+# OpenAPI
+PetEnvelope:
+  type: object
+  properties:
+    pet:
+      anyOf: [{ $ref: '#/components/schemas/Cat' }, { $ref: '#/components/schemas/Dog' }]
+      discriminator:
+        propertyName: petType
+        mapping:
+          cat: '#/components/schemas/Cat'
+          dog: '#/components/schemas/Dog'
+```
+
+```proto
+// generated
+message PetEnvelope {
+  PetVariant pet = 1;
+  message PetVariant { oneof variant { Cat cat = 1; Dog dog = 2; } }
+}
+```
+
+The two wire shapes differ: OpenAPI flattens the discriminator alongside the
+member's fields (`{"petType":"cat","meow":"purr"}`), protojson wraps them
+under the member key (`{"cat":{"meow":"purr"}}`). Each layer that uses a
+mapped discriminated union emits a `discriminators.yaml` sidecar; the proxy's
+adapter reads it to transform between the two shapes on decode (upstream →
+proto) and encode (proto → upstream).
+
+```yaml
+# <layer>/discriminators.yaml
+version: 1
+oneofs:
+  - message: wavefront.gen.v2024_11.PetEnvelope.PetVariant
+    property_name: "petType"
+    mapping:
+      "cat": cat
+      "dog": dog
+```
+
+A discriminator with no `mapping` keeps the pre-#132 `Struct` lowering (the
+implicit name-based mapping is ambiguous across the per-version proto
+packages). Layers with no mapped discriminated unions emit no sidecar, so
+bundles that don't need the construct stay byte-identical.
 
 ## Transform vocabulary
 

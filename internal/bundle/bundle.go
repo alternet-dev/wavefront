@@ -160,9 +160,10 @@ func (c *Contract) Strict() bool { return c.strict }
 // per-version lookups that LookupRoute, Versions, and resolveChains all
 // rely on.
 type Bundle struct {
-	contracts []*Contract
-	byVersion map[string][]*Contract
-	files     *protoregistry.Files
+	contracts      []*Contract
+	byVersion      map[string][]*Contract
+	files          *protoregistry.Files
+	discriminators map[string]discriminatorInfo // wrapper message FQN → info (#132)
 }
 
 // Contract returns the first contract in the bundle whose contract_version
@@ -393,6 +394,7 @@ func Load(dir string) (*Bundle, error) {
 		yb   *yamlBundle
 	}
 	loaded := make([]layer, 0, len(layerNames))
+	discriminators := map[string]discriminatorInfo{}
 
 	for _, name := range layerNames {
 		lp := filepath.Join(dir, name)
@@ -409,6 +411,16 @@ func Load(dir string) (*Bundle, error) {
 		}
 		if yb.Version != 1 {
 			return nil, &UnsupportedVersionError{Version: yb.Version}
+		}
+		disc, derr2 := loadDiscriminators(lp)
+		if derr2 != nil {
+			return nil, derr2
+		}
+		for k, v := range disc {
+			if _, dup := discriminators[k]; dup {
+				return nil, &ValidationError{Field: "discriminators", Reason: "wrapper message " + k + " declared in more than one layer"}
+			}
+			discriminators[k] = v
 		}
 		loaded = append(loaded, layer{name: name, fdps: fdps, yb: yb})
 	}
@@ -547,7 +559,16 @@ func Load(dir string) (*Bundle, error) {
 		return nil, cerr
 	}
 
-	return &Bundle{contracts: contracts, byVersion: byVersion, files: files}, nil
+	// Validate that every registered discriminator wrapper resolves against the
+	// merged descriptor set. A declared wrapper that does not exist is a sign
+	// the sidecar drifted from descriptors.binpb — fail fast at boot.
+	for name := range discriminators {
+		if _, ferr := files.FindDescriptorByName(protoreflect.FullName(name)); ferr != nil {
+			return nil, &MessageNotFoundError{Message: name}
+		}
+	}
+
+	return &Bundle{contracts: contracts, byVersion: byVersion, files: files, discriminators: discriminators}, nil
 }
 
 // resolveChains walks each contract's transform.target links into an ordered

@@ -1,6 +1,7 @@
 package bundlegen_test
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -9,10 +10,12 @@ import (
 	"testing"
 
 	"google.golang.org/protobuf/encoding/protojson"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
 	"google.golang.org/protobuf/types/dynamicpb"
 	"gopkg.in/yaml.v3"
 
+	"github.com/alternet-dev/wavefront/internal/adapter"
 	"github.com/alternet-dev/wavefront/internal/bundle"
 	"github.com/alternet-dev/wavefront/internal/bundlegen"
 	"github.com/alternet-dev/wavefront/internal/bundletest"
@@ -604,14 +607,14 @@ func TestAddOpenObjectLowersToStruct(t *testing.T) {
 	}
 }
 
-// discriminatedUnionOpenAPI exercises #129's discriminated-union lowering. A
-// tagged anyOf/oneOf (one carrying a sibling discriminator) is always a JSON
-// object, but its wire shape is flattened — the discriminator is a sibling
-// property and the member's fields sit at the top level. A proto3 oneof encodes
-// the other way (wrapped under the member key, {"cat":{...}}), so protojson
-// cannot bridge the two; the faithful lowering is google.protobuf.Struct, which
-// relays the object verbatim. pet is a property-level discriminated anyOf; pets
-// is an array whose items are a discriminated oneOf.
+// discriminatedUnionOpenAPI exercises the typed discriminated-union lowering
+// (#132). A tagged anyOf/oneOf carrying a sibling discriminator with an
+// explicit mapping lowers to a generated wrapper message whose single `oneof`
+// carries one field per mapped member. The adapter transforms between the
+// OpenAPI flattened upstream wire shape (discriminator property + member
+// fields at the top level) and the wrapped protojson shape. pet is a
+// property-level discriminated anyOf; pets is an array whose items are a
+// discriminated oneOf.
 const discriminatedUnionOpenAPI = `{
   "openapi": "3.1.0",
   "info": {"title": "acme", "version": "2026-05-17"},
@@ -642,12 +645,12 @@ const discriminatedUnionOpenAPI = `{
   }
 }`
 
-// TestAddDiscriminatedUnionLowersToStruct: a discriminated anyOf/oneOf lowers to
-// google.protobuf.Struct (singular at the property level, repeated as array
-// items) — the same WKT-fallback open objects get, because proto3 oneof's wire
-// shape is incompatible with OpenAPI's flattened discriminator. The union
-// members are absorbed into Struct, not collected as messages. (#129)
-func TestAddDiscriminatedUnionLowersToStruct(t *testing.T) {
+// TestAddDiscriminatedUnionLowersToTypedOneof: a mapped discriminated
+// anyOf/oneOf lowers to a nested wrapper message carrying a proto3 oneof —
+// singular at the property level, repeated as array items (#132). The member
+// messages (Cat, Dog) are collected as regular proto messages so a client
+// decodes a typed variant rather than an opaque Struct.
+func TestAddDiscriminatedUnionLowersToTypedOneof(t *testing.T) {
 	in := writeOpenAPI(t, discriminatedUnionOpenAPI)
 	out := t.TempDir()
 	if err := bundlegen.Add(in, out, false); err != nil {
@@ -666,33 +669,71 @@ func TestAddDiscriminatedUnionLowersToStruct(t *testing.T) {
 	if pet == nil || pet.IsList() {
 		t.Fatal("PetEnvelope.pet (discriminated anyOf) should be a singular message field")
 	}
-	if pet.Message() == nil || string(pet.Message().FullName()) != "google.protobuf.Struct" {
-		t.Errorf("PetEnvelope.pet type = %v, want google.protobuf.Struct", fullName(pet))
+	if pet.Message() == nil || string(pet.Message().FullName()) != "wavefront.gen.v2026_05_17.PetEnvelope.PetVariant" {
+		t.Errorf("PetEnvelope.pet type = %v, want wavefront.gen.v2026_05_17.PetEnvelope.PetVariant", fullName(pet))
 	}
 
 	pets := env.Fields().ByName("pets")
 	if pets == nil || !pets.IsList() {
 		t.Fatal("PetEnvelope.pets (array of discriminated oneOf) should be a repeated field")
 	}
-	if pets.Message() == nil || string(pets.Message().FullName()) != "google.protobuf.Struct" {
-		t.Errorf("PetEnvelope.pets element type = %v, want google.protobuf.Struct", fullName(pets))
+	if pets.Message() == nil || string(pets.Message().FullName()) != "wavefront.gen.v2026_05_17.PetEnvelope.PetsVariant" {
+		t.Errorf("PetEnvelope.pets element type = %v, want wavefront.gen.v2026_05_17.PetEnvelope.PetsVariant", fullName(pets))
 	}
 
-	// The union members are absorbed into Struct, so they are not collected.
+	// The wrapper message carries one oneof whose members are the mapped
+	// variants; verify the shape so the adapter's transform assumptions hold.
+	wrapper := pet.Message()
+	if wrapper.Oneofs().Len() != 1 {
+		t.Fatalf("PetVariant must declare exactly one oneof, got %d", wrapper.Oneofs().Len())
+	}
+	oneof := wrapper.Oneofs().Get(0)
+	for _, name := range []string{"cat", "dog"} {
+		f := wrapper.Fields().ByName(protoreflect.Name(name))
+		if f == nil || f.ContainingOneof() == nil || f.ContainingOneof() != oneof {
+			t.Errorf("PetVariant.%s should be a member of the discriminator oneof", name)
+			continue
+		}
+		if f.Message() == nil {
+			t.Errorf("PetVariant.%s should be a message type", name)
+		}
+	}
+
+	// Union members are promoted to top-level messages, not absorbed into a WKT.
 	for _, name := range []string{"Cat", "Dog"} {
-		if _, err := b.Message("wavefront.gen.v2026_05_17." + name); err == nil {
-			t.Errorf("union member %s should not be collected (absorbed into Struct)", name)
+		if _, err := b.Message("wavefront.gen.v2026_05_17." + name); err != nil {
+			t.Errorf("union member %s should be collected as a typed message: %v", name, err)
+		}
+	}
+
+	// The discriminators sidecar records the propertyName + mapping the adapter
+	// needs; verify both wrappers were registered.
+	for _, wrapperName := range []string{
+		"wavefront.gen.v2026_05_17.PetEnvelope.PetVariant",
+		"wavefront.gen.v2026_05_17.PetEnvelope.PetsVariant",
+	} {
+		prop, mapping, ok := b.Discriminator(wrapperName)
+		if !ok {
+			t.Errorf("Discriminator(%s) not registered", wrapperName)
+			continue
+		}
+		if prop != "petType" {
+			t.Errorf("Discriminator(%s).propertyName = %q, want petType", wrapperName, prop)
+		}
+		if mapping["cat"] != "cat" || mapping["dog"] != "dog" {
+			t.Errorf("Discriminator(%s).mapping = %v, want cat->cat, dog->dog", wrapperName, mapping)
 		}
 	}
 }
 
-// TestGeneratedDiscriminatedUnionDecodesFlattenedUpstream is the end-to-end proof
-// for #129: a generated bundle whose discriminated-union fields are Struct
-// actually decodes a realistic flattened upstream body — discriminator as a
-// sibling property, member fields at the top level — through the same dynamicpb +
-// protojson machinery the adapter uses. A proto3 oneof would hard-error on this
-// shape (unknown field "petType"); Struct relays it verbatim. (#129)
-func TestGeneratedDiscriminatedUnionDecodesFlattenedUpstream(t *testing.T) {
+// TestDiscriminatedUnionRoundTripsViaAdapter is the end-to-end proof for #132:
+// a generated bundle whose discriminated-union property lowers to a typed
+// oneof wrapper round-trips a realistic flattened upstream body through the
+// ProtoJSON adapter — upstream flat JSON → wrapped protojson → typed proto →
+// adapter output flat JSON. The pre-#132 Struct lowering accepted this body
+// as an opaque object; the point of this test is that the client now sees a
+// typed Cat variant instead.
+func TestDiscriminatedUnionRoundTripsViaAdapter(t *testing.T) {
 	in := writeOpenAPI(t, discriminatedUnionOpenAPI)
 	out := t.TempDir()
 	if err := bundlegen.Add(in, out, false); err != nil {
@@ -702,26 +743,247 @@ func TestGeneratedDiscriminatedUnionDecodesFlattenedUpstream(t *testing.T) {
 	if err != nil {
 		t.Fatalf("generated bundle did not load: %v", err)
 	}
-	md, err := b.Message("wavefront.gen.v2026_05_17.PetEnvelope")
+
+	a := adapter.NewProtoJSON(b)
+	bind := discBinding{
+		method: "POST", route: "/v3/pet",
+		req:  "wavefront.gen.v2026_05_17.PetEnvelope",
+		resp: "wavefront.gen.v2026_05_17.PetEnvelope",
+	}
+
+	// EncodeResponse: upstream delivers flat JSON; adapter wraps for protojson
+	// and emits typed proto. Decoding the proto back must expose the typed Cat
+	// variant via the oneof.
+	const upstream = `{"pet":{"petType":"cat","meow":"purr"},"pets":[{"petType":"dog","woof":"bark"}]}`
+	protoOut, _, werr := a.EncodeResponse(bind, []byte(upstream))
+	if werr != nil {
+		t.Fatalf("EncodeResponse flat upstream: %v", werr)
+	}
+	env, err := b.Message("wavefront.gen.v2026_05_17.PetEnvelope")
 	if err != nil {
 		t.Fatalf("resolve PetEnvelope: %v", err)
 	}
-
-	const body = `{"pet":{"petType":"cat","meow":"purr"},"pets":[{"petType":"dog","woof":"bark"}]}`
-	msg := dynamicpb.NewMessage(md)
-	if err := protojson.Unmarshal([]byte(body), msg); err != nil {
-		t.Fatalf("decode flattened discriminated-union body: %v", err)
+	msg := dynamicpb.NewMessage(env)
+	if err := proto.Unmarshal(protoOut, msg); err != nil {
+		t.Fatalf("adapter output is not valid protobuf: %v", err)
+	}
+	// pet is a wrapper message whose active oneof member exposes Cat.meow.
+	pet := msg.Get(env.Fields().ByName("pet")).Message()
+	variant := pet.Descriptor().Oneofs().ByName("variant")
+	active := pet.WhichOneof(variant)
+	if active == nil {
+		t.Fatal("PetEnvelope.pet oneof has no active member after decoding flat upstream")
+	}
+	if string(active.Name()) != "cat" {
+		t.Errorf("active oneof field = %q, want cat", active.Name())
+	}
+	catMsg := pet.Get(active).Message()
+	if got := catMsg.Get(catMsg.Descriptor().Fields().ByName("meow")).String(); got != "purr" {
+		t.Errorf("Cat.meow = %q, want purr", got)
 	}
 
-	// Re-encode and confirm both members survived the round-trip verbatim.
-	reEncoded, err := protojson.Marshal(msg)
+	// DecodeRequest: a proto with the typed oneof set must emit the flattened
+	// upstream shape (discriminator + member fields at the top level, no "cat"
+	// wrapping key).
+	call, werr := a.DecodeRequest(bind, protoOut)
+	if werr != nil {
+		t.Fatalf("DecodeRequest proto: %v", werr)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(call.Body, &decoded); err != nil {
+		t.Fatalf("adapter body is not JSON: %v (body=%s)", err, call.Body)
+	}
+	flatPet, ok := decoded["pet"].(map[string]any)
+	if !ok {
+		t.Fatalf("decoded.pet is not an object: %v", decoded["pet"])
+	}
+	if flatPet["petType"] != "cat" {
+		t.Errorf("decoded.pet.petType = %v, want cat (adapter must restore the discriminator)", flatPet["petType"])
+	}
+	if flatPet["meow"] != "purr" {
+		t.Errorf("decoded.pet.meow = %v, want purr", flatPet["meow"])
+	}
+	if _, wrapped := flatPet["cat"]; wrapped {
+		t.Errorf("decoded.pet still carries the wrapped shape %v; adapter failed to flatten", flatPet)
+	}
+}
+
+type discBinding struct {
+	method, route, req, resp string
+}
+
+func (d discBinding) Method() string                         { return d.method }
+func (d discBinding) Route() string                          { return d.route }
+func (d discBinding) RequestMessage() string                 { return d.req }
+func (d discBinding) ResponseMessage() string                { return d.resp }
+func (d discBinding) ErrorMessage(status int) (string, bool) { return "", false }
+
+// nestedDiscriminatorOpenAPI exercises nested mapped discriminated unions: Zoo
+// has a `pet` discriminator (cat|dog); the dog variant itself has a `toy`
+// discriminator (ball|bone). The adapter must recurse through the chosen pet
+// variant so the inner discriminator is flattened/wrapped too.
+const nestedDiscriminatorOpenAPI = `{
+  "openapi": "3.1.0",
+  "info": {"title": "acme", "version": "2026-05-17"},
+  "paths": {
+    "/v3/zoo": {
+      "post": {
+        "operationId": "zoo",
+        "requestBody": {"content": {"application/json": {"schema": {"$ref": "#/components/schemas/Zoo"}}}},
+        "responses": {"200": {"content": {"application/json": {"schema": {"$ref": "#/components/schemas/Zoo"}}}}}
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "Zoo": {"type": "object", "properties": {
+        "pet": {
+          "anyOf": [{"$ref": "#/components/schemas/Cat"}, {"$ref": "#/components/schemas/Dog"}],
+          "discriminator": {"propertyName": "petType", "mapping": {"cat": "#/components/schemas/Cat", "dog": "#/components/schemas/Dog"}}
+        }
+      }},
+      "Cat": {"type": "object", "properties": {"petType": {"type": "string"}, "meow": {"type": "string"}}},
+      "Dog": {"type": "object", "properties": {
+        "petType": {"type": "string"},
+        "bark": {"type": "string"},
+        "toy": {
+          "anyOf": [{"$ref": "#/components/schemas/Ball"}, {"$ref": "#/components/schemas/Bone"}],
+          "discriminator": {"propertyName": "toyKind", "mapping": {"ball": "#/components/schemas/Ball", "bone": "#/components/schemas/Bone"}}
+        }
+      }},
+      "Ball": {"type": "object", "properties": {"toyKind": {"type": "string"}, "bounce": {"type": "string"}}},
+      "Bone": {"type": "object", "properties": {"toyKind": {"type": "string"}, "chew": {"type": "string"}}}
+    }
+  }
+}`
+
+// unmappedDiscriminatorOpenAPI: a discriminator present but with no explicit
+// mapping. The typed-oneof path requires an explicit mapping (per #129's note
+// on per-version package ambiguity), so this stays with the pre-#132 Struct
+// lowering — a backward-compatibility guarantee for existing bundles.
+const unmappedDiscriminatorOpenAPI = `{
+  "openapi": "3.0.0",
+  "info": {"title": "acme", "version": "2026-05-17"},
+  "paths": {
+    "/v3/pet": {
+      "post": {
+        "operationId": "pet",
+        "requestBody": {"content": {"application/json": {"schema": {"$ref": "#/components/schemas/Env"}}}},
+        "responses": {"200": {"content": {"application/json": {"schema": {"$ref": "#/components/schemas/Env"}}}}}
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "Env": {"type": "object", "properties": {
+        "pet": {
+          "anyOf": [{"$ref": "#/components/schemas/Cat"}, {"$ref": "#/components/schemas/Dog"}],
+          "discriminator": {"propertyName": "petType"}
+        }
+      }},
+      "Cat": {"type": "object", "properties": {"petType": {"type": "string"}, "meow": {"type": "string"}}},
+      "Dog": {"type": "object", "properties": {"petType": {"type": "string"}, "woof": {"type": "string"}}}
+    }
+  }
+}`
+
+// TestDiscriminatorWithoutMappingStaysAsStruct: a discriminator with no
+// explicit mapping cannot be lowered to a typed oneof (the implicit
+// name-based mapping is ambiguous across per-version proto packages), so it
+// keeps the pre-#132 Struct lowering. No discriminators.yaml is written.
+func TestDiscriminatorWithoutMappingStaysAsStruct(t *testing.T) {
+	in := writeOpenAPI(t, unmappedDiscriminatorOpenAPI)
+	out := t.TempDir()
+	if err := bundlegen.Add(in, out, false); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	// No discriminators sidecar should exist on this layer.
+	if _, err := os.Stat(filepath.Join(out, "2026-05-17", "discriminators.yaml")); !os.IsNotExist(err) {
+		t.Fatalf("discriminators.yaml should not exist for an unmapped discriminator: %v", err)
+	}
+	b, err := bundle.Load(out)
 	if err != nil {
-		t.Fatalf("re-encode: %v", err)
+		t.Fatalf("generated bundle did not load: %v", err)
 	}
-	for _, want := range []string{`"petType"`, `"cat"`, `"meow"`, `"purr"`, `"dog"`, `"woof"`, `"bark"`} {
-		if !strings.Contains(string(reEncoded), want) {
-			t.Errorf("re-encoded body %s missing %q", reEncoded, want)
-		}
+	env, err := b.Message("wavefront.gen.v2026_05_17.Env")
+	if err != nil {
+		t.Fatalf("resolve Env: %v", err)
+	}
+	pet := env.Fields().ByName("pet")
+	if pet == nil || pet.Message() == nil || string(pet.Message().FullName()) != "google.protobuf.Struct" {
+		t.Errorf("Env.pet should remain google.protobuf.Struct without a mapping, got %v", fullName(pet))
+	}
+}
+
+// TestNestedDiscriminatedUnionsRoundTripViaAdapter: a discriminated union
+// whose variant itself contains another discriminated union round-trips
+// through the adapter. The walker must recurse into the chosen variant so
+// the inner wrapper's flatten/wrap transform fires too (#132).
+func TestNestedDiscriminatedUnionsRoundTripViaAdapter(t *testing.T) {
+	in := writeOpenAPI(t, nestedDiscriminatorOpenAPI)
+	out := t.TempDir()
+	if err := bundlegen.Add(in, out, false); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	b, err := bundle.Load(out)
+	if err != nil {
+		t.Fatalf("generated bundle did not load: %v", err)
+	}
+	a := adapter.NewProtoJSON(b)
+	bind := discBinding{
+		method: "POST", route: "/v3/zoo",
+		req:  "wavefront.gen.v2026_05_17.Zoo",
+		resp: "wavefront.gen.v2026_05_17.Zoo",
+	}
+
+	const upstream = `{"pet":{"petType":"dog","bark":"woof","toy":{"toyKind":"ball","bounce":"high"}}}`
+	protoOut, _, werr := a.EncodeResponse(bind, []byte(upstream))
+	if werr != nil {
+		t.Fatalf("EncodeResponse nested: %v", werr)
+	}
+	zooMD, err := b.Message("wavefront.gen.v2026_05_17.Zoo")
+	if err != nil {
+		t.Fatalf("resolve Zoo: %v", err)
+	}
+	zoo := dynamicpb.NewMessage(zooMD)
+	if err := proto.Unmarshal(protoOut, zoo); err != nil {
+		t.Fatalf("output is not valid protobuf: %v", err)
+	}
+	pet := zoo.Get(zooMD.Fields().ByName("pet")).Message()
+	activePet := pet.WhichOneof(pet.Descriptor().Oneofs().ByName("variant"))
+	if activePet == nil || string(activePet.Name()) != "dog" {
+		t.Fatalf("outer oneof active = %v, want dog", activePet)
+	}
+	dog := pet.Get(activePet).Message()
+	toy := dog.Get(dog.Descriptor().Fields().ByName("toy")).Message()
+	activeToy := toy.WhichOneof(toy.Descriptor().Oneofs().ByName("variant"))
+	if activeToy == nil || string(activeToy.Name()) != "ball" {
+		t.Fatalf("inner oneof active = %v, want ball", activeToy)
+	}
+	ball := toy.Get(activeToy).Message()
+	if got := ball.Get(ball.Descriptor().Fields().ByName("bounce")).String(); got != "high" {
+		t.Errorf("inner Ball.bounce = %q, want high", got)
+	}
+
+	// Round-trip back out: the inner discriminator property must be restored.
+	call, werr := a.DecodeRequest(bind, protoOut)
+	if werr != nil {
+		t.Fatalf("DecodeRequest: %v", werr)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(call.Body, &decoded); err != nil {
+		t.Fatalf("adapter body is not JSON: %v (body=%s)", err, call.Body)
+	}
+	flatPet := decoded["pet"].(map[string]any)
+	flatToy, ok := flatPet["toy"].(map[string]any)
+	if !ok {
+		t.Fatalf("decoded.pet.toy is not an object: %v", flatPet["toy"])
+	}
+	if flatToy["toyKind"] != "ball" {
+		t.Errorf("decoded.pet.toy.toyKind = %v, want ball (inner discriminator must be flattened)", flatToy["toyKind"])
+	}
+	if _, wrapped := flatToy["ball"]; wrapped {
+		t.Errorf("decoded.pet.toy still wrapped: %v", flatToy)
 	}
 }
 
