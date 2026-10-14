@@ -33,6 +33,32 @@ so a draft can't ship unedited. Per-version routing and transform shims
 live in the operator-owned `resolution.yaml` at the bundle root; see
 [protocol.md](protocol.md).
 
+### Tuning a draft shim
+
+`draft-shim` auto-renames only identical case- and separator-normalized
+same-type names by default (`--rename-confidence=1.0`). Lower the threshold
+only when similar names are known to carry the same meaning; the score is the
+normalized edit similarity of the two normalized names, from `0` to `1`.
+`--strict` remains available when no heuristic rename should be accepted.
+
+For a decision that should not be rediscovered on every draft, write a
+per-diff intent file and pass it with `--rename-intent`. Its entries express
+the old contract field (`from`) and its new-contract replacement (`to`):
+
+```yaml
+version: 1
+renames:
+  - from: displayName
+    to: display_name
+```
+
+Each entry must name top-level, same-primitive-type fields on at least one
+request or response direction in the selected pair of layers. Intent wins
+over the confidence threshold and `--strict`; on a response it is applied in
+reverse. The file is input to one `draft-shim` invocation, not generated
+bundle state, so it cannot accidentally affect a later version diff. Keep it
+with the migration source that owns that specific comparison.
+
 ## 2. Pinning + deploying
 
 Pin `wavefront` by image tag/digest:
