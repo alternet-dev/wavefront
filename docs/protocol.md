@@ -65,12 +65,14 @@ contract table). Each contract names exactly one method, so wrong-method
 folds into the same 404 (no 405, no `Allow` header).
 
 The operator-owned `resolution.yaml` at the bundle root overrides how a
-version resolves — a `transform` shim, or a `route` to a named backend:
+version resolves — a `transform` shim, or a `route` to a named backend.
+Optional `profile`, `tenant`, and `cohort` fields refine the version key:
 
 ```yaml
 version: 1
 overrides:
   - contract_version: "2024-11"         # the version this override applies to
+    profile: mobile                      # optional exact-match selector
     transform:                          # mechanical stanzas applied to the body
       target: "2025-03"                 # optional: chain to another version's resolution
       request:
@@ -79,16 +81,26 @@ overrides:
       response:
         - optionalize: { field: avatar_url }
   - contract_version: "2023-05"
+    tenant: partner-a                    # optional exact-match selector
     route:                              # ...or route this version to a named target
       target: legacy-backend
 ```
 
-An override sets **exactly one** of `transform` or `route`. A `transform`
-whose `target` names another version **chains** — the proxy applies each
-link's stanzas in turn, out to the version that terminates the chain at a
-backend. A `route.target` names a backend from the deployment's target table
-(`WAVEFRONT_TARGETS`); `WAVEFRONT_UPSTREAM_BASE_URL` is the default target a
-version uses with no override.
+An override sets **exactly one** of `transform` or `route`. A selector field
+must be non-blank when present. A selector-specific override matches only
+when every selector it names exactly equals the corresponding configured
+request-header value; unnamed selector axes are wildcards. A version-only
+override (no selector fields) is the fallback. Two selector-specific
+overrides that could match one request are invalid at bundle load, so runtime
+resolution is never order-dependent. A selector-specific `transform.target`
+continues through the target version's version-only resolution; it does not
+silently carry selector rules across versions.
+
+A `transform` whose `target` names another version **chains** — the proxy
+applies each link's stanzas in turn, out to the version that terminates the
+chain at a backend. A `route.target` names a backend from the deployment's
+target table (`WAVEFRONT_TARGETS`); `WAVEFRONT_UPSTREAM_BASE_URL` is the
+default target a version uses with no override.
 
 ## Transform vocabulary
 
@@ -152,6 +164,14 @@ The client declares its contract version in
 `WAVEFRONT_CONTRACT_VERSION_HEADER` (default `X-Api-Contract-Version`).
 Missing / unknown / unsupported ⇒ a typed `unsupported_contract_version`
 error (see the error contract below), never a silent best-guess.
+
+After version negotiation, `wavefront` reads the optional profile, tenant,
+and cohort headers configured by `WAVEFRONT_PROFILE_HEADER`,
+`WAVEFRONT_TENANT_HEADER`, and `WAVEFRONT_COHORT_HEADER` (defaults
+`X-Wavefront-Profile`, `X-Wavefront-Tenant`, and `X-Wavefront-Cohort`). A
+missing or blank optional selector simply cannot match a rule that names it;
+it does not produce a negotiation error. These values are opaque bundle keys,
+not authentication or authorization claims.
 
 ## Error contract
 
