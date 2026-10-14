@@ -215,19 +215,6 @@ func TestAddHardErrors(t *testing.T) {
 			"requestBody":{"content":{"application/json":{"schema":{"$ref":"#/components/schemas/A"}}}},
 			"responses":{"200":{"content":{"application/json":{"schema":{"$ref":"#/components/schemas/A"}}}}}}}},
 			"components":{"schemas":{"A":{"type":"object","properties":{"x":{"type":"string"}}}}}}`,
-		// #121 lowers an open object or untagged union to a struct.proto well-known
-		// type when it is a property or array item. A component bound *directly* as
-		// a request/response body is a different binding — request_message would
-		// have to reference google.protobuf.{Struct,Value} instead of a generated
-		// message — and stays rejected by the object-with-properties guard.
-		"open-object component bound as body": `{"openapi":"3.0.0","info":{"version":"1"},"paths":{"/x":{"post":{
-			"requestBody":{"content":{"application/json":{"schema":{"$ref":"#/components/schemas/Open"}}}},
-			"responses":{"200":{"content":{"application/json":{"schema":{"$ref":"#/components/schemas/Open"}}}}}}}},
-			"components":{"schemas":{"Open":{"type":"object","additionalProperties":true}}}}`,
-		"untagged-union component bound as body": `{"openapi":"3.1.0","info":{"version":"1"},"paths":{"/x":{"post":{
-			"requestBody":{"content":{"application/json":{"schema":{"$ref":"#/components/schemas/Poly"}}}},
-			"responses":{"200":{"content":{"application/json":{"schema":{"$ref":"#/components/schemas/Poly"}}}}}}}},
-			"components":{"schemas":{"Poly":{"anyOf":[{"type":"string"},{"type":"integer"}]}}}}`,
 	}
 	for name, body := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -856,8 +843,9 @@ func TestAddAcceptsEmptyObjectSchema(t *testing.T) {
 		t.Errorf("Ack should be a zero-field message, has %d field(s)", n)
 	}
 
-	// A bare {"type":"object"} with no properties key is an open/untyped object
-	// and stays rejected, so the acceptance above is a deliberate boundary.
+	// A bare {"type":"object"} with no properties key is an open/untyped object.
+	// #134 lowers that shape to Struct; when it is body-bound, the contract names
+	// Struct directly rather than confusing it with the zero-field model above.
 	const noPropsKeyOpenAPI = `{
   "openapi": "3.0.0",
   "info": {"title": "acme", "version": "2026-05-17"},
@@ -871,8 +859,20 @@ func TestAddAcceptsEmptyObjectSchema(t *testing.T) {
   },
   "components": {"schemas": {"Open": {"type": "object"}}}
 }`
-	if err := bundlegen.Add(writeOpenAPI(t, noPropsKeyOpenAPI), t.TempDir(), false); err == nil {
-		t.Error("a bare {type:object} with no properties key should still be a hard error")
+	openOut := t.TempDir()
+	if err := bundlegen.Add(writeOpenAPI(t, noPropsKeyOpenAPI), openOut, false); err != nil {
+		t.Fatalf("Add bare open object: %v", err)
+	}
+	openBundle, err := bundle.Load(openOut)
+	if err != nil {
+		t.Fatalf("load bare open-object bundle: %v", err)
+	}
+	openContract, ok := openBundle.Lookup("/v3/ack", "POST", "2026-05-17")
+	if !ok {
+		t.Fatal("bare open-object contract not found")
+	}
+	if got := openContract.RequestMessage(); got != "google.protobuf.Struct" {
+		t.Errorf("bare open-object request_message = %q, want google.protobuf.Struct", got)
 	}
 }
 
@@ -1587,27 +1587,92 @@ func TestAddLowersNonObjectComponentsLikeInline(t *testing.T) {
 	}
 }
 
-// TestAddRejectsNonObjectComponentAsBody: a non-object component bound directly
-// as a request/response body stays a hard error — body-direct scalar/WKT binding
-// is a separate, deferred surface. #133 lowers non-object components only at
-// nested $ref sites; this boundary is preserved. (#133)
-func TestAddRejectsNonObjectComponentAsBody(t *testing.T) {
+// TestAddBindsWKTComponentsAsBodies covers #121's body-direct surface: an open
+// object binds to Struct, while an unconstrained schema or untagged union binds
+// to Value. The WKT descriptor is embedded even though no generated message has
+// a field that references it.
+func TestAddBindsWKTComponentsAsBodies(t *testing.T) {
 	const bodyDirectOpenAPI = `{
   "openapi": "3.1.0",
   "info": {"title": "t", "version": "0"},
-  "paths": {"/x": {"get": {"operationId": "x", "responses": {"200": {"description": "ok",
-    "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Poly"}}}}}}}},
+  "paths": {
+    "/open": {"post": {"operationId": "open",
+      "requestBody": {"content": {"application/json": {"schema": {"$ref": "#/components/schemas/Open"}}}},
+      "responses": {"200": {"content": {"application/json": {"schema": {"$ref": "#/components/schemas/Open"}}}}}}},
+    "/anything": {"post": {"operationId": "anything",
+      "requestBody": {"content": {"application/json": {"schema": {"$ref": "#/components/schemas/Anything"}}}},
+      "responses": {"200": {"content": {"application/json": {"schema": {"$ref": "#/components/schemas/Anything"}}}}}}},
+    "/choice": {"post": {"operationId": "choice",
+      "requestBody": {"content": {"application/json": {"schema": {"$ref": "#/components/schemas/Choice"}}}},
+      "responses": {"200": {"content": {"application/json": {"schema": {"$ref": "#/components/schemas/Choice"}}}}}}}
+  },
   "components": {"schemas": {
-    "Poly": {"anyOf": [{"type": "string"}, {"type": "integer"}]}
+    "Open": {"type": "object", "additionalProperties": true},
+    "Anything": {},
+    "Choice": {"oneOf": [{"type": "string"}, {"type": "integer"}]}
   }}
 }`
 	in := writeOpenAPI(t, bodyDirectOpenAPI)
-	err := bundlegen.Add(in, t.TempDir(), false)
-	if err == nil {
-		t.Fatal("a non-object component bound as a body: expected a hard error, got nil")
+	out := t.TempDir()
+	if err := bundlegen.Add(in, out, false); err != nil {
+		t.Fatalf("Add: %v", err)
 	}
-	if !strings.Contains(err.Error(), "must be an object with properties") {
-		t.Errorf("body-direct rejection = %q, want it to mention 'must be an object with properties'", err.Error())
+	b, err := bundle.Load(out)
+	if err != nil {
+		t.Fatalf("generated bundle did not load: %v", err)
+	}
+	for _, tc := range []struct {
+		path string
+		want string
+	}{
+		{path: "/open", want: "google.protobuf.Struct"},
+		{path: "/anything", want: "google.protobuf.Value"},
+		{path: "/choice", want: "google.protobuf.Value"},
+	} {
+		c, ok := b.Lookup(tc.path, "POST", "0")
+		if !ok {
+			t.Errorf("contract for %s not found", tc.path)
+			continue
+		}
+		if got := c.RequestMessage(); got != tc.want {
+			t.Errorf("%s request_message = %q, want %q", tc.path, got, tc.want)
+		}
+		if got := c.ResponseMessage(); got != tc.want {
+			t.Errorf("%s response_message = %q, want %q", tc.path, got, tc.want)
+		}
+		if _, err := b.Message(tc.want); err != nil {
+			t.Errorf("resolve %s: %v", tc.want, err)
+		}
+	}
+}
+
+// TestAddRejectsNonMessageComponentAsBody keeps the body boundary narrow:
+// scalar, typed-map, and tagged-union components do not gain a direct binding
+// merely because the Struct/Value cases above do.
+func TestAddRejectsNonMessageComponentAsBody(t *testing.T) {
+	const template = `{
+  "openapi": "3.1.0",
+  "info": {"title": "t", "version": "0"},
+	  "paths": {"/x": {"get": {"operationId": "x", "responses": {"200": {
+	    "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Body"}}}}}}}},
+  "components": {"schemas": {"Body": SCHEMA}}
+}`
+	cases := map[string]string{
+		"scalar":       `{"type":"string"}`,
+		"typed map":    `{"type":"object","additionalProperties":{"type":"string"}}`,
+		"tagged union": `{"oneOf":[{"type":"string"},{"type":"integer"}],"discriminator":{"propertyName":"kind"}}`,
+	}
+	for name, schema := range cases {
+		t.Run(name, func(t *testing.T) {
+			in := writeOpenAPI(t, strings.Replace(template, "SCHEMA", schema, 1))
+			err := bundlegen.Add(in, t.TempDir(), false)
+			if err == nil {
+				t.Fatal("expected a hard error, got nil")
+			}
+			if !strings.Contains(err.Error(), "must be an object with properties") {
+				t.Errorf("body-direct rejection = %q, want it to mention 'must be an object with properties'", err.Error())
+			}
+		})
 	}
 }
 

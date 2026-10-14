@@ -6,9 +6,11 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
+	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
 	"google.golang.org/protobuf/types/dynamicpb"
@@ -35,9 +37,13 @@ const sampleOpenAPI = `{
 // generatedBundleDir runs the real OpenAPI → bundle generator and returns the
 // resulting bundle directory.
 func generatedBundleDir(t *testing.T) string {
+	return generatedBundleDirFrom(t, sampleOpenAPI)
+}
+
+func generatedBundleDirFrom(t *testing.T, openapi string) string {
 	t.Helper()
 	in := filepath.Join(t.TempDir(), "openapi.json")
-	if err := os.WriteFile(in, []byte(sampleOpenAPI), 0o600); err != nil {
+	if err := os.WriteFile(in, []byte(openapi), 0o600); err != nil {
 		t.Fatalf("write openapi: %v", err)
 	}
 	out := t.TempDir()
@@ -45,6 +51,127 @@ func generatedBundleDir(t *testing.T) string {
 		t.Fatalf("bundlegen.Add: %v", err)
 	}
 	return out
+}
+
+const bodyDirectWKTOpenAPI = `{
+  "openapi": "3.1.0",
+  "info": {"title": "opaque", "version": "2026-10-13"},
+  "paths": {
+    "/v3/open": {"post": {"operationId": "open",
+      "requestBody": {"content": {"application/json": {"schema": {"$ref": "#/components/schemas/Open"}}}},
+      "responses": {"200": {"content": {"application/json": {"schema": {"$ref": "#/components/schemas/Open"}}}}}}},
+    "/v3/value": {"post": {"operationId": "value",
+      "requestBody": {"content": {"application/json": {"schema": {"$ref": "#/components/schemas/Anything"}}}},
+      "responses": {"200": {"content": {"application/json": {"schema": {"$ref": "#/components/schemas/Anything"}}}}}}}
+  },
+  "components": {"schemas": {
+    "Open": {"type": "object", "additionalProperties": true},
+    "Anything": {}
+  }}
+}`
+
+func TestPipelineRoundTripsBodyDirectWellKnownTypes(t *testing.T) {
+	dir := generatedBundleDirFrom(t, bodyDirectWKTOpenAPI)
+	h := Spawn(t, SpawnOpts{
+		BundleDir: dir,
+		BackendHandler: func(w http.ResponseWriter, r *http.Request) {
+			body, err := io.ReadAll(r.Body)
+			if err != nil {
+				t.Errorf("read upstream request: %v", err)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write(body)
+		},
+	})
+
+	for _, tc := range []struct {
+		name     string
+		path     string
+		message  string
+		bodyJSON string
+	}{
+		{
+			name:     "Struct object",
+			path:     "/v3/open",
+			message:  "google.protobuf.Struct",
+			bodyJSON: `{"provider":"acme","flags":[true,3],"config":{"mode":"fast"}}`,
+		},
+		{
+			name:     "Value array",
+			path:     "/v3/value",
+			message:  "google.protobuf.Value",
+			bodyJSON: `["opaque",7,false,null,{"nested":true}]`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			contract, ok := h.Bundle.Lookup(tc.path, http.MethodPost, "2026-10-13")
+			if !ok {
+				t.Fatalf("contract for %s not found", tc.path)
+			}
+			if got := contract.RequestMessage(); got != tc.message {
+				t.Fatalf("request_message = %q, want %q", got, tc.message)
+			}
+
+			md, err := h.Bundle.Message(contract.RequestMessage())
+			if err != nil {
+				t.Fatalf("resolve request message: %v", err)
+			}
+			requestMessage := dynamicpb.NewMessage(md)
+			if err := protojson.Unmarshal([]byte(tc.bodyJSON), requestMessage); err != nil {
+				t.Fatalf("build request message: %v", err)
+			}
+			requestBytes, err := proto.Marshal(requestMessage)
+			if err != nil {
+				t.Fatalf("marshal request: %v", err)
+			}
+
+			req, err := http.NewRequest(http.MethodPost, h.Proxy.URL+tc.path, strings.NewReader(string(requestBytes)))
+			if err != nil {
+				t.Fatalf("new request: %v", err)
+			}
+			req.Header.Set("Content-Type", "application/protobuf")
+			req.Header.Set("X-Api-Contract-Version", "2026-10-13")
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatalf("proxy request: %v", err)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("status = %d, want 200", resp.StatusCode)
+			}
+
+			captured := h.Backend.Last()
+			assertJSONEqual(t, captured.Body, []byte(tc.bodyJSON))
+
+			responseBytes, err := io.ReadAll(resp.Body)
+			if err != nil {
+				t.Fatalf("read response: %v", err)
+			}
+			responseMessage := dynamicpb.NewMessage(md)
+			if err := proto.Unmarshal(responseBytes, responseMessage); err != nil {
+				t.Fatalf("response is not %s protobuf: %v", tc.message, err)
+			}
+			responseJSON, err := protojson.Marshal(responseMessage)
+			if err != nil {
+				t.Fatalf("marshal response as JSON: %v", err)
+			}
+			assertJSONEqual(t, responseJSON, []byte(tc.bodyJSON))
+		})
+	}
+}
+
+func assertJSONEqual(t *testing.T, got, want []byte) {
+	t.Helper()
+	var gotValue, wantValue any
+	if err := json.Unmarshal(got, &gotValue); err != nil {
+		t.Fatalf("got invalid JSON %q: %v", got, err)
+	}
+	if err := json.Unmarshal(want, &wantValue); err != nil {
+		t.Fatalf("test expected invalid JSON %q: %v", want, err)
+	}
+	if !reflect.DeepEqual(gotValue, wantValue) {
+		t.Errorf("JSON = %s, want %s", got, want)
+	}
 }
 
 func TestPipelineProxiesEndToEnd(t *testing.T) {

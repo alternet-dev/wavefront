@@ -1,8 +1,9 @@
 // Package bundlegen is the OpenAPI → bundle generator. It is deliberately a
-// constrained, fail-loud subset: request/response must be $ref'd component
-// object schemas; scalars, arrays, $ref, and nullable→proto3-optional — both
-// 3.0's `nullable: true` and the 3.1 `anyOf:[T, {type: null}]` idiom — are
-// supported. A typed dict (additionalProperties:<scalar|$ref>) lowers to
+// constrained, fail-loud subset: request/response bodies must be $ref'd
+// component schemas that lower to messages; scalars, arrays, $ref, and
+// nullable→proto3-optional — both 3.0's `nullable: true` and the 3.1
+// `anyOf:[T, {type: null}]` idiom — are supported. A typed dict
+// (additionalProperties:<scalar|$ref>) lowers to
 // map<string,V>; an open object (additionalProperties:true|{}, or a bare
 // {type:object} with no properties) and a discriminated (tagged) anyOf/oneOf
 // union — always a JSON object, but with a
@@ -12,9 +13,10 @@
 // google/protobuf/struct.proto embedded in the layer when any are used. These
 // lowerings apply inline or via a $ref: a non-object component (enum, typed
 // dict, union, open object) referenced by a field lowers the same as the
-// equivalent inline schema; only an object-with-properties component becomes a
-// proto message, which is what a request/response body must $ref. allOf, a
-// mixed additionalProperties, an inline (non-$ref) body, and an untyped
+// equivalent inline schema. Only an object-with-properties component becomes a
+// generated proto message; a body that $refs an open object, unconstrained
+// schema, or untagged union binds directly to its Struct/Value message. allOf,
+// a mixed additionalProperties, an inline (non-$ref) body, and an untyped
 // non-empty leaf stay hard errors rather than a lossy bundle. Output is
 // byte-reproducible (sorted, deterministic marshal) for the consumer's
 // buf-breaking story.
@@ -196,7 +198,7 @@ func Add(openapiSrc, bundleDir string, force bool) error {
 		raws = append(raws, rawBinding{o.route, strings.ToUpper(o.method), reqName, respName, errNames})
 	}
 
-	descBytes, msgNames, err := buildDescriptors(doc, roots, pkg, version)
+	descBytes, bindingNames, err := buildDescriptors(doc, roots, pkg, version)
 	if err != nil {
 		return err
 	}
@@ -207,14 +209,14 @@ func Add(openapiSrc, bundleDir string, force bool) error {
 		if len(r.errs) > 0 {
 			errMsgs = make(map[string]string, len(r.errs))
 			for code, name := range r.errs {
-				errMsgs[code] = pkg + "." + msgNames[name]
+				errMsgs[code] = bindingNames[name]
 			}
 		}
 		entries = append(entries, contractEntry{
 			Route:           r.route,
 			Method:          r.method,
-			RequestMessage:  pkg + "." + msgNames[r.req],
-			ResponseMessage: pkg + "." + msgNames[r.resp],
+			RequestMessage:  bindingNames[r.req],
+			ResponseMessage: bindingNames[r.resp],
 			ErrorMessages:   errMsgs,
 		})
 	}
@@ -253,9 +255,11 @@ func protoPackage(version string) string {
 }
 
 // buildDescriptors walks every schema reachable from roots, validates each
-// touched schema against the fail-loud doctrine, and returns the
-// deterministic wire bytes of a FileDescriptorSet that holds one
-// FileDescriptorProto for the package.
+// touched schema against the fail-loud doctrine, and returns the deterministic
+// wire bytes of a FileDescriptorSet plus the fully-qualified message name for
+// each body root. Most roots name generated messages in pkg; open objects,
+// unconstrained schemas, and untagged unions name their Struct/Value WKT
+// directly.
 func buildDescriptors(doc openAPI, roots []string, pkg, version string) ([]byte, map[string]string, error) {
 	// The synthetic Empty message has no OpenAPI component, so split it out
 	// before walking the document and inject it directly below.
@@ -265,13 +269,19 @@ func buildDescriptors(doc openAPI, roots []string, pkg, version string) ([]byte,
 		return nil, nil, err
 	}
 
-	// A request/response/error body must be an object component (a proto
-	// message). A non-object component bound directly as a body — a bare scalar,
-	// union, or open object — is a separate, deferred surface; reject it cleanly
-	// rather than emitting a binding to a message that was never built. Nested
-	// non-object $refs lower inline (#133); only the body position is constrained.
+	// A request/response/error body must lower to a proto message. A generated
+	// object message and #121's open-object/unconstrained/untagged-union WKT
+	// fallbacks satisfy that boundary. Other non-object components (scalar,
+	// typed dict, nullable, or tagged union) remain unsupported as direct bodies.
+	// Nested non-object $refs still lower inline (#133).
+	bodyWKTs := make(map[string]string)
 	for _, r := range realRoots {
-		if needed[r] == nil {
+		if needed[r] != nil {
+			continue
+		}
+		if wkt := bodyWKTMessageName(doc.Components.Schemas[r]); wkt != "" {
+			bodyWKTs[r] = wkt
+		} else {
 			return nil, nil, fmt.Errorf("schema %q must be an object with properties", r)
 		}
 	}
@@ -294,6 +304,17 @@ func buildDescriptors(doc openAPI, roots []string, pkg, version string) ([]byte,
 	// emission so the descriptors, internal references, and the versions.yaml
 	// bindings all agree on the sanitized name.
 	msgNames := sanitizeMessageNames(names)
+	bindingNames := make(map[string]string, len(realRoots)+1)
+	for _, r := range realRoots {
+		if wkt := bodyWKTs[r]; wkt != "" {
+			bindingNames[r] = wkt
+		} else {
+			bindingNames[r] = pkg + "." + msgNames[r]
+		}
+	}
+	if needEmpty {
+		bindingNames[emptyMessageName] = pkg + "." + msgNames[emptyMessageName]
+	}
 
 	msgs := make([]*descriptorpb.DescriptorProto, 0, len(names))
 	for _, n := range names {
@@ -322,7 +343,7 @@ func buildDescriptors(doc openAPI, roots []string, pkg, version string) ([]byte,
 	// FileDescriptorSet stays self-contained — the loader resolves no external
 	// registry. With no WKT use the set is byte-identical to before, preserving
 	// reproducibility for bundles that don't need it.
-	if messagesUseStructProto(msgs) {
+	if len(bodyWKTs) > 0 || messagesUseStructProto(msgs) {
 		structFDP := protodesc.ToFileDescriptorProto(structpb.File_google_protobuf_struct_proto)
 		fdp.Dependency = []string{structFDP.GetName()}
 		files = append([]*descriptorpb.FileDescriptorProto{structFDP}, files...)
@@ -335,7 +356,7 @@ func buildDescriptors(doc openAPI, roots []string, pkg, version string) ([]byte,
 	if err != nil {
 		return nil, nil, fmt.Errorf("marshal descriptors: %w", err)
 	}
-	return descBytes, msgNames, nil
+	return descBytes, bindingNames, nil
 }
 
 // contractEntry is one row in versions.yaml.contracts. Fields are written
@@ -826,6 +847,20 @@ const (
 func wktMessageName(sc *schema) string {
 	switch {
 	case isOpenObject(sc), isDiscriminatedUnion(sc):
+		return structFullName
+	case isUntaggedUnion(sc), isEmptySchema(sc):
+		return valueFullName
+	}
+	return ""
+}
+
+// bodyWKTMessageName is the subset of WKT lowerings accepted as a component
+// bound directly to a request, response, or error body for #121. A tagged union
+// is also Struct-backed when nested (#129), but accepting it as a body root is a
+// separate surface and is deliberately not folded into this helper.
+func bodyWKTMessageName(sc *schema) string {
+	switch {
+	case isOpenObject(sc):
 		return structFullName
 	case isUntaggedUnion(sc), isEmptySchema(sc):
 		return valueFullName
