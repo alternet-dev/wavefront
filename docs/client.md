@@ -431,10 +431,15 @@ The `wavefront.v0.Error` codes consumers see most often:
 - `decode_failed` (400) — the marshaled body didn't parse as the contract's
   `request_message`. Usually a stale generator vs. the bundle on the
   consumer side.
+- `request_header_timeout` (408) — request headers did not arrive before the
+  configured header timeout.
+- `expectation_failed` (417) — the request sent an `Expect` value other than
+  `100-continue`.
+- `request_header_too_large` (431) — request headers exceeded the server
+  header limit.
 
-On a response with no `X-Wavefront-Error` header, the body is either a
-declared typed error (see above) or a failure that originated below wavefront
-itself (e.g. ingress 408 / 431 / 417, whose body is whatever the ingress
-produced). In both cases: check whether the status has an `error_messages`
-binding in `versions.yaml` to distinguish a typed contract response from a
-below-wavefront failure.
+On a non-2xx response with no `X-Wavefront-Error` header, the body is a
+declared typed error (see above). The data-plane listener converts its own
+408, 417, and 431 request-reader failures into `wavefront.v0.Error` envelopes,
+so clients handle them through the same header and body path as other
+wavefront-originated failures.

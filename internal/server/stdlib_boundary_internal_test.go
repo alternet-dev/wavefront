@@ -30,10 +30,9 @@ func (nullAddr) String() string  { return "null" }
 // TestParseStatusLine pins parseStatusLine's behaviour on the kinds of byte
 // prefixes net/http actually writes (real status lines) and on the kinds of
 // follow-on writes the function must NOT misinterpret as a new status line.
-// The function is invoked under sync.Once on the FIRST non-empty write — so
-// for status lines the input is always a fresh response prefix, and for
-// "should not match" cases we cover what a future, racy double-call would
-// see (defensive: it should still return 0).
+// The connection wrapper parses each write, so status-line inputs are fresh
+// response prefixes and negative cases cover follow-on bytes that must not be
+// mistaken for a response line.
 func TestParseStatusLine(t *testing.T) {
 	cases := []struct {
 		name string
@@ -67,12 +66,9 @@ func TestParseStatusLine(t *testing.T) {
 	}
 }
 
-// TestSniffingConnWriteCapturesOnce confirms that the first Write captures the
-// status and subsequent Writes do NOT overwrite it. The sync.Once guard is the
-// reason a body-bytes follow-on cannot wipe the captured status; this is
-// belt-and-suspenders because net/http writes the status line in a single
-// fmt.Fprintf call, but the property is what makes the metric labelling
-// robust against any future net/http refactor that splits the response into
+// TestSniffingConnWriteCapturesOnce confirms that the first response status is
+// retained and subsequent response lines cannot overwrite it. This keeps the
+// metric label stable if a future net/http refactor splits a response across
 // multiple writes.
 func TestSniffingConnWriteCapturesOnce(t *testing.T) {
 	c := &sniffingConn{Conn: &nullConn{}}
@@ -88,7 +84,7 @@ func TestSniffingConnWriteCapturesOnce(t *testing.T) {
 		t.Fatalf("second write: %v", err)
 	}
 	if got := c.capturedStatus(); got != 418 {
-		t.Fatalf("after second write: capturedStatus = %d, want 418 (sync.Once must guard)", got)
+		t.Fatalf("after second write: capturedStatus = %d, want 418 (first status must remain)", got)
 	}
 	// A non-status follow-on (body bytes) similarly must not reset to 0.
 	if _, err := c.Write([]byte("teapot body bytes")); err != nil {
@@ -99,11 +95,9 @@ func TestSniffingConnWriteCapturesOnce(t *testing.T) {
 	}
 }
 
-// TestSniffingConnWriteEmptyDoesNotFireOnce confirms a zero-length Write does
-// not consume the sync.Once. Some net/http internals call Write([]byte{})
-// (e.g. flushing an empty buffered chunk); that must not lock out a
-// subsequent real status-line write.
-func TestSniffingConnWriteEmptyDoesNotFireOnce(t *testing.T) {
+// TestSniffingConnWriteEmptyDoesNotCaptureStatus confirms a zero-length Write
+// does not lock out a subsequent real status-line write.
+func TestSniffingConnWriteEmptyDoesNotCaptureStatus(t *testing.T) {
 	c := &sniffingConn{Conn: &nullConn{}}
 	if _, err := c.Write(nil); err != nil {
 		t.Fatalf("nil write: %v", err)
@@ -118,6 +112,6 @@ func TestSniffingConnWriteEmptyDoesNotFireOnce(t *testing.T) {
 		t.Fatalf("real write: %v", err)
 	}
 	if got := c.capturedStatus(); got != 200 {
-		t.Fatalf("after real write: capturedStatus = %d, want 200 (empty writes must not consume the Once)", got)
+		t.Fatalf("after real write: capturedStatus = %d, want 200", got)
 	}
 }
