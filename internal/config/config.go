@@ -11,6 +11,9 @@
 //	WAVEFRONT_TARGETS                 — named backend targets, comma-separated name=url pairs
 //	WAVEFRONT_LISTEN_ADDR             — data-plane listen address (default 0.0.0.0:8080)
 //	WAVEFRONT_METRICS_ADDR            — ops/metrics listen address (default 0.0.0.0:9090)
+//	WAVEFRONT_PROTOCOL_INBOUND        — inbound mode: http1|h2c|https|https+h3 (default http1)
+//	WAVEFRONT_TLS_CERT_FILE           — PEM certificate chain (required for TLS modes)
+//	WAVEFRONT_TLS_KEY_FILE            — PEM private key (required for TLS modes)
 //	WAVEFRONT_CONTRACT_VERSION_HEADER — header carrying the contract version (default X-Api-Contract-Version)
 //	WAVEFRONT_REQUEST_TIMEOUT_MS      — per-request upstream timeout in ms (default 15000)
 //	WAVEFRONT_READ_HEADER_TIMEOUT_MS  — data-plane ReadHeaderTimeout in ms (default 10000)
@@ -40,6 +43,9 @@ type Config struct {
 	Targets               map[string]string
 	ListenAddr            string
 	MetricsAddr           string
+	InboundProtocol       InboundProtocol
+	TLSCertFile           string
+	TLSKeyFile            string
 	ContractVersionHeader string
 	RequestTimeout        time.Duration
 	ReadHeaderTimeout     time.Duration
@@ -50,6 +56,36 @@ type Config struct {
 	TracesServiceName     string
 	TracesSampleRatio     float64
 }
+
+// InboundProtocol selects the transports exposed by the data-plane address.
+// The zero value is treated as HTTP/1.1 by server code so hand-built Config
+// values in embedders preserve the historical behavior.
+type InboundProtocol string
+
+const (
+	InboundHTTP1   InboundProtocol = "http1"
+	InboundH2C     InboundProtocol = "h2c"
+	InboundHTTPS   InboundProtocol = "https"
+	InboundHTTPSH3 InboundProtocol = "https+h3"
+)
+
+// Valid reports whether p names a supported, nonzero inbound mode.
+func (p InboundProtocol) Valid() bool {
+	switch p {
+	case InboundHTTP1, InboundH2C, InboundHTTPS, InboundHTTPSH3:
+		return true
+	default:
+		return false
+	}
+}
+
+// UsesTLS reports whether the data-plane TCP listener terminates TLS.
+func (p InboundProtocol) UsesTLS() bool {
+	return p == InboundHTTPS || p == InboundHTTPSH3
+}
+
+// UsesHTTP3 reports whether the data plane also listens for QUIC over UDP.
+func (p InboundProtocol) UsesHTTP3() bool { return p == InboundHTTPSH3 }
 
 type MissingError struct{ Var string }
 
@@ -70,6 +106,7 @@ func (e *InvalidError) Unwrap() error { return e.Err }
 const (
 	defListenAddr        = "0.0.0.0:8080"
 	defMetricsAddr       = "0.0.0.0:9090"
+	defInboundProtocol   = InboundHTTP1
 	defCVHeader          = "X-Api-Contract-Version"
 	defTimeoutMS         = 15000
 	defReadHeaderTimeout = 10000
@@ -188,6 +225,24 @@ func Load(opts ...Option) (*Config, error) {
 	cfg.MetricsAddr = withDefault("WAVEFRONT_METRICS_ADDR", defMetricsAddr)
 	if e := validateHostPort(cfg.MetricsAddr); e != nil {
 		return nil, &InvalidError{Var: "WAVEFRONT_METRICS_ADDR", Value: cfg.MetricsAddr, Err: e}
+	}
+
+	protocolRaw := withDefault("WAVEFRONT_PROTOCOL_INBOUND", string(defInboundProtocol))
+	cfg.InboundProtocol = InboundProtocol(strings.ToLower(protocolRaw))
+	if !cfg.InboundProtocol.Valid() {
+		return nil, &InvalidError{
+			Var:   "WAVEFRONT_PROTOCOL_INBOUND",
+			Value: protocolRaw,
+			Err:   errors.New("must be one of http1, h2c, https, https+h3"),
+		}
+	}
+	if cfg.InboundProtocol.UsesTLS() {
+		if cfg.TLSCertFile, err = required("WAVEFRONT_TLS_CERT_FILE"); err != nil {
+			return nil, err
+		}
+		if cfg.TLSKeyFile, err = required("WAVEFRONT_TLS_KEY_FILE"); err != nil {
+			return nil, err
+		}
 	}
 
 	cfg.ContractVersionHeader = withDefault("WAVEFRONT_CONTRACT_VERSION_HEADER", defCVHeader)

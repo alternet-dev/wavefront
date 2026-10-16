@@ -14,8 +14,9 @@ Implementation shape — package layout and the request path.
   bytes to a neutral value tree; encode the response back. `protobuf` first.
 - **transform** (`internal/transform/`) — applies the declarative mapping
   (add/rename/optionalize/default/coerce, route remap) in both directions.
-- **server** (`internal/server/`) — `net/http` listener, the one upstream
-  client, health + metrics endpoints. Header pass-through lives here.
+- **server** (`internal/server/`) — `net/http` TCP listener, optional
+  `quic-go` HTTP/3 listener, the one upstream client, health + metrics
+  endpoints. Header pass-through lives here.
 - **config** (`internal/config/`) — env parsed once at startup.
 
 ## Request path
@@ -37,8 +38,16 @@ Inbound body capped by `WAVEFRONT_MAX_BODY_BYTES`. The bundle is loaded once
 and shared immutably. No per-client state, no queues, no buffers that grow with
 client count.
 
+## Inbound transports
+
+The data-plane listener is selected once at startup. The default is plaintext
+HTTP/1.1; optional modes add h2c, TLS with HTTP/2 ALPN, or TLS plus an HTTP/3
+QUIC listener. Every mode feeds the same `server` handler and therefore the
+same negotiation, transform, error, and observability paths. TLS certificate
+issuance and renewal remain outside the binary.
+
 ## What's NOT in the binary
 
-No broker/DB/cache client. No cloud/k8s SDK. No auth server. No TLS/cert/host
-routing. No WebSocket. No business logic. Backend- and version-specific
-behavior is entirely in the bundle.
+No broker/DB/cache client. No cloud/k8s SDK. No auth server. No certificate
+manager or host router. No WebSocket. No business logic. Backend- and
+version-specific behavior is entirely in the bundle.
