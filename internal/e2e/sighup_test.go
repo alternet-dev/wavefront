@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/alternet-dev/wavefront/internal/bundlegen"
 	"github.com/alternet-dev/wavefront/internal/bundletest"
 )
 
@@ -36,6 +37,49 @@ contracts:
     request_message: acme.v1.Ping
     response_message: acme.v1.Pong
 `)
+	if err := h.Server.ReloadBundle(); err != nil {
+		t.Fatalf("ReloadBundle: %v", err)
+	}
+
+	if status, errCode := sendSkewProbe(t, h, "2024-11"); status != http.StatusBadRequest || errCode != "unsupported_contract_version" {
+		t.Errorf("after reload, 2024-11 should be unsupported; got status=%d errCode=%q", status, errCode)
+	}
+	if status, _ := sendSkewProbe(t, h, "2026-05"); status != http.StatusOK {
+		t.Errorf("after reload, 2026-05 should succeed; got status=%d", status)
+	}
+}
+
+// TestReloadPackedBundleSwapsContractVersion proves the archive path has the
+// same reload semantics as the canonical directory: replace the derived
+// artifact, reload it in memory, and atomically expose the new contract.
+func TestReloadPackedBundleSwapsContractVersion(t *testing.T) {
+	bundleDir := bundletest.Dir(t, "")
+	archive := filepath.Join(t.TempDir(), "bundle.tar.gz")
+	if err := bundlegen.Pack(bundleDir, archive); err != nil {
+		t.Fatalf("Pack initial bundle: %v", err)
+	}
+	h := Spawn(t, SpawnOpts{
+		BundleDir: archive,
+		BackendHandler: func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"text":"ok"}`)
+		},
+	})
+
+	if status, _ := sendSkewProbe(t, h, "2024-11"); status != http.StatusOK {
+		t.Fatalf("baseline 2024-11 should succeed, got %d", status)
+	}
+	swapSingleLayer(t, bundleDir, "2026-05", `version: 1
+contracts:
+  - contract_version: "2026-05"
+    route: /v3/echo
+    method: POST
+    request_message: acme.v1.Ping
+    response_message: acme.v1.Pong
+`)
+	if err := bundlegen.Pack(bundleDir, archive); err != nil {
+		t.Fatalf("Pack replacement bundle: %v", err)
+	}
 	if err := h.Server.ReloadBundle(); err != nil {
 		t.Fatalf("ReloadBundle: %v", err)
 	}

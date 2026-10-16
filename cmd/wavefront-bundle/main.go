@@ -6,6 +6,7 @@
 // Usage:
 //
 //	wavefront-bundle add --openapi <file|url> --bundle <dir> [--force]
+//	wavefront-bundle pack --bundle <dir> --out <file.tar.gz>
 //	wavefront-bundle remove --version <id> --bundle <dir>
 //	wavefront-bundle retire --version <id> --bundle <dir>
 //	wavefront-bundle verify --bundle <dir>
@@ -20,6 +21,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/alternet-dev/wavefront/internal/bundle"
 	"github.com/alternet-dev/wavefront/internal/bundlegen"
 )
 
@@ -31,12 +33,14 @@ func main() {
 // to errOut. It is the testable entry point — main is a thin os.Exit wrapper.
 func run(args []string, errOut io.Writer) int {
 	if len(args) == 0 {
-		fmt.Fprintln(errOut, "usage: wavefront-bundle <add|remove|retire|verify|draft-shim> [flags]")
+		fmt.Fprintln(errOut, "usage: wavefront-bundle <add|pack|remove|retire|verify|draft-shim> [flags]")
 		return 2
 	}
 	switch args[0] {
 	case "add":
 		return runAdd(args[1:], errOut)
+	case "pack":
+		return runPack(args[1:], errOut)
 	case "remove":
 		return runRemove(args[1:], errOut)
 	case "retire":
@@ -49,6 +53,28 @@ func run(args []string, errOut io.Writer) int {
 		fmt.Fprintf(errOut, "wavefront-bundle: unknown subcommand %q\n", args[0])
 		return 2
 	}
+}
+
+func runPack(args []string, errOut io.Writer) int {
+	fs := flag.NewFlagSet("pack", flag.ContinueOnError)
+	fs.SetOutput(errOut)
+	bundleDir := fs.String("bundle", "", "canonical bundle directory to pack")
+	out := fs.String("out", "", "gzip-compressed tar archive to write")
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 2
+	}
+	if *bundleDir == "" || *out == "" {
+		fmt.Fprintln(errOut, "usage: wavefront-bundle pack --bundle <dir> --out <file.tar.gz>")
+		return 2
+	}
+	if err := bundlegen.Pack(*bundleDir, *out); err != nil {
+		fmt.Fprintln(errOut, "wavefront-bundle pack:", err)
+		return 1
+	}
+	return 0
 }
 
 func runAdd(args []string, errOut io.Writer) int {
@@ -121,7 +147,7 @@ func runRetire(args []string, errOut io.Writer) int {
 func runVerify(args []string, errOut io.Writer) int {
 	fs := flag.NewFlagSet("verify", flag.ContinueOnError)
 	fs.SetOutput(errOut)
-	bundleDir := fs.String("bundle", "", "bundle directory to verify")
+	bundleDir := fs.String("bundle", "", "bundle directory or packed archive to verify")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
@@ -142,7 +168,7 @@ func runVerify(args []string, errOut io.Writer) int {
 func runDraftShim(args []string, errOut, stdout io.Writer) int {
 	fs := flag.NewFlagSet("draft-shim", flag.ContinueOnError)
 	fs.SetOutput(errOut)
-	bundleDir := fs.String("bundle", "", "bundle directory containing the two layers")
+	bundleDir := fs.String("bundle", "", "bundle directory or packed archive containing the two layers")
 	fromVersion := fs.String("from", "", "the old contract version (layer subdir) to bridge from")
 	toVersion := fs.String("to", "", "the new contract version (layer subdir) to bridge to")
 	outFile := fs.String("out", "", "write the drafted override to this file; default stdout")
@@ -157,12 +183,12 @@ func runDraftShim(args []string, errOut, stdout io.Writer) int {
 		fmt.Fprintln(errOut, "usage: wavefront-bundle draft-shim --bundle <dir> --from <version> --to <version> [--out <file>] [--strict]")
 		return 2
 	}
-	fromBytes, err := os.ReadFile(filepath.Join(*bundleDir, *fromVersion, "openapi.json"))
+	fromBytes, err := bundle.ReadFile(*bundleDir, filepath.ToSlash(filepath.Join(*fromVersion, "openapi.json")))
 	if err != nil {
 		fmt.Fprintln(errOut, "wavefront-bundle draft-shim:", err)
 		return 1
 	}
-	toBytes, err := os.ReadFile(filepath.Join(*bundleDir, *toVersion, "openapi.json"))
+	toBytes, err := bundle.ReadFile(*bundleDir, filepath.ToSlash(filepath.Join(*toVersion, "openapi.json")))
 	if err != nil {
 		fmt.Fprintln(errOut, "wavefront-bundle draft-shim:", err)
 		return 1

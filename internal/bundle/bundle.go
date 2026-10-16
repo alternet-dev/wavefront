@@ -14,8 +14,7 @@ import (
 	"fmt"
 	"io/fs"
 	"net/http"
-	"os"
-	"path/filepath"
+	"path"
 	"sort"
 	"strconv"
 	"strings"
@@ -333,8 +332,8 @@ var allowedMethods = map[string]bool{
 // bundle root. An absent file yields an empty map — no version has an
 // override. Strict decode; the schema version must be 1. Each override must
 // set exactly one of transform or route.
-func loadResolution(dir string) (map[string]yamlResolution, error) {
-	raw, err := os.ReadFile(filepath.Join(dir, fileResolution))
+func loadResolution(source bundleSource) (map[string]yamlResolution, error) {
+	raw, err := source.readFile(fileResolution)
 	if errors.Is(err, fs.ErrNotExist) {
 		return map[string]yamlResolution{}, nil
 	}
@@ -372,17 +371,22 @@ func loadResolution(dir string) (map[string]yamlResolution, error) {
 	return out, nil
 }
 
-// Load reads, parses, validates, and resolves the bundle in dir. The bundle
-// is a directory of layer subdirectories, each holding descriptors.binpb,
-// openapi.json, and versions.yaml. Any failure is fatal (a typed error); the
-// caller refuses to start.
-func Load(dir string) (*Bundle, error) {
-	layerNames, err := layerDirs(dir)
+// Load reads, parses, validates, and resolves the bundle at bundlePath. The
+// path may be a directory of layer subdirectories or a gzip-compressed tar
+// archive of that directory. Archives are decompressed in memory before the
+// same validation path runs. Any failure is fatal (a typed error); the caller
+// refuses to start.
+func Load(bundlePath string) (*Bundle, error) {
+	source, err := openSource(bundlePath)
+	if err != nil {
+		return nil, err
+	}
+	layerNames, err := layerDirs(source, bundlePath)
 	if err != nil {
 		return nil, err
 	}
 
-	resolutionMap, rerr := loadResolution(dir)
+	resolutionMap, rerr := loadResolution(source)
 	if rerr != nil {
 		return nil, rerr
 	}
@@ -395,15 +399,15 @@ func Load(dir string) (*Bundle, error) {
 	loaded := make([]layer, 0, len(layerNames))
 
 	for _, name := range layerNames {
-		lp := filepath.Join(dir, name)
-		fdps, derr := loadLayerDescriptors(filepath.Join(lp, fileDescriptors))
+		lp := name
+		fdps, derr := loadLayerDescriptors(source, path.Join(lp, fileDescriptors))
 		if derr != nil {
 			return nil, derr
 		}
-		if verr := validateOpenAPI(filepath.Join(lp, fileOpenAPI)); verr != nil {
+		if verr := validateOpenAPI(source, path.Join(lp, fileOpenAPI)); verr != nil {
 			return nil, verr
 		}
-		yb, lerr := loadVersions(filepath.Join(lp, fileVersions))
+		yb, lerr := loadVersions(source, path.Join(lp, fileVersions))
 		if lerr != nil {
 			return nil, lerr
 		}
@@ -603,10 +607,10 @@ func resolveChains(contracts []*Contract, byVersion map[string][]*Contract) erro
 // layerDirs returns the sorted names of the immediate subdirectories of dir,
 // each a bundle layer. An unreadable directory, or one with no subdirectory,
 // is a hard error.
-func layerDirs(dir string) ([]string, error) {
-	entries, err := os.ReadDir(dir)
+func layerDirs(source bundleSource, label string) ([]string, error) {
+	entries, err := source.readDir(".")
 	if err != nil {
-		return nil, &ReadError{File: dir, Err: err}
+		return nil, &ReadError{File: label, Err: err}
 	}
 	var names []string
 	for _, e := range entries {
@@ -623,8 +627,8 @@ func layerDirs(dir string) ([]string, error) {
 // loadLayerDescriptors reads one layer's descriptors.binpb and returns its
 // FileDescriptorProtos. They are merged across layers (and only then built
 // into a registry) by mergeDescriptors.
-func loadLayerDescriptors(path string) ([]*descriptorpb.FileDescriptorProto, error) {
-	raw, err := os.ReadFile(path)
+func loadLayerDescriptors(source bundleSource, filename string) ([]*descriptorpb.FileDescriptorProto, error) {
+	raw, err := source.readFile(filename)
 	if err != nil {
 		return nil, &ReadError{File: fileDescriptors, Err: err}
 	}
@@ -786,8 +790,8 @@ func mergeDescriptors(perLayer [][]*descriptorpb.FileDescriptorProto) (*protoreg
 	return files, nil
 }
 
-func validateOpenAPI(path string) error {
-	raw, err := os.ReadFile(path)
+func validateOpenAPI(source bundleSource, filename string) error {
+	raw, err := source.readFile(filename)
 	if err != nil {
 		return &ReadError{File: fileOpenAPI, Err: err}
 	}
@@ -798,8 +802,8 @@ func validateOpenAPI(path string) error {
 	return nil
 }
 
-func loadVersions(path string) (*yamlBundle, error) {
-	raw, err := os.ReadFile(path)
+func loadVersions(source bundleSource, filename string) (*yamlBundle, error) {
+	raw, err := source.readFile(filename)
 	if err != nil {
 		return nil, &ReadError{File: fileVersions, Err: err}
 	}
