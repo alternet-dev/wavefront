@@ -576,6 +576,56 @@ overrides:
 	}
 }
 
+func TestLookupSelectsProfileTenantAndCohortResolution(t *testing.T) {
+	cases := []struct {
+		name, field, value string
+		selectors          Selectors
+	}{
+		{"profile", "profile", "mobile", Selectors{Profile: "mobile"}},
+		{"tenant", "tenant", "partner-a", Selectors{Tenant: "partner-a"}},
+		{"cohort", "cohort", "canary", Selectors{Cohort: "canary"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := writeBundle(t, fdsBytes(t), validOpenAPI, validVersions)
+			resolution := "version: 1\noverrides:\n  - contract_version: \"2024-11\"\n    transform:\n      response:\n        - default: { field: text, value: base }\n  - contract_version: \"2024-11\"\n    " + tc.field + ": " + tc.value + "\n    transform:\n      response:\n        - default: { field: text, value: " + tc.value + " }\n"
+			mustWrite(t, filepath.Join(dir, "resolution.yaml"), []byte(resolution))
+			b, err := Load(dir)
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			c, ok := b.Lookup("/v3/me/session", "GET", "2024-11", tc.selectors)
+			if !ok {
+				t.Fatal("Lookup: no contract")
+			}
+			if len(c.ResponseOps()) != 1 || c.ResponseOps()[0].Value.JSON() != tc.value {
+				t.Fatalf("response ops = %#v, want default text=%q", c.ResponseOps(), tc.value)
+			}
+			if c, ok := b.Lookup("/v3/me/session", "GET", "2024-11", Selectors{}); !ok || len(c.ResponseOps()) != 1 || c.ResponseOps()[0].Value.JSON() != "base" {
+				t.Fatalf("version-only fallback = %#v, %v; want base transform", c, ok)
+			}
+		})
+	}
+}
+
+func TestLoadResolutionOverlappingSelectorsRejected(t *testing.T) {
+	dir := writeBundle(t, fdsBytes(t), validOpenAPI, validVersions)
+	mustWrite(t, filepath.Join(dir, "resolution.yaml"), []byte(`version: 1
+overrides:
+  - contract_version: "2024-11"
+    profile: mobile
+    transform: { request: [] }
+  - contract_version: "2024-11"
+    tenant: partner-a
+    transform: { request: [] }
+`))
+	_, err := Load(dir)
+	var ve *ValidationError
+	if !errors.As(err, &ve) || ve.Field != "selector" {
+		t.Fatalf("want selector ValidationError, got %v", err)
+	}
+}
+
 // TestLookupRoute covers the bundle's route-membership check used by the
 // proxy as the first-pass routing gate. Path-method pairs that any contract
 // binds must hit (and return a non-nil *Contract); everything else (unknown
