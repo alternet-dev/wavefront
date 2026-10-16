@@ -44,6 +44,26 @@ This selector generality is why `wavefront` is not "a protobuf gateway."
   configures a default target plus, optionally, named targets; a contract
   version routes to one.
 
+## Adapter boundary
+
+An adapter produces the complete intent for one upstream request and encodes
+the corresponding reply. This boundary covers interaction models as well as
+body codecs: the core does not assume that an inbound route is also the
+upstream route or that every response has one descriptor-fixed shape.
+
+`ProtoJSON` is the adapter selected by the server today. It decodes a binding's
+protobuf request into JSON for the bound HTTP route and encodes the bound JSON
+response back to protobuf. `GraphQL` implements the GraphQL-over-HTTP exchange
+at the same boundary: a valid JSON GraphQL request becomes one
+`POST /graphql`, and the request-shaped JSON response is preserved rather than
+encoded through a fixed `response_message`. GraphQL document and schema
+validation remain the upstream GraphQL server's responsibility.
+
+The running server does not yet select between adapters per request. That is
+the separate codec-selector/content-negotiation concern; adding the GraphQL
+transport adapter does not silently change the existing protobuf wire
+contract.
+
 ## Delivery model
 
 Synchronous request/response only. Decode → resolve selector → transform
