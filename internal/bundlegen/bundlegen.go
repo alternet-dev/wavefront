@@ -678,7 +678,7 @@ func refName(ref string) string {
 // lowers inline at each $ref site rather than being built as a message (#133).
 func isMessageComponent(sc *schema) bool {
 	return sc.Type == "object" && sc.Properties != nil &&
-		!(len(sc.Properties) == 0 && sc.AdditionalProperties != nil && additionalPropertiesOpen(sc.AdditionalProperties))
+		(len(sc.Properties) != 0 || sc.AdditionalProperties == nil || !additionalPropertiesOpen(sc.AdditionalProperties))
 }
 
 func collectSchemas(doc openAPI, roots []string) (map[string]*schema, error) {
