@@ -1646,6 +1646,52 @@ func TestAddBindsWKTComponentsAsBodies(t *testing.T) {
 	}
 }
 
+// TestAddBindsExplicitlyEmptyOpenObjectsAsStructBodies keeps the #118
+// zero-field-message boundary only for an explicitly-empty closed object. An
+// otherwise empty object that explicitly enables additional properties is an
+// open JSON object, so a body reference must bind to Struct. (#121)
+func TestAddBindsExplicitlyEmptyOpenObjectsAsStructBodies(t *testing.T) {
+	const template = `{
+  "openapi": "3.1.0",
+  "info": {"title": "t", "version": "0"},
+  "paths": {"/open": {"post": {"operationId": "open",
+    "requestBody": {"content": {"application/json": {"schema": {"$ref": "#/components/schemas/Open"}}}},
+    "responses": {"200": {"content": {"application/json": {"schema": {"$ref": "#/components/schemas/Open"}}}}}
+  }}},
+  "components": {"schemas": {
+    "Open": {"type": "object", "properties": {}, "additionalProperties": OPEN}
+  }}
+}`
+	for name, open := range map[string]string{
+		"true":         "true",
+		"empty schema": "{}",
+	} {
+		t.Run(name, func(t *testing.T) {
+			in := writeOpenAPI(t, strings.Replace(template, "OPEN", open, 1))
+			out := t.TempDir()
+			if err := bundlegen.Add(in, out, false); err != nil {
+				t.Fatalf("Add: %v", err)
+			}
+			b, err := bundle.Load(out)
+			if err != nil {
+				t.Fatalf("generated bundle did not load: %v", err)
+			}
+			c, ok := b.Lookup("/open", "POST", "0")
+			if !ok {
+				t.Fatal("contract for /open not found")
+			}
+			for side, got := range map[string]string{
+				"request_message":  c.RequestMessage(),
+				"response_message": c.ResponseMessage(),
+			} {
+				if got != "google.protobuf.Struct" {
+					t.Errorf("%s = %q, want google.protobuf.Struct", side, got)
+				}
+			}
+		})
+	}
+}
+
 // TestAddBindsWKTComponentsAsErrorBodies covers #121's error-body surface: an
 // open object or untagged union referenced as a 4xx/5xx response binds to
 // google.protobuf.Struct or google.protobuf.Value respectively, and
