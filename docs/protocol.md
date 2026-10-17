@@ -154,13 +154,47 @@ The client declares its contract version in
 Missing / unknown / unsupported ⇒ a typed `unsupported_contract_version`
 error (see the error contract below), never a silent best-guess.
 
+## Codec negotiation
+
+The external request and response representations are negotiated
+independently. Both are descriptor-validated against the message names in the
+resolved route binding and both become JSON at the internal backend boundary.
+
+- A request with a body must declare `Content-Type: application/protobuf` or
+  `Content-Type: application/json`. Media-type matching is case-insensitive and
+  permits parameters. An absent or unsupported type returns
+  `unsupported_media_type` (415) before the body is read. A request without a
+  body has no inbound envelope to negotiate and keeps protobuf as its decoder
+  fallback.
+- `Accept` selects the response representation from `application/protobuf` and
+  `application/json`. Media ranges, wildcards, and `q` weights are honored. If
+  `Accept` is absent, or permits both representations equally, the request
+  codec wins; a bodyless request falls back to protobuf. If no supported
+  representation has a positive weight, wavefront returns `not_acceptable`
+  (406).
+- Request and response choices are independent: a JSON request may ask for a
+  protobuf response, and the reverse is also valid.
+
+Responses that reach codec negotiation carry `Vary: Accept`, including the
+406 alternative, so shared caches do not reuse one codec's representation for
+another. The internal request always asks the backend for `application/json`;
+when it has a body, that body is also sent as `application/json`.
+
+JSON uses protobuf's canonical JSON mapping for the binding's message
+descriptor. It is not an unvalidated passthrough: malformed JSON, unknown
+fields, or values incompatible with the descriptor return `decode_failed`.
+Successful and contract-declared typed responses use the negotiated response
+codec. Wavefront-originated failures keep the fixed protobuf
+`wavefront.v0.Error` envelope described below, including failures that occur
+before a codec can be negotiated.
+
 ## Error contract
 
 The error contract is **stable** — iterated additively, never broken (that
 stability is the entire point of `wavefront`).
 
-**Success** is untouched passthrough: the reply is the protobuf shaped exactly
-per the contract's `response_message`. No envelope, no wrap.
+**Success** has no envelope or wrapper: the reply is the negotiated protobuf or
+JSON representation shaped exactly by the contract's `response_message`.
 
 ### Wavefront-originated failures
 
@@ -181,7 +215,8 @@ error — return:
 |---|---|---|---|
 | `unsupported_contract_version` | 400 | `Content-Type` | version header missing / unknown / unsupported |
 | `decode_failed` | 400 | `Content-Type` | client body fails to decode into `request_message` |
-| `unsupported_media_type` | 415 | `Content-Type` | request `Content-Type` is not `application/protobuf`; the wrong envelope is rejected before the body is read, separating it from `decode_failed` |
+| `not_acceptable` | 406 | `Content-Type`, `Vary` | request `Accept` permits neither `application/protobuf` nor `application/json` |
+| `unsupported_media_type` | 415 | `Content-Type` | a request with a body has an absent or unsupported `Content-Type`; the wrong envelope is rejected before the body is read, separating it from `decode_failed` |
 | `request_body_too_large` | 413 | `Content-Type` | inbound body exceeds `WAVEFRONT_MAX_BODY_BYTES` |
 | `upstream_timeout` | 504 | `Content-Type`, `Retry-After` | upstream exceeds `WAVEFRONT_REQUEST_TIMEOUT_MS` |
 | `upstream_error` | 502 | `Content-Type` | upstream unreachable / reply un-encodable / capability ceiling (see below) / undeclared status under `strict: true` |
@@ -217,11 +252,11 @@ followed (`http.Client.CheckRedirect` returns `http.ErrUseLastResponse`), so a
 **Declared (route, status) — typed error response.** When a `versions.yaml`
 `error_messages` stanza binds the upstream's status to a proto message, the
 response is a first-class typed contract response: the upstream's status is
-preserved, the body is the bound message encoded from the upstream JSON, no
-`X-Wavefront-Error` header is set, and `X-Wavefront-Contract-Version` is set —
-exactly like a 2xx success. The declared-error body does not run the 2xx-scoped
-`response` transforms; it runs the per-status `error_responses` transforms
-instead (below).
+preserved, the body is the bound message encoded in the negotiated response
+codec from the upstream JSON, no `X-Wavefront-Error` header is set, and
+`X-Wavefront-Contract-Version` is set — exactly like a 2xx success. The
+declared-error body does not run the 2xx-scoped `response` transforms; it runs
+the per-status `error_responses` transforms instead (below).
 
 **Transforming declared error bodies.** A `resolution.yaml` `transform` may
 carry an `error_responses` map — numeric status → the same four verbs
@@ -316,11 +351,12 @@ responses; intercepting and re-enveloping these is tracked as future work in
 ### Response header invariant
 
 `X-Wavefront-Contract-Version` is set on every response, success or error. On
-pre-negotiate failures (route-gate miss, panic recovery, `unsupported_media_type`,
-`unavailable`), wavefront echoes the raw client `X-Api-Contract-Version`
-header value, or the literal `unknown` if the client sent none. Only this
-response header echoes raw values — the metric label and structured log line
-stay at bundle-known versions so the Prometheus cardinality stays bounded.
+pre-negotiate failures (route-gate miss, panic recovery, `not_acceptable`,
+`unsupported_media_type`, `unavailable`), wavefront echoes the raw client
+`X-Api-Contract-Version` header value, or the literal `unknown` if the client
+sent none. Only this response header echoes raw values — the metric label and
+structured log line stay at bundle-known versions so the Prometheus cardinality
+stays bounded.
 
 ### CORS
 
@@ -328,12 +364,14 @@ wavefront is browser-facing but does not own CORS — the upstream is the single
 source of truth. A CORS preflight (`OPTIONS` with `Origin` +
 `Access-Control-Request-Method`) is forwarded to the default upstream and its
 response relayed, bypassing routing and the codec; it never 404s as an unbound
-route. On a proxied response, the upstream's `Access-Control-*` and `Vary`
-headers are carried through verbatim. The one gap is deliberate: a
+route. On a proxied response, the upstream's `Access-Control-*` values are
+carried through verbatim and its `Vary` tokens are merged with wavefront's
+codec-negotiation `Accept` token. The one gap is deliberate: a
 wavefront-originated response (an error synthesized before any upstream call —
-`unsupported_contract_version`, `unknown_route`, `unsupported_media_type`) has no
-upstream CORS to mirror and carries none, so a browser cannot read it
-cross-origin. Those are misconfigured-request conditions, not the normal flow.
+`unsupported_contract_version`, `not_acceptable`, `unknown_route`,
+`unsupported_media_type`) has no upstream CORS to mirror and carries none, so a
+browser cannot read it cross-origin. Those are misconfigured-request conditions,
+not the normal flow.
 
 ## Stability declaration
 

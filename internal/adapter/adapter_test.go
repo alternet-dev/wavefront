@@ -104,6 +104,17 @@ func msgOf(t *testing.T, files *protoregistry.Files, name string) protoreflect.M
 }
 
 var _ Adapter = (*ProtoJSON)(nil)
+var _ Adapter = (*JSONJSON)(nil)
+
+func TestAdapterMediaTypesAreDistinct(t *testing.T) {
+	resolver := testResolver{testFiles(t)}
+	if got := NewProtoJSON(resolver).MediaType(); got != MediaTypeProtobuf {
+		t.Errorf("ProtoJSON.MediaType() = %q, want %q", got, MediaTypeProtobuf)
+	}
+	if got := NewJSONJSON(resolver).MediaType(); got != MediaTypeJSON {
+		t.Errorf("JSONJSON.MediaType() = %q, want %q", got, MediaTypeJSON)
+	}
+}
 
 func TestDecodeRequestProtoToJSON(t *testing.T) {
 	files := testFiles(t)
@@ -144,6 +155,48 @@ func TestDecodeRequestInvalidProtobuf(t *testing.T) {
 	_, werr := a.DecodeRequest(tb{method: "POST", route: "/x", req: "acme.v1.Ping", resp: "acme.v1.Pong"}, []byte("\xde\xad\xbe\xef not proto"))
 	if werr == nil || werr.Code() != "decode_failed" {
 		t.Fatalf("want decode_failed, got %v", werr)
+	}
+}
+
+func TestDecodeRequestJSONToCanonicalJSON(t *testing.T) {
+	files := testFiles(t)
+	a := NewJSONJSON(testResolver{files})
+
+	call, werr := a.DecodeRequest(
+		tb{method: "POST", route: "/v3/x", req: "acme.v1.Ping", resp: "acme.v1.Pong"},
+		[]byte(`{ "n": 7, "text": "hi" }`),
+	)
+	if werr != nil {
+		t.Fatalf("DecodeRequest: %v", werr)
+	}
+	if call.Method != "POST" || call.Path != "/v3/x" {
+		t.Errorf("method/path = %q %q", call.Method, call.Path)
+	}
+	if call.ContentType != MediaTypeJSON {
+		t.Errorf("ContentType = %q, want %q", call.ContentType, MediaTypeJSON)
+	}
+	msg := dynamicpb.NewMessage(msgOf(t, files, "acme.v1.Ping"))
+	if err := protojson.Unmarshal(call.Body, msg); err != nil {
+		t.Fatalf("upstream body is not descriptor-valid JSON: %v (body=%s)", err, call.Body)
+	}
+	if got := msg.Get(msg.Descriptor().Fields().ByName("text")).String(); got != "hi" {
+		t.Errorf("decoded text = %q", got)
+	}
+	if got := msg.Get(msg.Descriptor().Fields().ByName("n")).Int(); got != 7 {
+		t.Errorf("decoded n = %d", got)
+	}
+}
+
+func TestDecodeRequestJSONRejectsMalformedAndUnknownFields(t *testing.T) {
+	a := NewJSONJSON(testResolver{testFiles(t)})
+	binding := tb{method: "POST", route: "/x", req: "acme.v1.Ping", resp: "acme.v1.Pong"}
+	for _, in := range [][]byte{
+		[]byte(`{"text":`),
+		[]byte(`{"text":"hi","unknown":true}`),
+	} {
+		if _, werr := a.DecodeRequest(binding, in); werr == nil || werr.Code() != "decode_failed" {
+			t.Errorf("DecodeRequest(%q) error = %v, want decode_failed", in, werr)
+		}
 	}
 }
 
@@ -220,6 +273,51 @@ func TestEncodeResponseInvalidJSON(t *testing.T) {
 	_, _, werr := a.EncodeResponse(tb{method: "POST", route: "/x", req: "acme.v1.Ping", resp: "acme.v1.Pong"}, []byte("definitely not json"))
 	if werr == nil || werr.Code() != "upstream_error" {
 		t.Fatalf("want upstream_error, got %v", werr)
+	}
+}
+
+func TestEncodeResponseJSONToJSONWithWKT(t *testing.T) {
+	files := testFiles(t)
+	a := NewJSONJSON(testResolver{files})
+
+	out, ct, werr := a.EncodeResponse(
+		tb{method: "POST", route: "/x", req: "acme.v1.Ping", resp: "acme.v1.Pong"},
+		[]byte(`{"text":"ok","at":"2026-05-17T00:00:00Z"}`),
+	)
+	if werr != nil {
+		t.Fatalf("EncodeResponse: %v", werr)
+	}
+	if ct != MediaTypeJSON {
+		t.Errorf("contentType = %q, want %q", ct, MediaTypeJSON)
+	}
+	pong := dynamicpb.NewMessage(msgOf(t, files, "acme.v1.Pong"))
+	if err := protojson.Unmarshal(out, pong); err != nil {
+		t.Fatalf("out not valid JSON for Pong: %v (out=%s)", err, out)
+	}
+	if got := pong.Get(pong.Descriptor().Fields().ByName("text")).String(); got != "ok" {
+		t.Errorf("decoded text = %q", got)
+	}
+}
+
+func TestEncodeErrorJSONTypesDeclaredStatus(t *testing.T) {
+	files := testFiles(t)
+	a := NewJSONJSON(testResolver{files})
+	b := tb{method: "POST", route: "/v3/echo", req: "acme.v1.Ping", resp: "acme.v1.Pong",
+		errs: map[int]string{409: "acme.v1.Ping"}}
+
+	out, ct, werr := a.EncodeError(b, 409, []byte(`{"n":42,"text":"conflict"}`))
+	if werr != nil {
+		t.Fatalf("EncodeError: %v", werr)
+	}
+	if ct != MediaTypeJSON {
+		t.Errorf("content-type = %q, want %q", ct, MediaTypeJSON)
+	}
+	msg := dynamicpb.NewMessage(msgOf(t, files, "acme.v1.Ping"))
+	if err := protojson.Unmarshal(out, msg); err != nil {
+		t.Fatalf("output is not JSON acme.v1.Ping: %v", err)
+	}
+	if got := msg.Get(msg.Descriptor().Fields().ByName("n")).Int(); got != 42 {
+		t.Errorf("decoded n = %d, want 42", got)
 	}
 }
 

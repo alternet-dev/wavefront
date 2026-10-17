@@ -29,6 +29,7 @@ func TestCodeStatusTableMatchesProtocol(t *testing.T) {
 	}{
 		{UnsupportedContractVersion(""), "unsupported_contract_version", 400},
 		{DecodeFailed(""), "decode_failed", 400},
+		{NotAcceptable(""), "not_acceptable", 406},
 		{RequestBodyTooLarge(""), "request_body_too_large", 413},
 		{UpstreamTimeout(""), "upstream_timeout", 504},
 		{UpstreamError(""), "upstream_error", 502},
@@ -59,7 +60,7 @@ func TestCodeStatusTableMatchesProtocol(t *testing.T) {
 
 func TestContentTypeAlwaysProtobuf(t *testing.T) {
 	for _, e := range []*Error{
-		UnsupportedContractVersion(""), DecodeFailed(""), RequestBodyTooLarge(""),
+		UnsupportedContractVersion(""), DecodeFailed(""), NotAcceptable(""), RequestBodyTooLarge(""),
 		UpstreamTimeout(""), UpstreamError(""),
 		TransformFailedRequest(""), TransformFailedResponse(""),
 		UnknownRoute(""), UnsupportedMediaType(""),
@@ -77,7 +78,7 @@ func TestRetryAfterOnlyOnUpstreamTimeout(t *testing.T) {
 		t.Errorf("upstream_timeout Retry-After = %q, want 0", got)
 	}
 	for _, e := range []*Error{
-		UnsupportedContractVersion(""), DecodeFailed(""), RequestBodyTooLarge(""), UpstreamError(""),
+		UnsupportedContractVersion(""), DecodeFailed(""), NotAcceptable(""), RequestBodyTooLarge(""), UpstreamError(""),
 		TransformFailedRequest(""), TransformFailedResponse(""),
 		UnknownRoute(""), UnsupportedMediaType(""),
 		// unavailable WITHOUT WithRetryAfter must not synthesize one — the

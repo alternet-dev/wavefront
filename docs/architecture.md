@@ -10,8 +10,9 @@ Implementation shape — package layout and the request path.
 - **negotiate** (`internal/negotiate/`) — resolves the contract serving a
   request from its `(URL.Path, Method, X-Api-Contract-Version)` against the
   loaded bundle; maps to a transform profile or a typed error.
-- **adapter** (`internal/adapter/`) — codec pairs. Decode inbound external
-  bytes to a neutral value tree; encode the response back. `protobuf` first.
+- **adapter** (`internal/adapter/`) — descriptor-backed codec pairs. Decode
+  external protobuf or JSON to the internal JSON value tree and encode the
+  response in the representation selected by `Accept`.
 - **transform** (`internal/transform/`) — applies the declarative mapping
   (add/rename/optionalize/default/coerce, route remap) in both directions.
 - **server** (`internal/server/`) — `net/http` listener, the one upstream
@@ -20,11 +21,12 @@ Implementation shape — package layout and the request path.
 
 ## Request path
 
-`server` accepts → route gate (path+method) → `negotiate` resolves the
-contract on (path, method, contract-version) → `adapter` decodes → `transform`
-maps request → `server` calls the resolved upstream → `transform` maps response
-→ `adapter` encodes → `server` responds. On any failure, a typed error is
-encoded in the client's contract version.
+`server` accepts → route gate (path+method) → content negotiation selects
+request/response adapters → `negotiate` resolves the contract on (path, method,
+contract-version) → the request adapter decodes → `transform` maps request →
+`server` calls the resolved upstream → `transform` maps response → the response
+adapter encodes → `server` responds. On any wavefront-originated failure, the
+fixed protobuf error type is returned.
 
 ## Concurrency model
 

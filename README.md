@@ -6,7 +6,7 @@ frozen at different points in contract-time keep working while the backend
 migrates freely.
 
 ```
-pinned clients --versioned protobuf--> wavefront --current JSON/REST--> backend
+pinned clients --versioned protobuf/JSON--> wavefront --current JSON/REST--> backend
                                            |
                                            +- descriptor bundle (one layer per contract version)
                                            +- per-version resolution: route, or a transform shim
@@ -36,11 +36,12 @@ contract variance is absorbed so the internal API stays singular.
   that picks a transform profile.
 - **Transform** — declarative request/response mapping for a version (field
   add / rename / optionalize / default / coerce; route remap).
-- **Adapter** — a codec pair. `protobuf ↔ OpenAPI/JSON` is the reference
-  adapter, not the identity.
-- **Selector** — the key a request is resolved by. The contract **version**
-  today; the engine is designed to extend to other selectors (codec, profile,
-  tenant, cohort).
+- **Adapter** — a codec pair. External protobuf and descriptor-validated JSON
+  are selected through HTTP content negotiation; both map to the internal
+  OpenAPI/JSON surface.
+- **Selector** — the key a request is resolved by. Contract **version** picks
+  the transform profile and negotiated **codec** picks the adapter; the engine
+  is designed to extend to profile, tenant, and cohort selectors.
 
 For depth, see [docs/concepts.md](docs/concepts.md).
 
@@ -50,7 +51,7 @@ It IS:
 - A descriptor-driven edge contract-mapping engine.
 - A version anti-corruption layer over a single internal backend.
 - Auth-transparent: it forwards the bearer; the backend validates.
-- Codec-agnostic via adapters (protobuf↔JSON shipped first).
+- Codec-agnostic via adapters (external protobuf and JSON shipped).
 
 It IS NOT:
 - An auth server. Bring your own token issuer/validator (the backend's).
@@ -154,9 +155,10 @@ Operational notes:
   and `wavefront_errors_total`, both labelled by negotiated `contract_version`;
   errors carry `code` plus a `transform_outcome` dimension that splits
   `transform_failed` by chain side. `/health` and `/ready` are the probes.
-- **Codec.** `protobuf ↔ JSON` is the only adapter today; the adapter boundary
-  is built so another codec could be added. All non-hop-by-hop client headers
-  are forwarded untouched.
+- **Codec.** Request `Content-Type` selects protobuf or JSON decoding; `Accept`
+  independently selects protobuf or JSON response encoding. Those two headers
+  are rewritten for the internal JSON call; all other non-hop-by-hop client
+  headers are forwarded untouched.
 
 The bundle schema and transform vocabulary are detailed in
 [docs/protocol.md](docs/protocol.md); integrating a consumer is covered in
