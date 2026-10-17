@@ -165,3 +165,41 @@ func TestGRPCJSONEncodeError(t *testing.T) {
 		t.Errorf("n = %d, want 42", n)
 	}
 }
+
+// TestGRPCJSONDecodeRequestPropagatesInvalidProto verifies that invalid
+// protobuf bytes wrapped in a valid gRPC envelope produce decode_failed, not
+// a framing error. The envelope passes; the inner codec rejects the payload.
+func TestGRPCJSONDecodeRequestPropagatesInvalidProto(t *testing.T) {
+	a := NewGRPCJSON(testResolver{testFiles(t)})
+	binding := tb{method: "POST", route: "/v3/echo", req: "acme.v1.Ping", resp: "acme.v1.Pong"}
+
+	garbage := testGRPCFrame([]byte("\xde\xad\xbe\xef not proto"))
+	_, werr := a.DecodeRequest(binding, garbage)
+	if werr == nil || werr.Code() != "decode_failed" {
+		t.Fatalf("DecodeRequest error = %v, want decode_failed", werr)
+	}
+}
+
+// TestGRPCJSONEncodeResponsePropagatesError verifies that invalid upstream JSON
+// in EncodeResponse surfaces as upstream_error through the gRPC wrapper.
+func TestGRPCJSONEncodeResponsePropagatesError(t *testing.T) {
+	a := NewGRPCJSON(testResolver{testFiles(t)})
+	binding := tb{method: "POST", route: "/v3/echo", req: "acme.v1.Ping", resp: "acme.v1.Pong"}
+
+	_, _, werr := a.EncodeResponse(binding, []byte("definitely not json"))
+	if werr == nil || werr.Code() != "upstream_error" {
+		t.Fatalf("EncodeResponse error = %v, want upstream_error", werr)
+	}
+}
+
+// TestGRPCJSONEncodeErrorUndeclaredStatus verifies that an undeclared error
+// status surfaces as upstream_error through the gRPC wrapper.
+func TestGRPCJSONEncodeErrorUndeclaredStatus(t *testing.T) {
+	a := NewGRPCJSON(testResolver{testFiles(t)})
+	binding := tb{method: "POST", route: "/v3/echo", req: "acme.v1.Ping", resp: "acme.v1.Pong"}
+
+	_, _, werr := a.EncodeError(binding, 500, []byte(`{}`))
+	if werr == nil || werr.Code() != "upstream_error" {
+		t.Fatalf("EncodeError error = %v, want upstream_error", werr)
+	}
+}
