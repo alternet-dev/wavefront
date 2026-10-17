@@ -80,10 +80,17 @@ func (p *ProtoJSON) DecodeRequest(b Binding, in []byte) (UpstreamCall, *wireerro
 	if err != nil {
 		return UpstreamCall{}, wireerror.DecodeFailed("could not re-encode request as JSON")
 	}
+	// Discriminated unions carry a flattened upstream wire shape, but protojson
+	// writes the wrapped proto3-oneof shape; collapse wrapped → flat for the
+	// upstream body (#132). No-op when the resolver has no discriminators.
+	flat, terr := transformWrappedToFlat(md, p.resolver, j)
+	if terr != nil {
+		return UpstreamCall{}, wireerror.DecodeFailed("could not flatten discriminated union: " + terr.Error())
+	}
 	return UpstreamCall{
 		Method:      b.Method(),
 		Path:        b.Route(),
-		Body:        j,
+		Body:        flat,
 		ContentType: "application/json",
 	}, nil
 }
@@ -118,8 +125,15 @@ func (p *ProtoJSON) encodeMessage(name string, upstreamJSON []byte) ([]byte, str
 	if md.Fields().Len() == 0 {
 		return nil, "application/protobuf", nil
 	}
+	// Upstream carries the flattened discriminator shape; protojson needs the
+	// wrapped proto3-oneof shape (#132). No-op when the resolver has no
+	// discriminators.
+	wrapped, terr := transformFlatToWrapped(md, p.resolver, upstreamJSON)
+	if terr != nil {
+		return nil, "", wireerror.UpstreamError("could not wrap discriminated union: " + terr.Error())
+	}
 	msg := dynamicpb.NewMessage(md)
-	if err := protojson.Unmarshal(upstreamJSON, msg); err != nil {
+	if err := protojson.Unmarshal(wrapped, msg); err != nil {
 		return nil, "", wireerror.UpstreamError("upstream body did not match " + name)
 	}
 	out, err := proto.Marshal(msg)

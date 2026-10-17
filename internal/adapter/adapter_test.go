@@ -1,6 +1,7 @@
 package adapter
 
 import (
+	"encoding/json"
 	"errors"
 	"testing"
 	"time"
@@ -261,5 +262,220 @@ func TestEncodeErrorUnboundStatusIsUpstreamError(t *testing.T) {
 	b := tb{method: "POST", route: "/v3/echo", resp: "acme.v1.Pong", errs: nil}
 	if _, _, werr := a.EncodeError(b, 409, []byte(`{}`)); werr == nil {
 		t.Fatal("EncodeError on an unbound status returned nil error; want upstream_error")
+	}
+}
+
+// discFiles builds a self-contained registry with a nested discriminator
+// wrapper: Env{Pet pet = 1} and Env.Pet{oneof variant {Cat cat; Dog dog}},
+// where Cat has fields petType + meow, Dog has petType + woof. This is the
+// shape bundlegen emits for a mapped discriminated union property (#132).
+func discFiles(t *testing.T) *protoregistry.Files {
+	t.Helper()
+	str := func(name string, n int32) *descriptorpb.FieldDescriptorProto {
+		return &descriptorpb.FieldDescriptorProto{
+			Name: proto.String(name), Number: proto.Int32(n),
+			Label:    descriptorpb.FieldDescriptorProto_LABEL_OPTIONAL.Enum(),
+			Type:     descriptorpb.FieldDescriptorProto_TYPE_STRING.Enum(),
+			JsonName: proto.String(name),
+		}
+	}
+	member := func(name string, n int32, typeName string) *descriptorpb.FieldDescriptorProto {
+		return &descriptorpb.FieldDescriptorProto{
+			Name: proto.String(name), Number: proto.Int32(n),
+			Label:      descriptorpb.FieldDescriptorProto_LABEL_OPTIONAL.Enum(),
+			Type:       descriptorpb.FieldDescriptorProto_TYPE_MESSAGE.Enum(),
+			TypeName:   proto.String(typeName),
+			JsonName:   proto.String(name),
+			OneofIndex: proto.Int32(0),
+		}
+	}
+	cat := &descriptorpb.DescriptorProto{Name: proto.String("Cat"), Field: []*descriptorpb.FieldDescriptorProto{str("petType", 1), str("meow", 2)}}
+	dog := &descriptorpb.DescriptorProto{Name: proto.String("Dog"), Field: []*descriptorpb.FieldDescriptorProto{str("petType", 1), str("woof", 2)}}
+	petVariant := &descriptorpb.DescriptorProto{
+		Name:      proto.String("PetVariant"),
+		OneofDecl: []*descriptorpb.OneofDescriptorProto{{Name: proto.String("variant")}},
+		Field: []*descriptorpb.FieldDescriptorProto{
+			member("cat", 1, ".acme.v1.Cat"),
+			member("dog", 2, ".acme.v1.Dog"),
+		},
+	}
+	env := &descriptorpb.DescriptorProto{
+		Name: proto.String("Env"),
+		Field: []*descriptorpb.FieldDescriptorProto{
+			{
+				Name:     proto.String("pet"),
+				Number:   proto.Int32(1),
+				Label:    descriptorpb.FieldDescriptorProto_LABEL_OPTIONAL.Enum(),
+				Type:     descriptorpb.FieldDescriptorProto_TYPE_MESSAGE.Enum(),
+				TypeName: proto.String(".acme.v1.Env.PetVariant"),
+				JsonName: proto.String("pet"),
+			},
+			{
+				Name:     proto.String("pets"),
+				Number:   proto.Int32(2),
+				Label:    descriptorpb.FieldDescriptorProto_LABEL_REPEATED.Enum(),
+				Type:     descriptorpb.FieldDescriptorProto_TYPE_MESSAGE.Enum(),
+				TypeName: proto.String(".acme.v1.Env.PetVariant"),
+				JsonName: proto.String("pets"),
+			},
+		},
+		NestedType: []*descriptorpb.DescriptorProto{petVariant},
+	}
+	acme := &descriptorpb.FileDescriptorProto{
+		Name:        proto.String("acme/v1/pet.proto"),
+		Package:     proto.String("acme.v1"),
+		Syntax:      proto.String("proto3"),
+		MessageType: []*descriptorpb.DescriptorProto{cat, dog, env},
+	}
+	fds := &descriptorpb.FileDescriptorSet{File: []*descriptorpb.FileDescriptorProto{acme}}
+	files, err := protodesc.NewFiles(fds)
+	if err != nil {
+		t.Fatalf("build files: %v", err)
+	}
+	return files
+}
+
+type discResolver struct {
+	files  *protoregistry.Files
+	oneofs map[string]struct {
+		prop    string
+		mapping map[string]string
+	}
+}
+
+func (r discResolver) Message(name string) (protoreflect.MessageDescriptor, error) {
+	d, err := r.files.FindDescriptorByName(protoreflect.FullName(name))
+	if err != nil {
+		return nil, err
+	}
+	return d.(protoreflect.MessageDescriptor), nil
+}
+
+func (r discResolver) Discriminator(name string) (string, map[string]string, bool) {
+	e, ok := r.oneofs[name]
+	if !ok {
+		return "", nil, false
+	}
+	return e.prop, e.mapping, true
+}
+
+func newDiscResolver(t *testing.T) discResolver {
+	return discResolver{
+		files: discFiles(t),
+		oneofs: map[string]struct {
+			prop    string
+			mapping map[string]string
+		}{
+			"acme.v1.Env.PetVariant": {prop: "petType", mapping: map[string]string{"cat": "cat", "dog": "dog"}},
+		},
+	}
+}
+
+// TestEncodeResponseFlattensFlatUpstreamToTypedOneof: the adapter wraps the
+// flattened upstream body under the matched oneof member key so protojson
+// resolves it against the wrapper message's typed oneof (#132). The decoded
+// proto exposes the typed variant via WhichOneof.
+func TestEncodeResponseFlattensFlatUpstreamToTypedOneof(t *testing.T) {
+	r := newDiscResolver(t)
+	a := NewProtoJSON(r)
+
+	const upstream = `{"pet":{"petType":"cat","meow":"purr"},"pets":[{"petType":"dog","woof":"bark"}]}`
+	out, _, werr := a.EncodeResponse(tb{method: "POST", route: "/x", req: "acme.v1.Env", resp: "acme.v1.Env"}, []byte(upstream))
+	if werr != nil {
+		t.Fatalf("EncodeResponse: %v", werr)
+	}
+	env := msgOf(t, r.files, "acme.v1.Env")
+	msg := dynamicpb.NewMessage(env)
+	if err := proto.Unmarshal(out, msg); err != nil {
+		t.Fatalf("output is not valid protobuf for Env: %v", err)
+	}
+	pet := msg.Get(env.Fields().ByName("pet")).Message()
+	variant := pet.Descriptor().Oneofs().ByName("variant")
+	active := pet.WhichOneof(variant)
+	if active == nil || string(active.Name()) != "cat" {
+		t.Fatalf("pet oneof active = %v, want cat", active)
+	}
+	cat := pet.Get(active).Message()
+	if got := cat.Get(cat.Descriptor().Fields().ByName("meow")).String(); got != "purr" {
+		t.Errorf("cat.meow = %q, want purr", got)
+	}
+	// The repeated field also went through the walker.
+	pets := msg.Get(env.Fields().ByName("pets")).List()
+	if pets.Len() != 1 {
+		t.Fatalf("pets.len = %d, want 1", pets.Len())
+	}
+	elem := pets.Get(0).Message()
+	activeElem := elem.WhichOneof(elem.Descriptor().Oneofs().ByName("variant"))
+	if activeElem == nil || string(activeElem.Name()) != "dog" {
+		t.Fatalf("pets[0] active = %v, want dog", activeElem)
+	}
+}
+
+// TestDecodeRequestFlattensWrappedProtoToUpstream: a proto with the typed
+// oneof set must emit the flattened OpenAPI shape (discriminator property +
+// member fields at the top level) rather than the protojson "wrapped" shape.
+func TestDecodeRequestFlattensWrappedProtoToUpstream(t *testing.T) {
+	r := newDiscResolver(t)
+	a := NewProtoJSON(r)
+
+	// Build an Env with pet.cat set and pet.cat.{petType=cat, meow=purr}.
+	envMD := msgOf(t, r.files, "acme.v1.Env")
+	env := dynamicpb.NewMessage(envMD)
+	petField := envMD.Fields().ByName("pet")
+	petMsg := dynamicpb.NewMessage(petField.Message())
+	catField := petField.Message().Fields().ByName("cat")
+	catMsg := dynamicpb.NewMessage(catField.Message())
+	catMsg.Set(catField.Message().Fields().ByName("petType"), protoreflect.ValueOfString("cat"))
+	catMsg.Set(catField.Message().Fields().ByName("meow"), protoreflect.ValueOfString("purr"))
+	petMsg.Set(catField, protoreflect.ValueOfMessage(catMsg))
+	env.Set(petField, protoreflect.ValueOfMessage(petMsg))
+
+	raw, err := proto.Marshal(env)
+	if err != nil {
+		t.Fatalf("marshal env: %v", err)
+	}
+	call, werr := a.DecodeRequest(tb{method: "POST", route: "/x", req: "acme.v1.Env", resp: "acme.v1.Env"}, raw)
+	if werr != nil {
+		t.Fatalf("DecodeRequest: %v", werr)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(call.Body, &decoded); err != nil {
+		t.Fatalf("adapter body is not JSON: %v (body=%s)", err, call.Body)
+	}
+	pet, ok := decoded["pet"].(map[string]any)
+	if !ok {
+		t.Fatalf("decoded.pet is not an object: %v", decoded["pet"])
+	}
+	if _, wrapped := pet["cat"]; wrapped {
+		t.Fatalf("decoded.pet still carries the wrapped shape %v", pet)
+	}
+	if pet["petType"] != "cat" || pet["meow"] != "purr" {
+		t.Errorf("decoded.pet = %v, want {petType:cat, meow:purr}", pet)
+	}
+}
+
+// TestEncodeResponseMissingDiscriminatorIsUpstreamError: an upstream body that
+// omits the discriminator property for a wrapper position is a contract
+// violation. The adapter reports upstream_error rather than fabricating a
+// variant.
+func TestEncodeResponseMissingDiscriminatorIsUpstreamError(t *testing.T) {
+	r := newDiscResolver(t)
+	a := NewProtoJSON(r)
+	// pet is a wrapper position; no discriminator property.
+	_, _, werr := a.EncodeResponse(tb{method: "POST", route: "/x", req: "acme.v1.Env", resp: "acme.v1.Env"}, []byte(`{"pet":{"meow":"purr"}}`))
+	if werr == nil || werr.Code() != "upstream_error" {
+		t.Fatalf("want upstream_error, got %v", werr)
+	}
+}
+
+// TestEncodeResponseUnknownDiscriminatorValueIsUpstreamError: a discriminator
+// value that is not in the mapping is a contract violation. The adapter
+// reports upstream_error.
+func TestEncodeResponseUnknownDiscriminatorValueIsUpstreamError(t *testing.T) {
+	r := newDiscResolver(t)
+	a := NewProtoJSON(r)
+	_, _, werr := a.EncodeResponse(tb{method: "POST", route: "/x", req: "acme.v1.Env", resp: "acme.v1.Env"}, []byte(`{"pet":{"petType":"bird","chirp":"tweet"}}`))
+	if werr == nil || werr.Code() != "upstream_error" {
+		t.Fatalf("want upstream_error, got %v", werr)
 	}
 }
