@@ -62,11 +62,18 @@ const bodyDirectWKTOpenAPI = `{
       "responses": {"200": {"content": {"application/json": {"schema": {"$ref": "#/components/schemas/Open"}}}}}}},
     "/v3/value": {"post": {"operationId": "value",
       "requestBody": {"content": {"application/json": {"schema": {"$ref": "#/components/schemas/Anything"}}}},
-      "responses": {"200": {"content": {"application/json": {"schema": {"$ref": "#/components/schemas/Anything"}}}}}}}
+      "responses": {"200": {"content": {"application/json": {"schema": {"$ref": "#/components/schemas/Anything"}}}}}}},
+    "/v3/union": {"post": {"operationId": "union",
+      "requestBody": {"content": {"application/json": {"schema": {"$ref": "#/components/schemas/Choice"}}}},
+      "responses": {"200": {"content": {"application/json": {"schema": {"$ref": "#/components/schemas/Choice"}}}}}}}
   },
   "components": {"schemas": {
     "Open": {"type": "object", "additionalProperties": true},
-    "Anything": {}
+    "Anything": {},
+    "Choice": {"oneOf": [
+      {"type": "string"},
+      {"type": "object", "properties": {"kind": {"type": "string"}, "priority": {"type": "integer"}}}
+    ]}
   }}
 }`
 
@@ -101,6 +108,12 @@ func TestPipelineRoundTripsBodyDirectWellKnownTypes(t *testing.T) {
 			path:     "/v3/value",
 			message:  "google.protobuf.Value",
 			bodyJSON: `["opaque",7,false,null,{"nested":true}]`,
+		},
+		{
+			name:     "Value untagged union",
+			path:     "/v3/union",
+			message:  "google.protobuf.Value",
+			bodyJSON: `{"kind":"custom","priority":3}`,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
