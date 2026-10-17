@@ -1646,9 +1646,58 @@ func TestAddBindsWKTComponentsAsBodies(t *testing.T) {
 	}
 }
 
+// TestAddBindsWKTComponentsAsErrorBodies covers #121's error-body surface: an
+// open object or untagged union referenced as a 4xx/5xx response binds to
+// google.protobuf.Struct or google.protobuf.Value respectively, and
+// google/protobuf/struct.proto is embedded even when the request and response
+// messages are ordinary generated messages with no WKT fields.
+func TestAddBindsWKTComponentsAsErrorBodies(t *testing.T) {
+	const openAPI = `{
+  "openapi": "3.1.0",
+  "info": {"title": "t", "version": "0"},
+  "paths": {"/x": {"post": {"operationId": "x",
+    "requestBody": {"content": {"application/json": {"schema": {"$ref": "#/components/schemas/Req"}}}},
+    "responses": {
+      "200": {"content": {"application/json": {"schema": {"$ref": "#/components/schemas/Resp"}}}},
+      "422": {"content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrStruct"}}}},
+      "500": {"content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrValue"}}}}
+    }}}},
+  "components": {"schemas": {
+    "Req":       {"type": "object", "properties": {"id": {"type": "string"}}},
+    "Resp":      {"type": "object", "properties": {"id": {"type": "string"}}},
+    "ErrStruct": {"type": "object", "additionalProperties": true},
+    "ErrValue":  {"oneOf": [{"type": "string"}, {"type": "integer"}]}
+  }}
+}`
+	in := writeOpenAPI(t, openAPI)
+	out := t.TempDir()
+	if err := bundlegen.Add(in, out, false); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	b, err := bundle.Load(out)
+	if err != nil {
+		t.Fatalf("generated bundle did not load: %v", err)
+	}
+	c, ok := b.Lookup("/x", "POST", "0")
+	if !ok {
+		t.Fatal("contract for /x not found")
+	}
+	if got, ok := c.ErrorMessage(422); !ok || got != "google.protobuf.Struct" {
+		t.Errorf("error_messages[422] = %q (ok=%v), want google.protobuf.Struct", got, ok)
+	}
+	if got, ok := c.ErrorMessage(500); !ok || got != "google.protobuf.Value" {
+		t.Errorf("error_messages[500] = %q (ok=%v), want google.protobuf.Value", got, ok)
+	}
+	for _, wkt := range []string{"google.protobuf.Struct", "google.protobuf.Value"} {
+		if _, err := b.Message(wkt); err != nil {
+			t.Errorf("resolve %s: %v", wkt, err)
+		}
+	}
+}
+
 // TestAddRejectsNonMessageComponentAsBody keeps the body boundary narrow:
-// scalar, typed-map, and tagged-union components do not gain a direct binding
-// merely because the Struct/Value cases above do.
+// scalar, typed-map, tagged-union, and nullable-anyOf components do not gain a
+// direct binding merely because the Struct/Value cases above do.
 func TestAddRejectsNonMessageComponentAsBody(t *testing.T) {
 	const template = `{
   "openapi": "3.1.0",
@@ -1658,9 +1707,10 @@ func TestAddRejectsNonMessageComponentAsBody(t *testing.T) {
   "components": {"schemas": {"Body": SCHEMA}}
 }`
 	cases := map[string]string{
-		"scalar":       `{"type":"string"}`,
-		"typed map":    `{"type":"object","additionalProperties":{"type":"string"}}`,
-		"tagged union": `{"oneOf":[{"type":"string"},{"type":"integer"}],"discriminator":{"propertyName":"kind"}}`,
+		"scalar":         `{"type":"string"}`,
+		"typed map":      `{"type":"object","additionalProperties":{"type":"string"}}`,
+		"tagged union":   `{"oneOf":[{"type":"string"},{"type":"integer"}],"discriminator":{"propertyName":"kind"}}`,
+		"nullable anyOf": `{"anyOf":[{"type":"string"},{"type":"null"}]}`,
 	}
 	for name, schema := range cases {
 		t.Run(name, func(t *testing.T) {
