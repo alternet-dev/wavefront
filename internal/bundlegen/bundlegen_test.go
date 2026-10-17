@@ -816,7 +816,7 @@ func (d discBinding) Method() string                         { return d.method }
 func (d discBinding) Route() string                          { return d.route }
 func (d discBinding) RequestMessage() string                 { return d.req }
 func (d discBinding) ResponseMessage() string                { return d.resp }
-func (d discBinding) ErrorMessage(status int) (string, bool) { return "", false }
+func (d discBinding) ErrorMessage(_ int) (string, bool) { return "", false }
 
 // nestedDiscriminatorOpenAPI exercises nested mapped discriminated unions: Zoo
 // has a `pet` discriminator (cat|dog); the dog variant itself has a `toy`
