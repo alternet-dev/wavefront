@@ -65,7 +65,10 @@ const bodyDirectWKTOpenAPI = `{
       "responses": {"200": {"content": {"application/json": {"schema": {"$ref": "#/components/schemas/Anything"}}}}}}},
     "/v3/union": {"post": {"operationId": "union",
       "requestBody": {"content": {"application/json": {"schema": {"$ref": "#/components/schemas/Choice"}}}},
-      "responses": {"200": {"content": {"application/json": {"schema": {"$ref": "#/components/schemas/Choice"}}}}}}}
+      "responses": {"200": {"content": {"application/json": {"schema": {"$ref": "#/components/schemas/Choice"}}}}}}},
+    "/v3/anyof": {"post": {"operationId": "anyof",
+      "requestBody": {"content": {"application/json": {"schema": {"$ref": "#/components/schemas/AnyChoice"}}}},
+      "responses": {"200": {"content": {"application/json": {"schema": {"$ref": "#/components/schemas/AnyChoice"}}}}}}}
   },
   "components": {"schemas": {
     "Open": {"type": "object", "additionalProperties": true},
@@ -73,7 +76,8 @@ const bodyDirectWKTOpenAPI = `{
     "Choice": {"oneOf": [
       {"type": "string"},
       {"type": "object", "properties": {"kind": {"type": "string"}, "priority": {"type": "integer"}}}
-    ]}
+    ]},
+    "AnyChoice": {"anyOf": [{"type": "string"}, {"type": "integer"}]}
   }}
 }`
 
@@ -114,6 +118,12 @@ func TestPipelineRoundTripsBodyDirectWellKnownTypes(t *testing.T) {
 			path:     "/v3/union",
 			message:  "google.protobuf.Value",
 			bodyJSON: `{"kind":"custom","priority":3}`,
+		},
+		{
+			name:     "Value untagged anyOf",
+			path:     "/v3/anyof",
+			message:  "google.protobuf.Value",
+			bodyJSON: `42`,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
