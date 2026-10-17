@@ -129,6 +129,56 @@ func TestRunNoSubcommand(t *testing.T) {
 	}
 }
 
+func TestRunGenTypesRequiresFlags(t *testing.T) {
+	for _, args := range [][]string{
+		nil,
+		{"--bundle", "bundle", "--out", "out"},
+		{"--bundle", "bundle", "--plugin", "go"},
+		{"--out", "out", "--plugin", "go"},
+	} {
+		var errOut bytes.Buffer
+		if code := runGenTypes(args, &errOut, io.Discard); code != 2 {
+			t.Errorf("runGenTypes(%v) exit = %d, want 2", args, code)
+		}
+		if !strings.Contains(errOut.String(), "usage: wavefront-bundle gen-types") {
+			t.Errorf("runGenTypes(%v) stderr missing usage:\n%s", args, errOut.String())
+		}
+	}
+}
+
+func TestRunGenTypesHelp(t *testing.T) {
+	if code := runGenTypes([]string{"--help"}, io.Discard, io.Discard); code != 0 {
+		t.Fatalf("gen-types --help exit = %d, want 0", code)
+	}
+}
+
+func TestRunDispatchesGenTypes(t *testing.T) {
+	missingBundle := filepath.Join(t.TempDir(), "missing")
+	code := run([]string{
+		"gen-types",
+		"--bundle", missingBundle,
+		"--out", filepath.Join(t.TempDir(), "generated"),
+		"--plugin", "go",
+	}, io.Discard)
+	if code != 1 {
+		t.Fatalf("run gen-types with missing bundle exit = %d, want 1", code)
+	}
+}
+
+func TestRepeatedFlagPreservesGeneratorOptions(t *testing.T) {
+	var options repeatedFlag
+	if err := options.Set("paths=source_relative"); err != nil {
+		t.Fatalf("Set first option: %v", err)
+	}
+	if err := options.Set("M{source}=example.com/client/gen"); err != nil {
+		t.Fatalf("Set second option: %v", err)
+	}
+	want := "paths=source_relative,M{source}=example.com/client/gen"
+	if got := options.String(); got != want {
+		t.Fatalf("String() = %q, want %q", got, want)
+	}
+}
+
 func TestRunRemoveDeletesTheOldestLayer(t *testing.T) {
 	in := writeSampleOpenAPI(t)
 	bundleDir := t.TempDir()

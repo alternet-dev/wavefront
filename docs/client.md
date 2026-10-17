@@ -6,8 +6,10 @@ proxy loads) is the contract; the consumer derives its message types from it
 and writes a thin HTTP layer in whatever language it ships in.
 
 Every language uses its own `protoc-gen-X` plugin against the same
-`descriptors.binpb`. The HTTP layer itself is not generated — a few dozen
-lines per language, shown below.
+`descriptors.binpb`. `wavefront-bundle gen-types` is the language-neutral
+driver: it selects a bundle layer, supplies that layer's source filenames to
+`protoc`, and leaves generated-code semantics to the selected plugin. The HTTP
+layer itself is not generated — a few dozen lines per language, shown below.
 
 ## The bundle is the contract
 
@@ -96,7 +98,25 @@ read `code` for the specific failure type. Full table in
 
 The descriptor set is plugin-agnostic. Every protoc-based code generator
 understands a `FileDescriptorSet`, so the same `descriptors.binpb` feeds every
-language.
+language. Install `protoc` plus the generator for your language, then run:
+
+```bash
+wavefront-bundle gen-types \
+  --bundle ./bundle/core-api \
+  --out ./path/to/generated \
+  --plugin <protoc-generator-suffix> \
+  --opt <generator-option>
+```
+
+The command selects the lexically latest contract version by default. Pass
+`--version 2024-11` to pin another layer. `--out` may be missing or an empty
+directory; refusing a non-empty directory prevents stale generated files from
+surviving a regeneration.
+
+`--plugin` is the suffix from protoc's output flag: `es` means `--es_out`,
+`go` means `--go_out`, and so on. Repeat `--opt` to pass multiple
+`--<plugin>_opt` values. For an external plugin outside `PATH`, pass its
+executable with `--plugin-path`.
 
 ### TypeScript
 
@@ -109,10 +129,13 @@ npm install --save-dev @bufbuild/protoc-gen-es
 Generate message types from the bundle's descriptors:
 
 ```bash
-npx protoc-gen-es \
-  --es_out=./src/gen \
-  --es_opt=target=ts,import_extension=none \
-  --descriptor_set_in=./bundle/core-api/2024-11/descriptors.binpb
+wavefront-bundle gen-types \
+  --bundle ./bundle/core-api \
+  --version 2024-11 \
+  --out ./src/gen \
+  --plugin es \
+  --plugin-path ./node_modules/.bin/protoc-gen-es \
+  --opt target=ts,import_extension=none
 ```
 
 Output: `<package-path>/<file>_pb.ts` under `--es_out`, mirroring the proto
@@ -122,26 +145,37 @@ file layout. Each `_pb.ts` exports both the TypeScript message types and the
 
 ### Go
 
-The bundle's descriptor set is a standard protoc input:
+Install the standard Go plugin:
 
 ```bash
-protoc \
-  --descriptor_set_in=./bundle/core-api/2024-11/descriptors.binpb \
-  --go_out=. --go_opt=paths=source_relative \
-  acme/v1/items.proto
+go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
 ```
 
-`buf generate` with the bundle's descriptors as input works the same way; the
-output is the same `*.pb.go` Go developers expect. Runtime dependency:
+Then generate the types. The bundle stays language-neutral and does not embed a
+`go_package` option, so map each descriptor source into the consumer's module.
+`{source}` expands once for every source file in the selected layer:
+
+```bash
+wavefront-bundle gen-types \
+  --bundle ./bundle/core-api \
+  --version 2024-11 \
+  --out ./gen \
+  --plugin go \
+  --opt paths=source_relative \
+  --opt 'M{source}=example.com/myapp/gen'
+```
+
+The output is the same `*.pb.go` Go developers expect. Runtime dependency:
 `google.golang.org/protobuf`.
 
 ### Python
 
 ```bash
-protoc \
-  --descriptor_set_in=./bundle/core-api/2024-11/descriptors.binpb \
-  --python_out=. \
-  acme/v1/items.proto
+wavefront-bundle gen-types \
+  --bundle ./bundle/core-api \
+  --version 2024-11 \
+  --out ./gen \
+  --plugin python
 ```
 
 Pair the generated `*_pb2.py` with the `protobuf` runtime
@@ -159,10 +193,11 @@ cargo install protoc-gen-prost
 Generate message types from the bundle's descriptors:
 
 ```bash
-protoc \
-  --prost_out=./src/generated \
-  --descriptor_set_in=./bundle/core-api/2024-11/descriptors.binpb \
-  acme/v1/items.proto
+wavefront-bundle gen-types \
+  --bundle ./bundle/core-api \
+  --version 2024-11 \
+  --out ./src/generated \
+  --plugin prost
 ```
 
 Or drive `prost-build` from a `build.rs` to integrate with cargo. Runtime
@@ -171,10 +206,11 @@ the HTTP client.
 
 ### Other languages
 
-Any language with a protoc plugin works the same way: feed the layer's
-`descriptors.binpb` via `--descriptor_set_in` and name the `.proto` files
-the bundle includes. Java (`--java_out`), C# (`--csharp_out`), Kotlin, Dart
-— all consume the same input.
+Any language with a protoc generator works the same way: use its output-flag
+suffix as `--plugin`. Java (`--plugin java`), C# (`--plugin csharp`), Kotlin,
+and Dart all consume the same descriptor input. Built-in protoc generators do
+not need `--plugin-path`; external `protoc-gen-X` executables must be on `PATH`
+or named explicitly.
 
 ## The HTTP layer
 
