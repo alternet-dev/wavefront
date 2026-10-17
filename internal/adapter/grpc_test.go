@@ -203,3 +203,18 @@ func TestGRPCJSONEncodeErrorUndeclaredStatus(t *testing.T) {
 		t.Fatalf("EncodeError error = %v, want upstream_error", werr)
 	}
 }
+
+// TestGRPCJSONEncodeErrorPropagatesInvalidJSON verifies that a malformed
+// declared error body is rejected by the wrapped protobuf-to-JSON adapter.
+func TestGRPCJSONEncodeErrorPropagatesInvalidJSON(t *testing.T) {
+	a := NewGRPCJSON(testResolver{testFiles(t)})
+	binding := tb{
+		method: "POST", route: "/v3/echo", req: "acme.v1.Ping", resp: "acme.v1.Pong",
+		errs: map[int]string{409: "acme.v1.Ping"},
+	}
+
+	_, _, werr := a.EncodeError(binding, 409, []byte("definitely not json"))
+	if werr == nil || werr.Code() != "upstream_error" {
+		t.Fatalf("EncodeError error = %v, want upstream_error", werr)
+	}
+}
