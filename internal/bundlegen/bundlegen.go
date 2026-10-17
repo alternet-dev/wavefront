@@ -671,12 +671,14 @@ func refName(ref string) string {
 // collectSchemas walks from the roots, validating each touched schema, and
 // returns every component object schema that must become a message.
 // isMessageComponent reports whether a component schema becomes a proto message:
-// an object with a properties key (the explicitly-empty {} object included — it
-// is a zero-field message). Every other shape — scalar (incl. enum), typed dict,
-// union, open object — is a non-object component that lowers inline at each $ref
-// site rather than being built as a message (#133).
+// an object with a properties key (the explicitly-empty closed object included —
+// it is a zero-field message). An explicitly-empty object that enables open
+// additional properties instead lowers to Struct. Every other shape — scalar
+// (incl. enum), typed dict, union, open object — is a non-object component that
+// lowers inline at each $ref site rather than being built as a message (#133).
 func isMessageComponent(sc *schema) bool {
-	return sc.Type == "object" && sc.Properties != nil
+	return sc.Type == "object" && sc.Properties != nil &&
+		!(len(sc.Properties) == 0 && sc.AdditionalProperties != nil && additionalPropertiesOpen(sc.AdditionalProperties))
 }
 
 func collectSchemas(doc openAPI, roots []string) (map[string]*schema, error) {
