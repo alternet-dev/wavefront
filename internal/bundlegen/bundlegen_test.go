@@ -812,10 +812,10 @@ type discBinding struct {
 	method, route, req, resp string
 }
 
-func (d discBinding) Method() string                         { return d.method }
-func (d discBinding) Route() string                          { return d.route }
-func (d discBinding) RequestMessage() string                 { return d.req }
-func (d discBinding) ResponseMessage() string                { return d.resp }
+func (d discBinding) Method() string                    { return d.method }
+func (d discBinding) Route() string                     { return d.route }
+func (d discBinding) RequestMessage() string            { return d.req }
+func (d discBinding) ResponseMessage() string           { return d.resp }
 func (d discBinding) ErrorMessage(_ int) (string, bool) { return "", false }
 
 // nestedDiscriminatorOpenAPI exercises nested mapped discriminated unions: Zoo
