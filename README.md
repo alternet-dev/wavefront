@@ -56,7 +56,8 @@ It IS NOT:
 - An auth server. Bring your own token issuer/validator (the backend's).
 - A policy/authz engine. No PII redaction, no business logic.
 - A message broker or database. No persistence, no replay.
-- A reverse proxy / TLS terminator / router. The ingress owns that.
+- A host router or certificate manager. It can terminate TLS when explicitly
+  configured, but certificate issuance and renewal stay with the operator.
 - A WebSocket/streaming tier. wavefront is request/response only.
 
 ## Install
@@ -139,6 +140,9 @@ All configuration is environment variables, read once at startup.
 | `WAVEFRONT_TARGETS` | (none) | named backend targets, comma-separated `name=url` pairs |
 | `WAVEFRONT_LISTEN_ADDR` | `0.0.0.0:8080` | bind address for HTTP |
 | `WAVEFRONT_METRICS_ADDR` | `0.0.0.0:9090` | bind address for `/metrics` |
+| `WAVEFRONT_PROTOCOL_INBOUND` | `http1` | inbound mode: `http1`, `h2c`, `https`, or `https+h3` |
+| `WAVEFRONT_TLS_CERT_FILE` | — | PEM certificate chain; required by `https` and `https+h3` |
+| `WAVEFRONT_TLS_KEY_FILE` | — | PEM private key; required by `https` and `https+h3` |
 | `WAVEFRONT_CONTRACT_VERSION_HEADER` | `X-Api-Contract-Version` | header carrying the client's contract version |
 | `WAVEFRONT_REQUEST_TIMEOUT_MS` | `15000` | upstream request timeout |
 | `WAVEFRONT_READ_HEADER_TIMEOUT_MS` | `10000` | data-plane `ReadHeaderTimeout` (slow-headers cap) |
@@ -157,6 +161,10 @@ Operational notes:
 - **Codec.** `protobuf ↔ JSON` is the only adapter today; the adapter boundary
   is built so another codec could be added. All non-hop-by-hop client headers
   are forwarded untouched.
+- **Inbound transport.** The default remains plaintext HTTP/1.1. `h2c` adds
+  prior-knowledge cleartext HTTP/2 on the same TCP listener; `https` serves
+  HTTP/1.1 and HTTP/2 with ALPN; `https+h3` also serves HTTP/3 on UDP at the
+  data-plane address and advertises it from HTTPS responses.
 
 The bundle schema and transform vocabulary are detailed in
 [docs/protocol.md](docs/protocol.md); integrating a consumer is covered in

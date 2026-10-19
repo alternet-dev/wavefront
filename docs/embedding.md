@@ -49,7 +49,14 @@ Pin `wavefront` by image tag/digest:
 The ingress (Caddy / k8s Gateway API / ALB) routes the external API vhost to
 `wavefront`. The internal backend loses its external vhost and becomes
 internal-only, so `wavefront` cannot be bypassed and is the single contract
-authority by construction. `wavefront` performs no routing or TLS itself.
+authority by construction. This remains the default deployment: the ingress
+owns certificates and talks plaintext HTTP/1.1 or h2c to `wavefront`.
+
+For a direct-edge deployment, `wavefront` can instead terminate operator-
+provided TLS and serve HTTP/1.1 plus HTTP/2, with optional HTTP/3. It does not
+issue, renew, or discover certificates; mount the certificate and key into the
+container and select the corresponding inbound mode. See
+[operations.md](operations.md#inbound-protocols).
 
 ## Deployment patterns
 
