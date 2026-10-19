@@ -9,7 +9,7 @@
 //	wavefront-bundle remove --version <id> --bundle <dir>
 //	wavefront-bundle retire --version <id> --bundle <dir>
 //	wavefront-bundle verify --bundle <dir>
-//	wavefront-bundle draft-shim --bundle <dir> --from <id> --to <id> [--out <file>] [--strict]
+//	wavefront-bundle draft-shim --bundle <dir> --from <id> --to <id> [--out <file>] [--strict] [--rename-confidence <0..1>] [--rename-intent <file>]
 package main
 
 import (
@@ -146,7 +146,9 @@ func runDraftShim(args []string, errOut, stdout io.Writer) int {
 	fromVersion := fs.String("from", "", "the old contract version (layer subdir) to bridge from")
 	toVersion := fs.String("to", "", "the new contract version (layer subdir) to bridge to")
 	outFile := fs.String("out", "", "write the drafted override to this file; default stdout")
-	strict := fs.Bool("strict", false, "suppress confident case-rename matches; surface every removed/added pair as a candidate")
+	strict := fs.Bool("strict", false, "suppress heuristic renames; surface every non-intent removed/added pair as a candidate")
+	renameConfidence := fs.Float64("rename-confidence", 1, "minimum normalized name similarity for heuristic same-type renames (0 to 1; 1 preserves exact normalized-name matching)")
+	renameIntent := fs.String("rename-intent", "", "YAML file of explicit old-to-new same-type field rename mappings for this comparison")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
@@ -154,7 +156,7 @@ func runDraftShim(args []string, errOut, stdout io.Writer) int {
 		return 2
 	}
 	if *bundleDir == "" || *fromVersion == "" || *toVersion == "" {
-		fmt.Fprintln(errOut, "usage: wavefront-bundle draft-shim --bundle <dir> --from <version> --to <version> [--out <file>] [--strict]")
+		fmt.Fprintln(errOut, "usage: wavefront-bundle draft-shim --bundle <dir> --from <version> --to <version> [--out <file>] [--strict] [--rename-confidence <0..1>] [--rename-intent <file>]")
 		return 2
 	}
 	fromBytes, err := os.ReadFile(filepath.Join(*bundleDir, *fromVersion, "openapi.json"))
@@ -167,12 +169,24 @@ func runDraftShim(args []string, errOut, stdout io.Writer) int {
 		fmt.Fprintln(errOut, "wavefront-bundle draft-shim:", err)
 		return 1
 	}
-	var proposal *bundlegen.ShimProposal
-	if *strict {
-		proposal, err = bundlegen.DraftShimStrict(fromBytes, toBytes)
-	} else {
-		proposal, err = bundlegen.DraftShim(fromBytes, toBytes)
+	var intents []bundlegen.RenameIntent
+	if *renameIntent != "" {
+		intentBytes, readErr := os.ReadFile(*renameIntent)
+		if readErr != nil {
+			fmt.Fprintln(errOut, "wavefront-bundle draft-shim:", readErr)
+			return 1
+		}
+		intents, err = bundlegen.LoadRenameIntents(intentBytes)
+		if err != nil {
+			fmt.Fprintln(errOut, "wavefront-bundle draft-shim:", err)
+			return 1
+		}
 	}
+	proposal, err := bundlegen.DraftShimWithOptions(fromBytes, toBytes, bundlegen.DraftOptions{
+		RenameConfidence: *renameConfidence,
+		Strict:           *strict,
+		RenameIntents:    intents,
+	})
 	if err != nil {
 		fmt.Fprintln(errOut, "wavefront-bundle draft-shim:", err)
 		return 1

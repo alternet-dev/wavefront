@@ -353,6 +353,37 @@ func TestRunDraftShimStrictSurfacesCandidate(t *testing.T) {
 	}
 }
 
+func TestRunDraftShimRenameIntentWinsOverStrict(t *testing.T) {
+	bundleDir, fromVer, toVer := writeDriftPair(t)
+	intentPath := filepath.Join(t.TempDir(), "renames.yaml")
+	intent := []byte("version: 1\nrenames:\n  - from: userName\n    to: user_name\n")
+	if err := os.WriteFile(intentPath, intent, 0o600); err != nil {
+		t.Fatalf("write rename intent: %v", err)
+	}
+	var out bytes.Buffer
+	code := runDraftShim(
+		[]string{"--bundle", bundleDir, "--from", fromVer, "--to", toVer, "--strict", "--rename-intent", intentPath},
+		io.Discard, &out)
+	if code != 0 {
+		t.Fatalf("draft-shim --strict --rename-intent: exit %d", code)
+	}
+	if !strings.Contains(out.String(), `      - rename: { from: "userName", to: "user_name" }`) {
+		t.Errorf("rendered YAML missing intent-selected rename:\n%s", out.String())
+	}
+	if strings.Contains(out.String(), "# AMBIGUOUS pair") {
+		t.Errorf("intent-selected rename must not leave a candidates block:\n%s", out.String())
+	}
+}
+
+func TestRunDraftShimRejectsOutOfRangeRenameConfidence(t *testing.T) {
+	bundleDir, fromVer, toVer := writeDriftPair(t)
+	if code := runDraftShim(
+		[]string{"--bundle", bundleDir, "--from", fromVer, "--to", toVer, "--rename-confidence", "1.1"},
+		io.Discard, io.Discard); code != 1 {
+		t.Fatalf("draft-shim out-of-range confidence: exit %d, want 1", code)
+	}
+}
+
 func TestRunDraftShimMissingFlags(t *testing.T) {
 	if code := runDraftShim([]string{"--bundle", t.TempDir()}, io.Discard, io.Discard); code != 2 {
 		t.Fatalf("missing --from/--to: exit %d, want 2", code)

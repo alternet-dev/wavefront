@@ -251,6 +251,113 @@ func TestDraftShimStrictForcesCandidatesForCaseRenames(t *testing.T) {
 	}
 }
 
+func TestDraftShimRenameConfidenceCanAcceptSimilarNames(t *testing.T) {
+	// The names are similar but not equal after normalization. The default
+	// preserves the existing exact-match behavior; a lower threshold accepts
+	// the same-type pair and records the score that caused it.
+	from := openAPIDoc(t, "2024-01", `"deliveryState":{"type":"string"}`, `"ok":{"type":"boolean"}`)
+	to := openAPIDoc(t, "2024-06", `"deliveryStatus":{"type":"string"}`, `"ok":{"type":"boolean"}`)
+
+	defaultProposal, err := DraftShim(from, to)
+	if err != nil {
+		t.Fatalf("DraftShim: %v", err)
+	}
+	if len(defaultProposal.RequestCandidates) != 1 {
+		t.Fatalf("default request candidates = %+v, want one", defaultProposal.RequestCandidates)
+	}
+
+	p, err := DraftShimWithOptions(from, to, DraftOptions{RenameConfidence: 0.8})
+	if err != nil {
+		t.Fatalf("DraftShimWithOptions: %v", err)
+	}
+	if len(p.Request) != 1 || p.Request[0].Verb != transform.KindRename {
+		t.Fatalf("request proposals = %+v, want one rename", p.Request)
+	}
+	if got := p.Request[0].Signals; len(got) != 2 || got[0].Kind != SignalKindSimilarity || got[1] != SameTypeSignal("string") {
+		t.Errorf("rename signals = %+v, want similarity then same type", got)
+	}
+	if len(p.RequestCandidates) != 0 {
+		t.Errorf("request candidates = %+v, want none", p.RequestCandidates)
+	}
+}
+
+func TestDraftShimRenameIntentWinsOverStrict(t *testing.T) {
+	from := openAPIDoc(t, "2024-01", `"text":{"type":"string"}`, `"ok":{"type":"boolean"}`)
+	to := openAPIDoc(t, "2024-06", `"message":{"type":"string"}`, `"ok":{"type":"boolean"}`)
+
+	p, err := DraftShimWithOptions(from, to, DraftOptions{
+		RenameConfidence: 1,
+		Strict:           true,
+		RenameIntents:    []RenameIntent{{From: "text", To: "message"}},
+	})
+	if err != nil {
+		t.Fatalf("DraftShimWithOptions: %v", err)
+	}
+	want := []StanzaProposal{{
+		Verb:       transform.KindRename,
+		Args:       RenameArgs{From: "text", To: "message"},
+		Confidence: Confident,
+		Signals:    []Signal{OperatorIntentSignal(), SameTypeSignal("string")},
+	}}
+	if !reflect.DeepEqual(p.Request, want) {
+		t.Errorf("request proposals = %+v, want %+v", p.Request, want)
+	}
+	if len(p.RequestCandidates) != 0 {
+		t.Errorf("request candidates = %+v, want none", p.RequestCandidates)
+	}
+}
+
+func TestDraftShimRenameIntentReversesForResponse(t *testing.T) {
+	from := openAPIDoc(t, "2024-01", `"request":{"type":"string"}`, `"text":{"type":"string"}`)
+	to := openAPIDoc(t, "2024-06", `"request":{"type":"string"}`, `"message":{"type":"string"}`)
+
+	p, err := DraftShimWithOptions(from, to, DraftOptions{
+		RenameConfidence: 1,
+		RenameIntents:    []RenameIntent{{From: "text", To: "message"}},
+	})
+	if err != nil {
+		t.Fatalf("DraftShimWithOptions: %v", err)
+	}
+	want := []StanzaProposal{{
+		Verb:       transform.KindRename,
+		Args:       RenameArgs{From: "message", To: "text"},
+		Confidence: Confident,
+		Signals:    []Signal{OperatorIntentSignal(), SameTypeSignal("string")},
+	}}
+	if !reflect.DeepEqual(p.Response, want) {
+		t.Errorf("response proposals = %+v, want %+v", p.Response, want)
+	}
+}
+
+func TestLoadRenameIntentsRejectsInvalidInput(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+	}{
+		{name: "unknown field", body: "version: 1\nrenames: []\nextra: true\n"},
+		{name: "unsupported version", body: "version: 2\nrenames:\n  - from: text\n    to: message\n"},
+		{name: "duplicate source", body: "version: 1\nrenames:\n  - from: text\n    to: message\n  - from: text\n    to: body\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := LoadRenameIntents([]byte(tc.body)); err == nil {
+				t.Fatal("LoadRenameIntents: want error")
+			}
+		})
+	}
+}
+
+func TestDraftShimRenameIntentRejectsTypeMismatch(t *testing.T) {
+	from := openAPIDoc(t, "2024-01", `"text":{"type":"string"}`, `"ok":{"type":"boolean"}`)
+	to := openAPIDoc(t, "2024-06", `"message":{"type":"integer"}`, `"ok":{"type":"boolean"}`)
+	_, err := DraftShimWithOptions(from, to, DraftOptions{
+		RenameConfidence: 1,
+		RenameIntents:    []RenameIntent{{From: "text", To: "message"}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "same primitive types") {
+		t.Fatalf("DraftShimWithOptions error = %v, want same primitive types", err)
+	}
+}
+
 func TestRenderYAMLIncludesConfidentStanzas(t *testing.T) {
 	from := openAPIDoc(t, "2024-01", `"userName":{"type":"string"}`, `"ok":{"type":"boolean"}`)
 	to := openAPIDoc(t, "2024-06", `"user_name":{"type":"string"},"locale":{"type":"string"}`, `"ok":{"type":"boolean"}`)
