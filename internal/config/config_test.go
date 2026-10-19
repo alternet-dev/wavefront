@@ -46,6 +46,9 @@ func TestLoadsWithMinimalRequiredEnv(t *testing.T) {
 	if cfg.ContractVersionHeader != "X-Api-Contract-Version" {
 		t.Errorf("ContractVersionHeader default = %q", cfg.ContractVersionHeader)
 	}
+	if cfg.ProfileHeader != "X-Wavefront-Profile" || cfg.TenantHeader != "X-Wavefront-Tenant" || cfg.CohortHeader != "X-Wavefront-Cohort" {
+		t.Errorf("selector header defaults = %q, %q, %q", cfg.ProfileHeader, cfg.TenantHeader, cfg.CohortHeader)
+	}
 	if cfg.RequestTimeout != 15000*time.Millisecond {
 		t.Errorf("RequestTimeout default = %v", cfg.RequestTimeout)
 	}
@@ -68,6 +71,9 @@ func TestOverridesParse(t *testing.T) {
 	p["WAVEFRONT_LISTEN_ADDR"] = "127.0.0.1:1234"
 	p["WAVEFRONT_METRICS_ADDR"] = "127.0.0.1:5678"
 	p["WAVEFRONT_CONTRACT_VERSION_HEADER"] = "X-Contract"
+	p["WAVEFRONT_PROFILE_HEADER"] = "X-Profile"
+	p["WAVEFRONT_TENANT_HEADER"] = "X-Tenant"
+	p["WAVEFRONT_COHORT_HEADER"] = "X-Cohort"
 	p["WAVEFRONT_REQUEST_TIMEOUT_MS"] = "3000"
 	p["WAVEFRONT_READ_HEADER_TIMEOUT_MS"] = "4000"
 	p["WAVEFRONT_READ_TIMEOUT_MS"] = "5000"
@@ -85,6 +91,9 @@ func TestOverridesParse(t *testing.T) {
 	}
 	if cfg.ContractVersionHeader != "X-Contract" {
 		t.Errorf("ContractVersionHeader = %q", cfg.ContractVersionHeader)
+	}
+	if cfg.ProfileHeader != "X-Profile" || cfg.TenantHeader != "X-Tenant" || cfg.CohortHeader != "X-Cohort" {
+		t.Errorf("selector headers = %q, %q, %q", cfg.ProfileHeader, cfg.TenantHeader, cfg.CohortHeader)
 	}
 	if cfg.RequestTimeout != 3*time.Second {
 		t.Errorf("RequestTimeout = %v", cfg.RequestTimeout)

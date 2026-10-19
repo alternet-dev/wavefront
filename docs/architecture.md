@@ -21,7 +21,7 @@ Implementation shape — package layout and the request path.
 ## Request path
 
 `server` accepts → route gate (path+method) → `negotiate` resolves the
-contract on (path, method, contract-version) → `adapter` decodes → `transform`
+contract on (path, method, contract-version, profile, tenant, cohort) → `adapter` decodes → `transform`
 maps request → `server` calls the resolved upstream → `transform` maps response
 → `adapter` encodes → `server` responds. On any failure, a typed error is
 encoded in the client's contract version.
