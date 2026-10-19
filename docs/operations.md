@@ -128,7 +128,8 @@ request.
 | Spike of `upstream_error` (502) on one named target only | one backend is unreachable, returning a capability-ceiling status (206/207/208/226 or 3xx), or returning an undeclared status under a strict contract | other versions are unaffected; investigate that backend |
 | Spike of `request_body_too_large` (413) | clients sending bodies > `WAVEFRONT_MAX_BODY_BYTES` | raise the cap or fix the client |
 | Spike of `upstream_status` | upstream returning an undeclared non-success status (non-strict contract) — wavefront relays the status and body verbatim as the aid envelope; investigate the upstream, not wavefront |
-| Spike of `unsupported_media_type` (415) | clients sending bodies without `Content-Type: application/protobuf` | check the client; the request envelope is the codec's media type |
+| Spike of `not_acceptable` (406) | client `Accept` excludes both supported response codecs | request `application/protobuf`, `application/json`, or a matching wildcard |
+| Spike of `unsupported_media_type` (415) | clients sending bodies without a supported `Content-Type` | send `application/protobuf` or `application/json` for the request envelope |
 | Spike of `unknown_route` (404) | client URL `(path, method)` not bound by any contract in the bundle | check the bundle's bindings; wrong-method folds here on purpose (no `Allow` header) |
 | Spike of `internal_error` (500) | a handler panic recovered by middleware | check logs for the panic stack — this is always a bug |
 | `unavailable` (503) on the proxy path at boot | request arrived before the bundle finished loading | `Retry-After: 1` hint; legitimate boot race, brief and self-healing |
@@ -145,11 +146,12 @@ request.
 | Unknown / missing contract version | `unsupported_contract_version` (400) |
 | Client body fails to decode into `request_message` | `decode_failed` (400) |
 | Client body exceeds `WAVEFRONT_MAX_BODY_BYTES` | `request_body_too_large` (413) |
-| Client body's `Content-Type` is not `application/protobuf` | `unsupported_media_type` (415) |
+| Client's `Accept` excludes protobuf and JSON | `not_acceptable` (406) |
+| Client body has no supported `Content-Type` | `unsupported_media_type` (415) |
 | Request URL `(path, method)` not bound by any contract | `unknown_route` (404) |
 | Request transform verb can't apply | `transform_failed` (422) |
 | Response transform verb can't apply | `transform_failed` (502) |
-| Upstream non-success status declared in `error_messages` | typed contract response — status preserved, body = bound proto message, no `X-Wavefront-Error` |
+| Upstream non-success status declared in `error_messages` | typed contract response — status preserved, body = negotiated representation of the bound message, no `X-Wavefront-Error` |
 | Upstream non-success status, undeclared, non-strict | `upstream_status` — status preserved, body = `wavefront.v0.Error` aid envelope relaying the upstream body; `Retry-After` relayed for 429 |
 | Upstream non-success status, undeclared, `strict: true` | `upstream_error` (502) |
 | Upstream capability ceiling (206/207/208/226) or 3xx, unreachable, or reply un-encodable | `upstream_error` (502) |

@@ -54,13 +54,21 @@ A single layer's `versions.yaml` entry, abbreviated:
 
 ### Wire envelope
 
-- Request body: the `request_message` marshaled to protobuf bytes.
-- Request `Content-Type`: `application/protobuf`.
+- Request body: the `request_message` encoded as protobuf bytes or protobuf
+  JSON.
+- Request `Content-Type`: `application/protobuf` or `application/json`. It is
+  required when the request carries a body and selects the request decoder.
+- Optional request `Accept`: a weighted list containing
+  `application/protobuf` and/or `application/json`; it selects the response
+  encoder independently. When omitted, the response follows the request codec
+  (or protobuf for a bodyless request).
 - Request must carry `X-Api-Contract-Version: <contract_version>`.
-- Response on success (2xx): the `response_message` marshaled to protobuf
-  bytes; `Content-Type: application/protobuf`.
+- Response on success (2xx): the `response_message` encoded in the negotiated
+  representation, with its matching `Content-Type`.
 - Response on `wavefront`-originated failure: a `wavefront.v0.Error` protobuf,
-  same `Content-Type`, plus an `X-Wavefront-Error: <code>` extension header.
+  always `Content-Type: application/protobuf`, plus an
+  `X-Wavefront-Error: <code>` extension header. This fixed envelope also covers
+  failures that happen before codec negotiation.
 - Every response (success or error) carries `X-Wavefront-Contract-Version`
   echoing the negotiated (or raw) contract version.
 
@@ -74,10 +82,11 @@ Non-2xx responses fall into three categories. Inspect `X-Wavefront-Error` to
 distinguish them:
 
 **No `X-Wavefront-Error` header — typed contract error.** The upstream returned
-a status declared in the bundle's `error_messages` map. Decode the body as the
-proto message bound to that `(route, status)` — it is a first-class contract
-type, not a wavefront envelope. Look up the message name from the layer's
-`versions.yaml` `error_messages` entry for the received status.
+a status declared in the bundle's `error_messages` map. Decode the body in the
+negotiated response codec as the message bound to that `(route, status)` — it
+is a first-class contract type, not a wavefront envelope. Look up the message
+name from the layer's `versions.yaml` `error_messages` entry for the received
+status.
 
 **`X-Wavefront-Error: upstream_status` — aid envelope.** The upstream returned a
 status not declared in `error_messages` (and the contract is non-strict). The
@@ -407,7 +416,7 @@ header is the discriminator:
 
 | `X-Wavefront-Error` | Body type | Meaning |
 |---|---|---|
-| absent | the per-status contract type from `error_messages` | a declared typed error — decode as the proto message bound to this status |
+| absent | the negotiated representation of the per-status contract type from `error_messages` | a declared typed error — decode as the message bound to this status |
 | `upstream_status` | `wavefront.v0.Error` | undeclared upstream status (non-strict): status preserved, `message` = opaque relay of upstream body |
 | any other value | `wavefront.v0.Error` | wavefront-originated failure — decode `code` for the specific cause |
 
@@ -419,6 +428,11 @@ The `wavefront.v0.Error` codes consumers see most often:
 - `unsupported_contract_version` (400) — the value the consumer sent in
   `X-Api-Contract-Version` is missing, unknown, or unsupported. Check the
   header value against the layers in the bundle.
+- `not_acceptable` (406) — `Accept` excludes both supported response codecs.
+  Request `application/protobuf`, `application/json`, or a matching wildcard.
+- `unsupported_media_type` (415) — a request with a body omitted
+  `Content-Type` or named an unsupported request codec. Send
+  `application/protobuf` or `application/json`.
 - `transform_failed` (422 on request, 502 on response) — a transform stanza
   for this contract couldn't apply. 422 means the client's request didn't
   satisfy the bundle's request stanzas (well-formed but unprocessable under
