@@ -53,13 +53,19 @@ func TestVersionSkew(t *testing.T) {
 		t.Fatalf("no skew scenarios under %s", root)
 	}
 	for _, name := range scenarios {
-		t.Run(name, func(t *testing.T) {
-			runSkewScenario(t, filepath.Join(root, name))
-		})
+		for _, packed := range []bool{false, true} {
+			delivery := "directory"
+			if packed {
+				delivery = "packed"
+			}
+			t.Run(name+"/"+delivery, func(t *testing.T) {
+				runSkewScenario(t, filepath.Join(root, name), packed)
+			})
+		}
 	}
 }
 
-func runSkewScenario(t *testing.T, dir string) {
+func runSkewScenario(t *testing.T, dir string, packed bool) {
 	t.Helper()
 
 	bundleDir := t.TempDir()
@@ -86,15 +92,23 @@ func runSkewScenario(t *testing.T, dir string) {
 		t.Fatalf("read expected-backend-request.json: %v", err)
 	}
 
+	version := singleLayerVersion(t, bundleDir)
+	bundlePath := bundleDir
+	if packed {
+		bundlePath = filepath.Join(t.TempDir(), "bundle.tar.gz")
+		if err := bundlegen.Pack(bundleDir, bundlePath); err != nil {
+			t.Fatalf("bundlegen.Pack: %v", err)
+		}
+	}
+
 	h := Spawn(t, SpawnOpts{
-		BundleDir: bundleDir,
+		BundleDir: bundlePath,
 		BackendHandler: func(w http.ResponseWriter, _ *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write(backendShape)
 		},
 	})
 
-	version := singleLayerVersion(t, bundleDir)
 	contract, ok := h.Bundle.Contract(version)
 	if !ok {
 		t.Fatalf("contract %q not in bundle", version)

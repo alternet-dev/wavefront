@@ -1388,10 +1388,9 @@ func Verify(bundleDir string) error {
 const candidatesBlockMarker = "# AMBIGUOUS pair"
 
 func verifyNoUnresolvedCandidates(bundleDir string) error {
-	path := filepath.Join(bundleDir, "resolution.yaml")
-	raw, err := os.ReadFile(path)
+	raw, err := bundle.ReadFile(bundleDir, "resolution.yaml")
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, fs.ErrNotExist) {
 			return nil
 		}
 		return fmt.Errorf("read resolution.yaml: %w", err)

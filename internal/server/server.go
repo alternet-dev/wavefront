@@ -95,7 +95,7 @@ func (s *Server) SetBundle(b *bundle.Bundle) {
 
 func (s *Server) Bundle() *bundle.Bundle { return s.bundle.Load() }
 
-// ReloadBundle re-reads the bundle directory configured on the server and,
+// ReloadBundle re-reads the bundle path configured on the server and,
 // on success, atomically swaps the live bundle. On failure, the previous
 // bundle is preserved and the error is both logged and returned so the
 // caller (typically a SIGHUP handler) can decide whether to react further.

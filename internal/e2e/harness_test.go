@@ -40,8 +40,8 @@ type Harness struct {
 
 // SpawnOpts customises Spawn.
 type SpawnOpts struct {
-	// BundleDir is a pre-existing bundle directory to load. If empty, Spawn
-	// builds a default single-layer bundle from bundletest.
+	// BundleDir is a pre-existing bundle directory or packed archive to load.
+	// If empty, Spawn builds a default single-layer directory from bundletest.
 	BundleDir string
 
 	// Versions overrides the versions.yaml content of the default bundle.
@@ -49,7 +49,8 @@ type SpawnOpts struct {
 	Versions string
 
 	// Resolution, if non-empty, is written as resolution.yaml into the bundle
-	// directory (whether the default bundle or one passed via BundleDir).
+	// directory (whether the default bundle or a directory passed via
+	// BundleDir). It is not valid with a packed archive.
 	Resolution string
 
 	// BackendHandler is invoked when the proxy reaches the stub upstream. If
