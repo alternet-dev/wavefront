@@ -608,6 +608,40 @@ func TestLookupSelectsProfileTenantAndCohortResolution(t *testing.T) {
 	}
 }
 
+func TestLookupSelectorChoosesRouteOverride(t *testing.T) {
+	dir := writeBundle(t, fdsBytes(t), validOpenAPI, validVersions)
+	mustWrite(t, filepath.Join(dir, "resolution.yaml"), []byte(`version: 1
+overrides:
+  - contract_version: "2024-11"
+    route:
+      target: default-backend
+  - contract_version: "2024-11"
+    profile: mobile
+    route:
+      target: mobile-backend
+`))
+	b, err := Load(dir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	mobile, ok := b.Lookup("/v3/me/session", "GET", "2024-11", Selectors{Profile: "mobile"})
+	if !ok {
+		t.Fatal("Lookup mobile: no contract")
+	}
+	if got := mobile.Target(); got != "mobile-backend" {
+		t.Fatalf("mobile target = %q, want %q", got, "mobile-backend")
+	}
+
+	fallback, ok := b.Lookup("/v3/me/session", "GET", "2024-11", Selectors{Profile: "web"})
+	if !ok {
+		t.Fatal("Lookup fallback: no contract")
+	}
+	if got := fallback.Target(); got != "default-backend" {
+		t.Fatalf("fallback target = %q, want %q", got, "default-backend")
+	}
+}
+
 func TestLoadResolutionOverlappingSelectorsRejected(t *testing.T) {
 	dir := writeBundle(t, fdsBytes(t), validOpenAPI, validVersions)
 	mustWrite(t, filepath.Join(dir, "resolution.yaml"), []byte(`version: 1
