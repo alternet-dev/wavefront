@@ -758,27 +758,33 @@ overrides:
 	}
 }
 
-// TestLoadResolutionBlankSelectorFieldRejected pins that an explicitly
-// empty-string selector field is a load error rather than silently acting
-// as the version-only wildcard. The pointer-to-string yamlResolution
-// shape distinguishes "unset" (nil) from "set to empty"; set-to-empty is
-// never the operator's intent.
+// TestLoadResolutionBlankSelectorFieldRejected pins that every explicit
+// blank selector spelling, including YAML null, is a load error rather than
+// silently acting as the version-only wildcard.
 func TestLoadResolutionBlankSelectorFieldRejected(t *testing.T) {
 	for _, field := range []string{"profile", "tenant", "cohort"} {
-		t.Run(field, func(t *testing.T) {
-			dir := writeBundle(t, fdsBytes(t), validOpenAPI, validVersions)
-			mustWrite(t, filepath.Join(dir, "resolution.yaml"), []byte(
-				"version: 1\noverrides:\n  - contract_version: \"2024-11\"\n    "+field+": \"\"\n    transform: { request: [] }\n",
-			))
-			_, err := Load(dir)
-			var ve *ValidationError
-			if !errors.As(err, &ve) || ve.Field != "selector" {
-				t.Fatalf("want selector ValidationError, got %v", err)
-			}
-			if !strings.Contains(ve.Reason, field) || !strings.Contains(ve.Reason, "blank") {
-				t.Fatalf("reason = %q, want it to name %q and %q", ve.Reason, field, "blank")
-			}
-		})
+		for _, value := range []struct {
+			name, yaml string
+		}{
+			{"empty-string", `""`},
+			{"implicit-null", ""},
+			{"explicit-null", "null"},
+		} {
+			t.Run(field+"/"+value.name, func(t *testing.T) {
+				dir := writeBundle(t, fdsBytes(t), validOpenAPI, validVersions)
+				mustWrite(t, filepath.Join(dir, "resolution.yaml"), []byte(
+					"version: 1\noverrides:\n  - contract_version: \"2024-11\"\n    "+field+": "+value.yaml+"\n    transform: { request: [] }\n",
+				))
+				_, err := Load(dir)
+				var ve *ValidationError
+				if !errors.As(err, &ve) || ve.Field != "selector" {
+					t.Fatalf("want selector ValidationError, got %v", err)
+				}
+				if !strings.Contains(ve.Reason, field) || !strings.Contains(ve.Reason, "blank") {
+					t.Fatalf("reason = %q, want it to name %q and %q", ve.Reason, field, "blank")
+				}
+			})
+		}
 	}
 }
 

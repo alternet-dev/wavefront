@@ -17,18 +17,18 @@ func TestNonVersionSelectorsChooseResolution(t *testing.T) {
 	cases := []struct {
 		name, yamlField, header, value string
 	}{
-		{"profile", "profile", "X-Wavefront-Profile", "mobile"},
-		{"tenant", "tenant", "X-Wavefront-Tenant", "partner-a"},
-		{"cohort", "cohort", "X-Wavefront-Cohort", "canary"},
+		{"profile", "profile", "X-Client-Profile", "mobile"},
+		{"tenant", "tenant", "X-Customer-Tenant", "partner-a"},
+		{"cohort", "cohort", "X-Release-Cohort", "canary"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			h := Spawn(t, SpawnOpts{
 				Resolution: "version: 1\noverrides:\n  - contract_version: \"2024-11\"\n    " + tc.yamlField + ": " + tc.value + "\n    transform:\n      response:\n        - default: { field: text, value: " + tc.value + " }\n",
 				ConfigOverride: func(cfg *config.Config) {
-					cfg.ProfileHeader = "X-Wavefront-Profile"
-					cfg.TenantHeader = "X-Wavefront-Tenant"
-					cfg.CohortHeader = "X-Wavefront-Cohort"
+					cfg.ProfileHeader = "X-Client-Profile"
+					cfg.TenantHeader = "X-Customer-Tenant"
+					cfg.CohortHeader = "X-Release-Cohort"
 				},
 			})
 

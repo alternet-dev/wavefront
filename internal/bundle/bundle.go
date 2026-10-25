@@ -341,9 +341,9 @@ type yamlResolutionFile struct {
 
 type yamlResolution struct {
 	ContractVersion string         `yaml:"contract_version"`
-	Profile         *string        `yaml:"profile"`
-	Tenant          *string        `yaml:"tenant"`
-	Cohort          *string        `yaml:"cohort"`
+	Profile         yaml.Node      `yaml:"profile"`
+	Tenant          yaml.Node      `yaml:"tenant"`
+	Cohort          yaml.Node      `yaml:"cohort"`
 	Transform       *yamlTransform `yaml:"transform"`
 	Route           *yamlRoute     `yaml:"route"`
 }
@@ -426,17 +426,21 @@ func resolutionSelectors(ov yamlResolution) (Selectors, error) {
 	var s Selectors
 	for _, field := range []struct {
 		name string
-		in   *string
+		in   yaml.Node
 		out  *string
 	}{
 		{"profile", ov.Profile, &s.Profile},
 		{"tenant", ov.Tenant, &s.Tenant},
 		{"cohort", ov.Cohort, &s.Cohort},
 	} {
-		if field.in == nil {
+		if field.in.Kind == 0 {
 			continue
 		}
-		*field.out = strings.TrimSpace(*field.in)
+		var value string
+		if err := field.in.Decode(&value); err != nil {
+			return Selectors{}, fmt.Errorf("%s must be a string: %w", field.name, err)
+		}
+		*field.out = strings.TrimSpace(value)
 		if *field.out == "" {
 			return Selectors{}, fmt.Errorf("%s must not be blank when set", field.name)
 		}
