@@ -210,6 +210,9 @@ error — return:
 | `transform_failed` | 502 | `Content-Type` | a response transform verb can't apply — live internal shape drifted from the bundle's response stanzas |
 | `internal_error` | 500 | `Content-Type` | a panic in the request path or other unrecoverable fault inside wavefront itself; the recovered panic value and stack are logged, never sent on the wire |
 | `unknown_route` | 404 | `Content-Type` | no contract binds the inbound request's `(path, method)`; wrong-method folds in (no 405, no `Allow` header) because each contract names exactly one method |
+| `request_header_timeout` | 408 | `Content-Type` | the client did not finish request headers within `WAVEFRONT_READ_HEADER_TIMEOUT_MS` |
+| `expectation_failed` | 417 | `Content-Type` | the client sent an `Expect` value other than `100-continue` |
+| `request_header_too_large` | 431 | `Content-Type` | request headers exceeded the server header limit |
 | `unavailable` | 503 | `Content-Type`, `Retry-After` | the proxy path received a request before the bundle finished loading at boot; a short `Retry-After` hint is attached so clients back off briefly |
 
 No client library is shipped: a client checks the HTTP status; structured
@@ -316,22 +319,20 @@ the header.
 ### Stdlib-boundary statuses
 
 A small set of statuses is emitted by Go's `net/http` request reader **before**
-any wavefront handler runs, with `Content-Type: text/plain` and **no**
-`X-Wavefront-Error` header. They are deliberately out-of-envelope: replacing
-them would mean reimplementing parts of the stdlib request reader. Clients
-distinguish them from wire-error responses by the absence of the
-`X-Wavefront-Error` header.
+any wavefront handler runs. The data-plane listener preserves the stdlib
+parser but intercepts its `408`, `417`, and `431` replies before they reach the
+client, replacing each with the normal wire-error envelope. Because no
+`http.Request` is available at that point, `X-Wavefront-Contract-Version` is
+`unknown`.
 
-| HTTP | Cause |
-|---|---|
-| 408 Request Timeout | slow client failed to send headers within `WAVEFRONT_READ_HEADER_TIMEOUT_MS` |
-| 431 Request Header Fields Too Large | request headers exceed `net/http`'s default `MaxHeaderBytes` |
-| 417 Expectation Failed | non-`100-continue` `Expect:` header |
+| HTTP | `X-Wavefront-Error` | Cause |
+|---|---|---|
+| 408 Request Timeout | `request_header_timeout` | slow client failed to send headers within `WAVEFRONT_READ_HEADER_TIMEOUT_MS` |
+| 417 Expectation Failed | `expectation_failed` | non-`100-continue` `Expect:` header |
+| 431 Request Header Fields Too Large | `request_header_too_large` | request headers exceed `net/http`'s `MaxHeaderBytes` limit |
 
-Occurrences are surfaced as the unlabelled Prometheus counter
-`wavefront_stdlib_boundary_total` so operators see the count without sniffing
-responses; intercepting and re-enveloping these is tracked as future work in
-[#91](https://github.com/alternet-dev/wavefront/issues/91).
+Occurrences remain surfaced as the Prometheus counter
+`wavefront_stdlib_boundary_total`, labelled by the intercepted status.
 
 ### Response header invariant
 

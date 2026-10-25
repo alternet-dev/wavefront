@@ -3,46 +3,35 @@ package server
 import (
 	"bytes"
 	"context"
+	"errors"
+	"io"
 	"net"
 	"net/http"
 	"strconv"
-	"sync"
+	"sync/atomic"
+
+	"github.com/alternet-dev/wavefront/internal/wireerror"
 )
 
-// stdlib-boundary observability — issue #91.
+// stdlib-boundary interception — issue #91.
 //
 // A small set of HTTP statuses are emitted by net/http's request reader
 // BEFORE the wavefront handler runs: 408 (slow header), 431 (oversized
-// headers), 417 (non-100-continue Expect). These responses are
-// `Content-Type: text/plain`, carry no `X-Wavefront-Error` header, and are
-// documented as out of the wavefront wire-error envelope per issue #39's
-// status-code matrix. Intercepting them to replace them with the wavefront
-// envelope would require reimplementing parts of net/http's request reader —
-// tracked as future work in issue #91.
-//
-// Rather than replacing the responses, this surfaces them on the `/metrics`
-// endpoint via `wavefront_stdlib_boundary_total{status=...}`. Detection is
-// structural: a connection that transitions to StateActive (net/http read
-// bytes off the wire) and then to StateClosed WITHOUT the wavefront handler
-// ever running is a stdlib-boundary failure. The status code is captured by
-// a wrapped net.Conn that sniffs the first response-line write on the way to
-// the wire; net/http writes status lines (e.g. for 431 and 417) directly to
-// `c.rwc` via `fmt.Fprintf`, which lands in `sniffingConn.Write`. When net/http
-// closes the connection without writing a response — as it does on the
-// slow-header path — the captured status stays zero and the metric records
-// the literal `"unknown"`.
+// headers), 417 (non-100-continue Expect). The data-plane listener preserves
+// the stdlib parser and its limits, but replaces those replies with normal
+// wavefront wire-error envelopes at the connection boundary. Because no
+// http.Request exists for these replies, their contract version is unknown.
 //
 // State model (HTTP/1.1; wavefront is plaintext-only, no HTTP/2):
 //
-//   StateNew      — connection accepted; no entry yet (keeps the map small
-//                   when a client connects and drops without sending bytes).
+//   StateNew      — connection accepted; retain a passive entry so a
+//                   zero-byte header timeout can be counted.
 //   StateActive   — net/http read at least one byte. Set/reset the conn's
 //                   entry with handlerRan=false. Reset on EVERY Active so
 //                   keepalive boundary failures (request N succeeds, request
 //                   N+1 fails the stdlib parser) are still observed.
-//   StateIdle     — handler completed and keepalive is parked. No-op: the
-//                   entry stays so a later Active→Closed without a handler
-//                   run can still be observed; the next Active resets it.
+//   StateIdle     — handler completed and keepalive is parked. Clear the
+//                   connection-local handler marker for the next request.
 //   StateHijacked — terminal per net/http docs. Delete the entry so the map
 //                   does not leak even though hijack is not a wavefront code
 //                   path today.
@@ -62,11 +51,11 @@ import (
 // with any other context.WithValue keys downstream.
 type connContextKey struct{}
 
-// connEntry tracks per-connection observability state for the stdlib-boundary
-// detection. The zero value is `handlerRan=false`, which is the correct
-// initial state set by StateActive.
+// connEntry tracks per-connection stdlib-boundary state. Atomic fields keep
+// ConnState and the request middleware race-free.
 type connEntry struct {
-	handlerRan bool
+	active     atomic.Bool
+	handlerRan atomic.Bool
 }
 
 // connContext attaches the net.Conn to the connection-scoped context so the
@@ -81,9 +70,10 @@ func (s *Server) connContext(ctx context.Context, c net.Conn) context.Context {
 func (s *Server) connState(c net.Conn, state http.ConnState) {
 	switch state {
 	case http.StateNew:
-		// No-op: skipping StateNew keeps a "client dialed then dropped"
-		// connection out of the map, since net/http will transition it
-		// directly to StateClosed without a StateActive in between.
+		// Keep a passive entry so a client that sends no bytes and times out
+		// can still be observed as a 408. A client that only dials and drops
+		// has neither an active entry nor a captured status and is ignored.
+		s.connStateMap.Store(c, &connEntry{})
 	case http.StateActive:
 		// Set or reset the entry. Reset matters for keepalive: request N
 		// may have run the handler (handlerRan=true), but request N+1 may
@@ -91,10 +81,15 @@ func (s *Server) connState(c net.Conn, state http.ConnState) {
 		// StateActive starts a fresh "did the handler run this round?"
 		// observation.
 		entry := &connEntry{}
+		entry.active.Store(true)
 		s.connStateMap.Store(c, entry)
 	case http.StateIdle:
-		// No-op: keep the existing entry. The next StateActive will reset
-		// it, and the next StateClosed will check + delete it.
+		// The next request on a keepalive connection begins after this state.
+		// Clear the connection-local marker while retaining the entry for a
+		// normal close after a successfully handled request.
+		if sc, ok := c.(*sniffingConn); ok {
+			sc.resetHandlerSeen()
+		}
 	case http.StateHijacked:
 		// Terminal per net/http docs ("does not transition to StateClosed").
 		// Delete the entry so the map does not leak.
@@ -111,23 +106,23 @@ func (s *Server) connState(c net.Conn, state http.ConnState) {
 		if !ok || entry == nil {
 			return
 		}
-		if !entry.handlerRan {
-			// StateActive fired (we have an entry) but the wavefront
-			// handler never ran on this conn's current request — that
-			// is the stdlib-boundary failure mode. Label by the status
-			// code the sniffing conn captured off the wire; fall back
-			// to "unknown" when net/http closed without writing a
-			// response line (slow-header path).
-			s.metrics.stdlibBoundary.WithLabelValues(boundaryStatusLabel(c)).Inc()
+		if entry.handlerRan.Load() {
+			return
+		}
+		status := boundaryStatusLabel(c)
+		if entry.active.Load() || status != stdlibBoundaryStatusUnknown {
+			// net/http handled this connection's last request before the
+			// wavefront handler ran. Label the counter by the intercepted
+			// status, or unknown if no response line was captured.
+			s.metrics.stdlibBoundary.WithLabelValues(status).Inc()
 		}
 	}
 }
 
 // boundaryStatusLabel returns the label value for the stdlib-boundary counter
 // based on the status that the sniffing conn captured on the first response
-// write. Returns the literal "unknown" when c is not wrapped (defensive — Run
-// and tests always wrap), or when the conn closed without a response (the
-// net/http slow-header path returns from `serve()` without writing).
+// write. Returns the literal "unknown" when c is not wrapped or no response
+// status was captured.
 func boundaryStatusLabel(c net.Conn) string {
 	sc, ok := c.(*sniffingConn)
 	if !ok {
@@ -140,9 +135,8 @@ func boundaryStatusLabel(c net.Conn) string {
 	return strconv.Itoa(status)
 }
 
-// stdlibBoundaryStatusUnknown is the `status` label value used when the
-// sniffing conn did not capture a response line — most commonly because
-// net/http closed the connection on the slow-header path without writing.
+// stdlibBoundaryStatusUnknown is the label for a boundary close without a
+// captured response status.
 const stdlibBoundaryStatusUnknown = "unknown"
 
 // markHandlerSeen wraps the data-plane handler so the wavefront chain marks
@@ -153,14 +147,29 @@ const stdlibBoundaryStatusUnknown = "unknown"
 func (s *Server) markHandlerSeen(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if c, ok := r.Context().Value(connContextKey{}).(net.Conn); ok {
+			if sc, ok := c.(*sniffingConn); ok {
+				sc.markHandlerSeen()
+			}
 			if raw, ok := s.connStateMap.Load(c); ok {
 				if entry, ok := raw.(*connEntry); ok && entry != nil {
-					entry.handlerRan = true
+					entry.handlerRan.Store(true)
 				}
 			}
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// markBoundaryEmitted makes a slow-header timeout on a keepalive connection
+// observable even though net/http does not transition to StateActive until it
+// has read request bytes. The response itself has already identified this as
+// a fresh pre-handler failure, so replacing the prior request's marker is safe.
+func (s *Server) markBoundaryEmitted(c net.Conn) {
+	if raw, ok := s.connStateMap.Load(c); ok {
+		if entry, ok := raw.(*connEntry); ok && entry != nil {
+			entry.handlerRan.Store(false)
+		}
+	}
 }
 
 // WireDataServer attaches the data-plane connection-state callbacks
@@ -172,8 +181,8 @@ func (s *Server) markHandlerSeen(next http.Handler) http.Handler {
 //
 // WireDataServer covers the half of the observability that lives on the
 // *http.Server. The other half — wrapping the listener so every accepted
-// conn is a *sniffingConn that captures the first response status line —
-// is WrapDataListener. Run wires both; boundary tests wrap the
+// conn is a *sniffingConn that intercepts the boundary response — is
+// WrapDataListener. Run wires both; boundary tests wrap the
 // httptest.Server.Listener before Start() so the same path is exercised.
 func (s *Server) WireDataServer(srv *http.Server) {
 	srv.ConnContext = s.connContext
@@ -181,20 +190,21 @@ func (s *Server) WireDataServer(srv *http.Server) {
 }
 
 // WrapDataListener returns l wrapped so every Accept produces a *sniffingConn.
-// The wrap lets the StateClosed branch of connState read the status code
-// net/http wrote on the wire (e.g. 431, 417) and label the
+// The wrap lets the StateClosed branch of connState read the intercepted
+// status code (e.g. 431, 417) and label the
 // `wavefront_stdlib_boundary_total` counter with it. The wrap MUST be in place
 // before the conn is passed to ConnContext / ConnState: net/http accepts a
 // conn, calls ConnContext with it, then setState(c.rwc, StateNew) — so the
 // `net.Conn` that lands in the ConnState callback is whatever Accept returned.
 func (s *Server) WrapDataListener(l net.Listener) net.Listener {
-	return &sniffingListener{Listener: l}
+	return &sniffingListener{Listener: l, server: s}
 }
 
 // sniffingListener wraps a net.Listener so every Accept returns a *sniffingConn.
 // The wrap is transparent to net/http: Addr and Close pass straight through.
 type sniffingListener struct {
 	net.Listener
+	server *Server
 }
 
 func (l *sniffingListener) Accept() (net.Conn, error) {
@@ -202,40 +212,109 @@ func (l *sniffingListener) Accept() (net.Conn, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &sniffingConn{Conn: c}, nil
+	return &sniffingConn{Conn: c, server: l.server}, nil
 }
 
-// sniffingConn captures the status code from the first Write that begins with
-// an HTTP/1.x response line. The capture is "first write only" — sync.Once
-// guards against later body-byte writes accidentally re-parsing. Reads are
-// untouched; Close is untouched.
-//
-// Concurrency: net/http writes to a conn from the goroutine running serve()
-// for that conn, and StateClosed fires from that same goroutine after the
-// conn close completes (`setState(c.rwc, StateClosed, ...)` in
-// net/http/server.go). The sync.Once + read-then-return in capturedStatus is
-// race-free under that contract; the Once is still belt-and-suspenders, since
-// nothing in the wavefront pipeline writes to the bare conn from another
-// goroutine.
+// sniffingConn intercepts replies emitted before wavefront's handler runs.
+// It is otherwise a transparent net.Conn wrapper.
 type sniffingConn struct {
 	net.Conn
-	statusOnce sync.Once
-	status     int // 0 if not captured; set under statusOnce
+	server      *Server
+	handlerSeen atomic.Bool
+	status      atomic.Int32 // 0 if no response status has been captured
+	emitted     atomic.Bool
+}
+
+func (c *sniffingConn) Read(p []byte) (int, error) {
+	n, err := c.Conn.Read(p)
+	if err != nil && !c.handlerSeen.Load() && isTimeout(err) {
+		// net/http closes a slow-header connection without writing a response.
+		// Emit the envelope before returning its timeout error so the stdlib
+		// parser keeps ownership of connection shutdown.
+		_ = c.emitBoundary(http.StatusRequestTimeout)
+	}
+	return n, err
 }
 
 func (c *sniffingConn) Write(p []byte) (int, error) {
-	if len(p) > 0 {
-		c.statusOnce.Do(func() {
-			c.status = parseStatusLine(p)
-		})
+	status := parseStatusLine(p)
+	if !c.handlerSeen.Load() && isInterceptedBoundaryStatus(status) {
+		if err := c.emitBoundary(status); err != nil {
+			return 0, err
+		}
+		// net/http will close this connection after its own text response. The
+		// envelope already replaced that response on the underlying connection.
+		return len(p), nil
+	}
+	if status != 0 {
+		c.status.CompareAndSwap(0, int32(status))
 	}
 	return c.Conn.Write(p)
 }
 
-// capturedStatus returns the parsed status code, or 0 if none was captured.
-// The first-write capture is gated by statusOnce; reading after StateClosed
-// is safe because by then no further write can fire the Once.
-func (c *sniffingConn) capturedStatus() int { return c.status }
+func (c *sniffingConn) markHandlerSeen() { c.handlerSeen.Store(true) }
+
+func (c *sniffingConn) resetHandlerSeen() { c.handlerSeen.Store(false) }
+
+func (c *sniffingConn) capturedStatus() int { return int(c.status.Load()) }
+
+func isTimeout(err error) bool {
+	var netErr net.Error
+	return errors.As(err, &netErr) && netErr.Timeout()
+}
+
+func isInterceptedBoundaryStatus(status int) bool {
+	switch status {
+	case http.StatusRequestTimeout, http.StatusExpectationFailed, http.StatusRequestHeaderFieldsTooLarge:
+		return true
+	}
+	return false
+}
+
+func boundaryError(status int) *wireerror.Error {
+	switch status {
+	case http.StatusRequestTimeout:
+		return wireerror.RequestHeaderTimeout("")
+	case http.StatusExpectationFailed:
+		return wireerror.ExpectationFailed("")
+	case http.StatusRequestHeaderFieldsTooLarge:
+		return wireerror.RequestHeaderTooLarge("")
+	default:
+		return nil
+	}
+}
+
+// emitBoundary writes one complete envelope to the underlying connection. It
+// bypasses c.Write to avoid re-entering the interception path.
+func (c *sniffingConn) emitBoundary(status int) error {
+	if !c.emitted.CompareAndSwap(false, true) {
+		return nil
+	}
+	werr := boundaryError(status)
+	if werr == nil {
+		return nil
+	}
+	c.status.Store(int32(status))
+	if c.server != nil {
+		c.server.markBoundaryEmitted(c)
+		c.server.metrics.errors.WithLabelValues(werr.Code(), versionUnknown, "").Inc()
+	}
+	body := werr.ProtoBody()
+	header := werr.Headers()
+	header.Set(wireerror.HeaderWavefrontError, werr.Code())
+	header.Set(wireerror.HeaderContractVersion, wireerror.VersionUnknown)
+	header.Set("Connection", "close")
+	resp := &http.Response{
+		StatusCode:    werr.HTTPStatus(),
+		ProtoMajor:    1,
+		ProtoMinor:    1,
+		Header:        header,
+		Body:          io.NopCloser(bytes.NewReader(body)),
+		ContentLength: int64(len(body)),
+		Close:         true,
+	}
+	return resp.Write(c.Conn)
+}
 
 // parseStatusLine extracts the numeric status code from the start of an
 // HTTP/1.x response line, of the form "HTTP/<version> <code> <reason>\r\n".

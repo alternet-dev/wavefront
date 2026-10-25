@@ -132,7 +132,7 @@ request.
 | Spike of `unknown_route` (404) | client URL `(path, method)` not bound by any contract in the bundle | check the bundle's bindings; wrong-method folds here on purpose (no `Allow` header) |
 | Spike of `internal_error` (500) | a handler panic recovered by middleware | check logs for the panic stack — this is always a bug |
 | `unavailable` (503) on the proxy path at boot | request arrived before the bundle finished loading | `Retry-After: 1` hint; legitimate boot race, brief and self-healing |
-| Non-zero `wavefront_stdlib_boundary_total` | clients hitting `net/http`'s boundary (408 slow header / 431 oversized headers / 417 bad `Expect`) before the wavefront handler runs | tune `WAVEFRONT_READ_HEADER_TIMEOUT_MS` or check client behaviour; these are out-of-envelope by design |
+| Non-zero `wavefront_stdlib_boundary_total` | clients hitting `net/http`'s boundary (408 slow header / 431 oversized headers / 417 bad `Expect`) before the wavefront handler runs | tune `WAVEFRONT_READ_HEADER_TIMEOUT_MS` or check client behavior; wavefront returns the matching wire-error envelope |
 
 ## Failure modes
 
@@ -156,4 +156,4 @@ request.
 | Upstream exceeds `WAVEFRONT_REQUEST_TIMEOUT_MS` | `upstream_timeout` (504) |
 | Bundle not yet loaded when a request arrives on the proxy path | `unavailable` (503) with a `Retry-After: 1` hint |
 | Recovered handler panic | `internal_error` (500) |
-| Slow header / oversized headers / non-`100-continue` `Expect:` | net/http stdlib boundary: `408 / 431 / 417` with `Content-Type: text/plain`; counted via `wavefront_stdlib_boundary_total`; deliberately out-of-envelope per the [error contract](protocol.md#error-contract) |
+| Slow header / oversized headers / non-`100-continue` `Expect:` | net/http stdlib boundary: `408 / 431 / 417`, intercepted at the data-plane listener and returned as the matching wire-error envelope; counted via `wavefront_stdlib_boundary_total` |
