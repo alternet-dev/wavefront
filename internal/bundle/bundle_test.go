@@ -642,6 +642,55 @@ overrides:
 	}
 }
 
+func TestLookupSelectorVariantsAreOrderIndependent(t *testing.T) {
+	orders := map[string]string{
+		"mobile-first": `  - contract_version: "2024-11"
+    profile: mobile
+    route: { target: mobile-backend }
+  - contract_version: "2024-11"
+    profile: web
+    route: { target: web-backend }
+`,
+		"web-first": `  - contract_version: "2024-11"
+    profile: web
+    route: { target: web-backend }
+  - contract_version: "2024-11"
+    profile: mobile
+    route: { target: mobile-backend }
+`,
+	}
+	for name, variants := range orders {
+		t.Run(name, func(t *testing.T) {
+			dir := writeBundle(t, fdsBytes(t), validOpenAPI, validVersions)
+			resolution := `version: 1
+overrides:
+  - contract_version: "2024-11"
+    route: { target: default-backend }
+` + variants
+			mustWrite(t, filepath.Join(dir, "resolution.yaml"), []byte(resolution))
+			b, err := Load(dir)
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			for _, tc := range []struct {
+				profile, want string
+			}{
+				{"mobile", "mobile-backend"},
+				{"web", "web-backend"},
+				{"tv", "default-backend"},
+			} {
+				c, ok := b.Lookup("/v3/me/session", "GET", "2024-11", Selectors{Profile: tc.profile})
+				if !ok {
+					t.Fatalf("Lookup profile %q: no contract", tc.profile)
+				}
+				if got := c.Target(); got != tc.want {
+					t.Errorf("Lookup profile %q target = %q, want %q", tc.profile, got, tc.want)
+				}
+			}
+		})
+	}
+}
+
 func TestLoadResolutionOverlappingSelectorsRejected(t *testing.T) {
 	dir := writeBundle(t, fdsBytes(t), validOpenAPI, validVersions)
 	mustWrite(t, filepath.Join(dir, "resolution.yaml"), []byte(`version: 1
