@@ -250,7 +250,12 @@ func (b *Bundle) Lookup(path, method, version string, selectors ...Selectors) (*
 	}
 	for _, c := range cs {
 		if c.route == path && c.method == method {
-			_ = selected
+			key := contractKey{version: version, route: path, method: method}
+			for _, variant := range b.selectorVariants[key] {
+				if selectorMatches(variant.selectors, selected) {
+					return variant.contract, true
+				}
+			}
 			return c, true
 		}
 	}
