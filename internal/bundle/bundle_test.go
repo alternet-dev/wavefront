@@ -699,6 +699,32 @@ func TestLoadResolutionBlankSelectorFieldRejected(t *testing.T) {
 	}
 }
 
+// TestLoadResolutionDuplicateVersionOnlyRejectedAsDuplicate pins that two
+// version-only resolution overrides for the same contract are rejected as a
+// duplicate, not merely as an overlapping-selector tuple. Both failure modes
+// are an ambiguous bundle, but a duplicate version-only entry is a straight
+// configuration mistake; the reason text must say "duplicate" so an operator
+// debugging a long resolution.yaml does not scan selector tuples for the
+// axis the two rules disagree on when there is no selector tuple at all.
+func TestLoadResolutionDuplicateVersionOnlyRejectedAsDuplicate(t *testing.T) {
+	dir := writeBundle(t, fdsBytes(t), validOpenAPI, validVersions)
+	mustWrite(t, filepath.Join(dir, "resolution.yaml"), []byte(`version: 1
+overrides:
+  - contract_version: "2024-11"
+    transform: { request: [] }
+  - contract_version: "2024-11"
+    transform: { request: [] }
+`))
+	_, err := Load(dir)
+	var ve *ValidationError
+	if !errors.As(err, &ve) || ve.Field != "selector" {
+		t.Fatalf("want selector ValidationError, got %v", err)
+	}
+	if !strings.Contains(ve.Reason, "duplicate") {
+		t.Fatalf("reason = %q, want it to say %q for a duplicate version-only override", ve.Reason, "duplicate")
+	}
+}
+
 // TestLookupRoute covers the bundle's route-membership check used by the
 // proxy as the first-pass routing gate. Path-method pairs that any contract
 // binds must hit (and return a non-nil *Contract); everything else (unknown
