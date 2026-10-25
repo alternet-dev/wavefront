@@ -1,13 +1,18 @@
 package bundlegen
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"math"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/alternet-dev/wavefront/internal/transform"
+	"gopkg.in/yaml.v3"
 )
 
 // Confidence labels how trustworthy a drafted stanza is. Confident stanzas
@@ -69,6 +74,8 @@ const (
 	SignalKindCaseRename SignalKind = "case-rename"
 	SignalKindSameType   SignalKind = "same-type"
 	SignalKindNoName     SignalKind = "no-name-signal"
+	SignalKindSimilarity SignalKind = "name-similarity"
+	SignalKindIntent     SignalKind = "operator-intent"
 )
 
 // Signal is one structural observation the drafter recorded about a
@@ -120,6 +127,17 @@ func SameTypeSignal(t string) Signal { return Signal{Kind: SignalKindSameType, V
 // at all (same type but otherwise unrelated identifiers).
 func NoNameSignal() Signal { return Signal{Kind: SignalKindNoName} }
 
+// NameSimilaritySignal records a non-exact normalized-name match that met the
+// caller's confidence threshold. The value is rounded only for presentation;
+// matching itself retains the full score.
+func NameSimilaritySignal(score float64) Signal {
+	return Signal{Kind: SignalKindSimilarity, Value: fmt.Sprintf("%.3f", score)}
+}
+
+// OperatorIntentSignal records that an explicit operator-authored mapping,
+// rather than a heuristic, selected a rename.
+func OperatorIntentSignal() Signal { return Signal{Kind: SignalKindIntent} }
+
 // StanzaProposal is one drafted transform stanza, before any YAML
 // rendering. Verb is the canonical transform.Kind that selects which
 // StanzaArgs implementer is held in Args; Signals records the structural
@@ -155,6 +173,64 @@ type ShimProposal struct {
 	Notes              []string
 }
 
+// RenameIntent is one operator-authored old-to-new top-level field mapping.
+// A mapping applies to any request or response direction in the compared
+// OpenAPI pair where both fields exist and have the same primitive type.
+type RenameIntent struct {
+	From string `yaml:"from"`
+	To   string `yaml:"to"`
+}
+
+// DraftOptions controls heuristic rename detection. RenameConfidence is a
+// normalized edit-similarity threshold from 0 to 1; 1 preserves the historic
+// exact case/separator-normalized behavior. Strict suppresses heuristics but
+// still permits explicit RenameIntents.
+type DraftOptions struct {
+	RenameConfidence float64
+	Strict           bool
+	RenameIntents    []RenameIntent
+}
+
+// LoadRenameIntents decodes a versioned operator intent file. Intent files are
+// deliberately invocation input, not bundle state: they apply only to the
+// OpenAPI pair the caller supplies to DraftShimWithOptions.
+func LoadRenameIntents(data []byte) ([]RenameIntent, error) {
+	var file struct {
+		Version int            `yaml:"version"`
+		Renames []RenameIntent `yaml:"renames"`
+	}
+	dec := yaml.NewDecoder(bytes.NewReader(data))
+	dec.KnownFields(true)
+	if err := dec.Decode(&file); err != nil {
+		return nil, fmt.Errorf("parse rename intent: %w", err)
+	}
+	if err := dec.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return nil, fmt.Errorf("parse rename intent: multiple YAML documents are not supported")
+		}
+		return nil, fmt.Errorf("parse rename intent: %w", err)
+	}
+	if file.Version != 1 {
+		return nil, fmt.Errorf("rename intent has unsupported version %d (want 1)", file.Version)
+	}
+	if len(file.Renames) == 0 {
+		return nil, fmt.Errorf("rename intent has no renames")
+	}
+	froms := make(map[string]bool, len(file.Renames))
+	tos := make(map[string]bool, len(file.Renames))
+	for _, rename := range file.Renames {
+		if rename.From == "" || rename.To == "" {
+			return nil, fmt.Errorf("rename intent entries require non-empty from and to")
+		}
+		if froms[rename.From] || tos[rename.To] {
+			return nil, fmt.Errorf("rename intent entries must map each from and to field at most once")
+		}
+		froms[rename.From] = true
+		tos[rename.To] = true
+	}
+	return file.Renames, nil
+}
+
 // DraftShim compares two OpenAPI documents — the frozen "from" contract
 // and the drifted "to" contract — and proposes a transform-shim override
 // that bridges them. It detects four change classes at the request and
@@ -177,20 +253,25 @@ type ShimProposal struct {
 // properties only; nested objects, arrays, and oneOf/allOf are not yet
 // supported.
 func DraftShim(fromOpenAPI, toOpenAPI []byte) (*ShimProposal, error) {
-	return draftShim(fromOpenAPI, toOpenAPI, false)
+	return DraftShimWithOptions(fromOpenAPI, toOpenAPI, DraftOptions{RenameConfidence: 1})
 }
 
-// DraftShimStrict is the operator escape hatch: it suppresses every
-// confident case-rename match and reports each removed/added pair as a
-// candidate instead. Use when the drafter's confidence is itself the
-// thing in question — for example when reviewing a high-stakes contract
-// drift and an auto-rename would short-circuit a decision the operator
-// wants to make.
+// DraftShimStrict is the operator escape hatch: it suppresses every heuristic
+// rename and reports each non-intent removed/added pair as a candidate instead.
+// Use when the drafter's confidence is itself the thing in question — for
+// example when reviewing a high-stakes contract drift and an auto-rename would
+// short-circuit a decision the operator wants to make.
 func DraftShimStrict(fromOpenAPI, toOpenAPI []byte) (*ShimProposal, error) {
-	return draftShim(fromOpenAPI, toOpenAPI, true)
+	return DraftShimWithOptions(fromOpenAPI, toOpenAPI, DraftOptions{RenameConfidence: 1, Strict: true})
 }
 
-func draftShim(fromOpenAPI, toOpenAPI []byte, strict bool) (*ShimProposal, error) {
+// DraftShimWithOptions compares two OpenAPI documents and applies the supplied
+// heuristic and operator-intent controls. Explicit intents always take
+// precedence over heuristic matching.
+func DraftShimWithOptions(fromOpenAPI, toOpenAPI []byte, opts DraftOptions) (*ShimProposal, error) {
+	if math.IsNaN(opts.RenameConfidence) || math.IsInf(opts.RenameConfidence, 0) || opts.RenameConfidence < 0 || opts.RenameConfidence > 1 {
+		return nil, fmt.Errorf("rename confidence must be between 0 and 1")
+	}
 	fromDoc, err := parseOpenAPIDoc(fromOpenAPI)
 	if err != nil {
 		return nil, fmt.Errorf("parse from: %w", err)
@@ -208,6 +289,9 @@ func draftShim(fromOpenAPI, toOpenAPI []byte, strict bool) (*ShimProposal, error
 	if err != nil {
 		return nil, fmt.Errorf("resolve to schemas: %w", err)
 	}
+	if err := validateRenameIntents(fromReq, toReq, fromResp, toResp, opts.RenameIntents); err != nil {
+		return nil, err
+	}
 
 	p := &ShimProposal{
 		FromVersion: fromDoc.Info.Version,
@@ -216,19 +300,72 @@ func draftShim(fromOpenAPI, toOpenAPI []byte, strict bool) (*ShimProposal, error
 
 	// Request direction: old client speaks `fromReq`, backend expects `toReq`.
 	// The transform reshapes the body from the "from" side to the "to" side.
-	reqProps, reqCands, reqNotes := draftDirection(fromReq, toReq, "request", strict)
+	reqProps, reqCands, reqNotes, err := draftDirection(fromReq, toReq, "request", opts)
+	if err != nil {
+		return nil, err
+	}
 	p.Request = reqProps
 	p.RequestCandidates = reqCands
 	p.Notes = append(p.Notes, reqNotes...)
 
 	// Response direction: backend returns `toResp`, old client expects
 	// `fromResp`. The transform reshapes from `toResp` to `fromResp`.
-	respProps, respCands, respNotes := draftDirection(toResp, fromResp, "response", strict)
+	respOpts := opts
+	respOpts.RenameIntents = invertRenameIntents(opts.RenameIntents)
+	respProps, respCands, respNotes, err := draftDirection(toResp, fromResp, "response", respOpts)
+	if err != nil {
+		return nil, err
+	}
 	p.Response = respProps
 	p.ResponseCandidates = respCands
 	p.Notes = append(p.Notes, respNotes...)
 
 	return p, nil
+}
+
+// validateRenameIntents checks the old-to-new mapping in its natural request
+// direction and its reversed response direction. An entry may apply to one
+// direction only, but it may not silently name a field on only one side of a
+// direction or bridge different primitive types.
+func validateRenameIntents(fromReq, toReq, fromResp, toResp *schema, intents []RenameIntent) error {
+	for _, intent := range intents {
+		requestApplies, err := validateRenameIntentDirection("request", intent.From, intent.To, topLevelProperties(fromReq), topLevelProperties(toReq))
+		if err != nil {
+			return err
+		}
+		responseApplies, err := validateRenameIntentDirection("response", intent.To, intent.From, topLevelProperties(toResp), topLevelProperties(fromResp))
+		if err != nil {
+			return err
+		}
+		if !requestApplies && !responseApplies {
+			return fmt.Errorf("rename intent %q -> %q does not match a request or response direction", intent.From, intent.To)
+		}
+	}
+	return nil
+}
+
+func validateRenameIntentDirection(side, fromName, toName string, fromFields, toFields map[string]*schema) (bool, error) {
+	fromField, hasFrom := fromFields[fromName]
+	toField, hasTo := toFields[toName]
+	if !hasFrom && !hasTo {
+		return false, nil
+	}
+	if !hasFrom || !hasTo {
+		return false, fmt.Errorf("rename intent %q -> %q names a %s field on only one side", fromName, toName, side)
+	}
+	fromType, toType := primitiveType(fromField), primitiveType(toField)
+	if fromType == "" || toType == "" || fromType != toType {
+		return false, fmt.Errorf("rename intent %q -> %q must map same primitive types on the %s", fromName, toName, side)
+	}
+	return true, nil
+}
+
+func invertRenameIntents(intents []RenameIntent) []RenameIntent {
+	inverted := make([]RenameIntent, len(intents))
+	for i, intent := range intents {
+		inverted[i] = RenameIntent{From: intent.To, To: intent.From}
+	}
+	return inverted
 }
 
 // parseOpenAPIDoc decodes a raw OpenAPI document into the local openAPI
@@ -300,11 +437,9 @@ func resolveOperationSchema(schemas map[string]*schema, name string) (*schema, e
 // changes the transform verbs cover, candidate pairs for the ambiguous
 // ones, and notes for everything it cannot mechanically express.
 //
-// When `strict` is set, the confident case-rename match is suppressed —
-// every removed/added primitive-type pair is reported as a candidate
-// instead of an auto-rename. The operator escape hatch when the
-// drafter's confidence is itself the thing in question.
-func draftDirection(from, to *schema, side string, strict bool) ([]StanzaProposal, []CandidatePair, []string) {
+// Strict mode suppresses heuristic matching, while explicit operator intent
+// still selects its declared pairs.
+func draftDirection(from, to *schema, side string, opts DraftOptions) ([]StanzaProposal, []CandidatePair, []string, error) {
 	fromFields := topLevelProperties(from)
 	toFields := topLevelProperties(to)
 
@@ -325,17 +460,14 @@ func draftDirection(from, to *schema, side string, strict bool) ([]StanzaProposa
 		}
 	}
 
-	var (
-		renames                          []renamePair
-		unmatchedRemoved, unmatchedAdded []string
-	)
-	if strict {
-		// No confident matches; everything is fair game for the
-		// ambiguous pass below.
-		unmatchedRemoved = append(unmatchedRemoved, removed...)
-		unmatchedAdded = append(unmatchedAdded, added...)
-	} else {
-		renames, unmatchedRemoved, unmatchedAdded = matchCaseRenames(removed, added, fromFields, toFields)
+	renames, unmatchedRemoved, unmatchedAdded, err := matchIntentRenames(removed, added, fromFields, toFields, opts.RenameIntents)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	if !opts.Strict {
+		var heuristicRenames []renamePair
+		heuristicRenames, unmatchedRemoved, unmatchedAdded = matchHeuristicRenames(unmatchedRemoved, unmatchedAdded, fromFields, toFields, opts.RenameConfidence)
+		renames = append(renames, heuristicRenames...)
 	}
 
 	// Of the still-unmatched removals/additions, pair any with a shared
@@ -351,7 +483,7 @@ func draftDirection(from, to *schema, side string, strict bool) ([]StanzaProposa
 			Verb:       transform.KindRename,
 			Args:       RenameArgs{From: r.from, To: r.to},
 			Confidence: Confident,
-			Signals:    []Signal{CaseRenameSignal(), SameTypeSignal(primitiveType(fromFields[r.from]))},
+			Signals:    r.signals,
 		})
 	}
 
@@ -393,7 +525,7 @@ func draftDirection(from, to *schema, side string, strict bool) ([]StanzaProposa
 			side, name))
 	}
 
-	return props, candidates, notes
+	return props, candidates, notes, nil
 }
 
 // matchAmbiguousPairs pairs leftover removed and added fields by shared
@@ -451,50 +583,110 @@ func matchAmbiguousPairs(removed, added []string, fromSchemas, toSchemas map[str
 	return pairs, unmatchedRemoved, unmatchedAdded
 }
 
-// renamePair is a single confident rename: the field name in the `from`
-// shape and the field name it should take in the `to` shape.
-type renamePair struct{ from, to string }
+// renamePair is a single confident rename and the evidence that selected it.
+type renamePair struct {
+	from, to string
+	signals  []Signal
+}
 
-// matchCaseRenames pairs a removed field with an added field when their
-// case-normalized names are identical and they share a primitive type.
-// Anything else is left unmatched for the add/note behavior.
-//
-// The matching is one-to-one and order-stable: each removed field is
-// considered once, against the still-unconsumed additions, in declared
-// order. The current scoring is binary — a pair either matches both
-// signals (normalized name + primitive type) or it doesn't.
-func matchCaseRenames(removed, added []string, fromSchemas, toSchemas map[string]*schema) ([]renamePair, []string, []string) {
+// matchIntentRenames honors explicit, validated mappings before any heuristic
+// can consume their fields. An intent must correspond to a removed/added pair
+// on the direction where it applies; otherwise it would generate a transform
+// that does not describe this diff.
+func matchIntentRenames(removed, added []string, fromSchemas, toSchemas map[string]*schema, intents []RenameIntent) ([]renamePair, []string, []string, error) {
+	removedSet := makeSet(removed)
+	addedSet := makeSet(added)
+	usedRemoved := make(map[string]bool)
+	usedAdded := make(map[string]bool)
+	var pairs []renamePair
+	for _, intent := range intents {
+		_, hasFrom := fromSchemas[intent.From]
+		_, hasTo := toSchemas[intent.To]
+		if !hasFrom && !hasTo {
+			continue
+		}
+		if !hasFrom || !hasTo {
+			return nil, nil, nil, fmt.Errorf("rename intent %q -> %q does not describe a removed/added pair", intent.From, intent.To)
+		}
+		if !removedSet[intent.From] && !addedSet[intent.To] {
+			// This direction contains both names but has no rename-shaped
+			// change. The same intent can still apply to the other direction.
+			continue
+		}
+		if !removedSet[intent.From] || !addedSet[intent.To] {
+			return nil, nil, nil, fmt.Errorf("rename intent %q -> %q does not describe a removed/added pair", intent.From, intent.To)
+		}
+		if usedRemoved[intent.From] || usedAdded[intent.To] {
+			return nil, nil, nil, fmt.Errorf("rename intent %q -> %q conflicts with another mapping", intent.From, intent.To)
+		}
+		pairs = append(pairs, renamePair{
+			from: intent.From,
+			to:   intent.To,
+			signals: []Signal{
+				OperatorIntentSignal(),
+				SameTypeSignal(primitiveType(fromSchemas[intent.From])),
+			},
+		})
+		usedRemoved[intent.From] = true
+		usedAdded[intent.To] = true
+	}
+	var unmatchedRemoved, unmatchedAdded []string
+	for _, name := range removed {
+		if !usedRemoved[name] {
+			unmatchedRemoved = append(unmatchedRemoved, name)
+		}
+	}
+	for _, name := range added {
+		if !usedAdded[name] {
+			unmatchedAdded = append(unmatchedAdded, name)
+		}
+	}
+	return pairs, unmatchedRemoved, unmatchedAdded, nil
+}
+
+// matchHeuristicRenames pairs same-type fields whose normalized edit
+// similarity reaches threshold. At the default threshold of 1, this is the
+// historic case- and separator-normalized exact match. Each source field
+// chooses its highest-scoring still-available target, with source order and
+// target order breaking ties deterministically.
+func matchHeuristicRenames(removed, added []string, fromSchemas, toSchemas map[string]*schema, threshold float64) ([]renamePair, []string, []string) {
 	usedAdded := make(map[string]bool)
 	var pairs []renamePair
 	var unmatchedRemoved []string
 
 	for _, r := range removed {
-		normR := normalizeFieldName(r)
 		fromT := primitiveType(fromSchemas[r])
-		if normR == "" || fromT == "" {
+		if fromT == "" {
 			unmatchedRemoved = append(unmatchedRemoved, r)
 			continue
 		}
 		matched := ""
+		bestScore := -1.0
 		for _, a := range added {
 			if usedAdded[a] {
-				continue
-			}
-			if normalizeFieldName(a) != normR {
 				continue
 			}
 			toT := primitiveType(toSchemas[a])
 			if toT == "" || toT != fromT {
 				continue
 			}
-			matched = a
-			break
+			score := nameSimilarity(r, a)
+			if score >= threshold && score > bestScore {
+				matched = a
+				bestScore = score
+			}
 		}
 		if matched == "" {
 			unmatchedRemoved = append(unmatchedRemoved, r)
 			continue
 		}
-		pairs = append(pairs, renamePair{from: r, to: matched})
+		signals := []Signal{SameTypeSignal(fromT)}
+		if normalizeFieldName(r) == normalizeFieldName(matched) {
+			signals = append([]Signal{CaseRenameSignal()}, signals...)
+		} else {
+			signals = append([]Signal{NameSimilaritySignal(bestScore)}, signals...)
+		}
+		pairs = append(pairs, renamePair{from: r, to: matched, signals: signals})
 		usedAdded[matched] = true
 	}
 
@@ -505,6 +697,48 @@ func matchCaseRenames(removed, added []string, fromSchemas, toSchemas map[string
 		}
 	}
 	return pairs, unmatchedRemoved, unmatchedAdded
+}
+
+// nameSimilarity returns the normalized Levenshtein similarity of two field
+// names after case and separator normalization. It returns 1 for equal names
+// and 0 for maximally dissimilar names of the same maximum length.
+func nameSimilarity(a, b string) float64 {
+	aRunes := []rune(normalizeFieldName(a))
+	bRunes := []rune(normalizeFieldName(b))
+	maxLen := len(aRunes)
+	if len(bRunes) > maxLen {
+		maxLen = len(bRunes)
+	}
+	if maxLen == 0 {
+		return 1
+	}
+	previous := make([]int, len(bRunes)+1)
+	for j := range previous {
+		previous[j] = j
+	}
+	for i, ar := range aRunes {
+		current := make([]int, len(bRunes)+1)
+		current[0] = i + 1
+		for j, br := range bRunes {
+			cost := 0
+			if ar != br {
+				cost = 1
+			}
+			current[j+1] = minInt(previous[j+1]+1, current[j]+1, previous[j]+cost)
+		}
+		previous = current
+	}
+	return float64(maxLen-previous[len(bRunes)]) / float64(maxLen)
+}
+
+func minInt(values ...int) int {
+	smallest := values[0]
+	for _, value := range values[1:] {
+		if value < smallest {
+			smallest = value
+		}
+	}
+	return smallest
 }
 
 // normalizeFieldName folds a field name to its case- and separator-free
