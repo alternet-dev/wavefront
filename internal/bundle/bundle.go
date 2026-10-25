@@ -236,9 +236,9 @@ func (b *Bundle) LookupRoute(path, method string) (*Contract, bool) {
 //   - path/method is unknown to every version (this case is normally
 //     handled before negotiate by the proxy's route gate using LookupRoute).
 //
-// For a single-route bundle every version has exactly one contract, so
-// Lookup(c.Route(), c.Method(), c.ContractVersion()) trivially returns c —
-// the degenerate case continues to work without special-casing.
+// In a single-route bundle, a three-argument lookup returns that version's
+// canonical contract. Pass selectors to resolve a selector-specific variant,
+// which may carry different transforms or a different target.
 func (b *Bundle) Lookup(path, method, version string, selectors ...Selectors) (*Contract, bool) {
 	cs, ok := b.byVersion[version]
 	if !ok {

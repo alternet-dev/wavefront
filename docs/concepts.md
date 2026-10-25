@@ -13,10 +13,11 @@ declarative edge so the internal API stays singular and free to evolve.
 
 ## The selector axis
 
-Every request carries a **selector** that picks which transform profile
-applies. Today `wavefront` resolves on one selector — the contract
-**version** — but the model is general: the same engine, bundle format, and
-transform vocabulary are designed to extend to other selectors.
+Every request carries selectors that pick which transform profile applies.
+`wavefront` always resolves on the contract **version** and can refine that
+resolution with optional `profile`, `tenant`, and `cohort` selectors. The
+model is general: the same engine, bundle format, and transform vocabulary
+can extend to other selectors.
 
 - **version** — the client's external contract version. The required base
   selector.
