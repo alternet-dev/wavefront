@@ -576,6 +576,244 @@ overrides:
 	}
 }
 
+func TestLookupSelectsProfileTenantAndCohortResolution(t *testing.T) {
+	cases := []struct {
+		name, field, value string
+		selectors          Selectors
+	}{
+		{"profile", "profile", "mobile", Selectors{Profile: "mobile"}},
+		{"tenant", "tenant", "partner-a", Selectors{Tenant: "partner-a"}},
+		{"cohort", "cohort", "canary", Selectors{Cohort: "canary"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := writeBundle(t, fdsBytes(t), validOpenAPI, validVersions)
+			resolution := "version: 1\noverrides:\n  - contract_version: \"2024-11\"\n    transform:\n      response:\n        - default: { field: text, value: base }\n  - contract_version: \"2024-11\"\n    " + tc.field + ": " + tc.value + "\n    transform:\n      response:\n        - default: { field: text, value: " + tc.value + " }\n"
+			mustWrite(t, filepath.Join(dir, "resolution.yaml"), []byte(resolution))
+			b, err := Load(dir)
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			c, ok := b.Lookup("/v3/me/session", "GET", "2024-11", tc.selectors)
+			if !ok {
+				t.Fatal("Lookup: no contract")
+			}
+			if len(c.ResponseOps()) != 1 || c.ResponseOps()[0].Value.JSON() != tc.value {
+				t.Fatalf("response ops = %#v, want default text=%q", c.ResponseOps(), tc.value)
+			}
+			if c, ok := b.Lookup("/v3/me/session", "GET", "2024-11", Selectors{}); !ok || len(c.ResponseOps()) != 1 || c.ResponseOps()[0].Value.JSON() != "base" {
+				t.Fatalf("version-only fallback = %#v, %v; want base transform", c, ok)
+			}
+		})
+	}
+}
+
+func TestLookupSelectorChoosesRouteOverride(t *testing.T) {
+	dir := writeBundle(t, fdsBytes(t), validOpenAPI, validVersions)
+	mustWrite(t, filepath.Join(dir, "resolution.yaml"), []byte(`version: 1
+overrides:
+  - contract_version: "2024-11"
+    route:
+      target: default-backend
+  - contract_version: "2024-11"
+    profile: mobile
+    route:
+      target: mobile-backend
+`))
+	b, err := Load(dir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	mobile, ok := b.Lookup("/v3/me/session", "GET", "2024-11", Selectors{Profile: "mobile"})
+	if !ok {
+		t.Fatal("Lookup mobile: no contract")
+	}
+	if got := mobile.Target(); got != "mobile-backend" {
+		t.Fatalf("mobile target = %q, want %q", got, "mobile-backend")
+	}
+
+	fallback, ok := b.Lookup("/v3/me/session", "GET", "2024-11", Selectors{Profile: "web"})
+	if !ok {
+		t.Fatal("Lookup fallback: no contract")
+	}
+	if got := fallback.Target(); got != "default-backend" {
+		t.Fatalf("fallback target = %q, want %q", got, "default-backend")
+	}
+}
+
+func TestLookupSelectorVariantsAreOrderIndependent(t *testing.T) {
+	orders := map[string]string{
+		"mobile-first": `  - contract_version: "2024-11"
+    profile: mobile
+    route: { target: mobile-backend }
+  - contract_version: "2024-11"
+    profile: web
+    route: { target: web-backend }
+`,
+		"web-first": `  - contract_version: "2024-11"
+    profile: web
+    route: { target: web-backend }
+  - contract_version: "2024-11"
+    profile: mobile
+    route: { target: mobile-backend }
+`,
+	}
+	for name, variants := range orders {
+		t.Run(name, func(t *testing.T) {
+			dir := writeBundle(t, fdsBytes(t), validOpenAPI, validVersions)
+			resolution := `version: 1
+overrides:
+  - contract_version: "2024-11"
+    route: { target: default-backend }
+` + variants
+			mustWrite(t, filepath.Join(dir, "resolution.yaml"), []byte(resolution))
+			b, err := Load(dir)
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			for _, tc := range []struct {
+				profile, want string
+			}{
+				{"mobile", "mobile-backend"},
+				{"web", "web-backend"},
+				{"tv", "default-backend"},
+			} {
+				c, ok := b.Lookup("/v3/me/session", "GET", "2024-11", Selectors{Profile: tc.profile})
+				if !ok {
+					t.Fatalf("Lookup profile %q: no contract", tc.profile)
+				}
+				if got := c.Target(); got != tc.want {
+					t.Errorf("Lookup profile %q target = %q, want %q", tc.profile, got, tc.want)
+				}
+			}
+		})
+	}
+}
+
+func TestLoadResolutionOverlappingSelectorsRejected(t *testing.T) {
+	dir := writeBundle(t, fdsBytes(t), validOpenAPI, validVersions)
+	mustWrite(t, filepath.Join(dir, "resolution.yaml"), []byte(`version: 1
+overrides:
+  - contract_version: "2024-11"
+    profile: mobile
+    transform: { request: [] }
+  - contract_version: "2024-11"
+    tenant: partner-a
+    transform: { request: [] }
+`))
+	_, err := Load(dir)
+	var ve *ValidationError
+	if !errors.As(err, &ve) || ve.Field != "selector" {
+		t.Fatalf("want selector ValidationError, got %v", err)
+	}
+}
+
+// TestLookupMultiAxisSelectorConjunctiveAndFallback pins the two sides of
+// selector resolution that single-axis cases cannot: a rule naming more
+// than one axis requires EVERY named axis to match the request, and a
+// request whose selectors do not match any variant falls back to the
+// version-only contract rather than returning no match.
+func TestLookupMultiAxisSelectorConjunctiveAndFallback(t *testing.T) {
+	dir := writeBundle(t, fdsBytes(t), validOpenAPI, validVersions)
+	mustWrite(t, filepath.Join(dir, "resolution.yaml"), []byte(`version: 1
+overrides:
+  - contract_version: "2024-11"
+    transform:
+      response:
+        - default: { field: text, value: base }
+  - contract_version: "2024-11"
+    profile: mobile
+    tenant: partner-a
+    transform:
+      response:
+        - default: { field: text, value: mobile-partner-a }
+`))
+	b, err := Load(dir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	cases := []struct {
+		name string
+		sel  Selectors
+		want string
+	}{
+		{"both-axes-match", Selectors{Profile: "mobile", Tenant: "partner-a"}, "mobile-partner-a"},
+		{"profile-matches-tenant-missing", Selectors{Profile: "mobile"}, "base"},
+		{"profile-matches-tenant-wrong", Selectors{Profile: "mobile", Tenant: "partner-b"}, "base"},
+		{"profile-wrong", Selectors{Profile: "desktop", Tenant: "partner-a"}, "base"},
+		{"all-empty", Selectors{}, "base"},
+		{"cohort-set-but-not-named-by-rule", Selectors{Profile: "mobile", Tenant: "partner-a", Cohort: "canary"}, "mobile-partner-a"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c, ok := b.Lookup("/v3/me/session", "GET", "2024-11", tc.sel)
+			if !ok {
+				t.Fatal("Lookup: no contract")
+			}
+			if len(c.ResponseOps()) != 1 || c.ResponseOps()[0].Value.JSON() != tc.want {
+				t.Fatalf("response ops = %#v, want default text=%q", c.ResponseOps(), tc.want)
+			}
+		})
+	}
+}
+
+// TestLoadResolutionBlankSelectorFieldRejected pins that every explicit
+// blank selector spelling, including YAML null, is a load error rather than
+// silently acting as the version-only wildcard.
+func TestLoadResolutionBlankSelectorFieldRejected(t *testing.T) {
+	for _, field := range []string{"profile", "tenant", "cohort"} {
+		for _, value := range []struct {
+			name, yaml string
+		}{
+			{"empty-string", `""`},
+			{"implicit-null", ""},
+			{"explicit-null", "null"},
+		} {
+			t.Run(field+"/"+value.name, func(t *testing.T) {
+				dir := writeBundle(t, fdsBytes(t), validOpenAPI, validVersions)
+				mustWrite(t, filepath.Join(dir, "resolution.yaml"), []byte(
+					"version: 1\noverrides:\n  - contract_version: \"2024-11\"\n    "+field+": "+value.yaml+"\n    transform: { request: [] }\n",
+				))
+				_, err := Load(dir)
+				var ve *ValidationError
+				if !errors.As(err, &ve) || ve.Field != "selector" {
+					t.Fatalf("want selector ValidationError, got %v", err)
+				}
+				if !strings.Contains(ve.Reason, field) || !strings.Contains(ve.Reason, "blank") {
+					t.Fatalf("reason = %q, want it to name %q and %q", ve.Reason, field, "blank")
+				}
+			})
+		}
+	}
+}
+
+// TestLoadResolutionDuplicateVersionOnlyRejectedAsDuplicate pins that two
+// version-only resolution overrides for the same contract are rejected as a
+// duplicate, not merely as an overlapping-selector tuple. Both failure modes
+// are an ambiguous bundle, but a duplicate version-only entry is a straight
+// configuration mistake; the reason text must say "duplicate" so an operator
+// debugging a long resolution.yaml does not scan selector tuples for the
+// axis the two rules disagree on when there is no selector tuple at all.
+func TestLoadResolutionDuplicateVersionOnlyRejectedAsDuplicate(t *testing.T) {
+	dir := writeBundle(t, fdsBytes(t), validOpenAPI, validVersions)
+	mustWrite(t, filepath.Join(dir, "resolution.yaml"), []byte(`version: 1
+overrides:
+  - contract_version: "2024-11"
+    transform: { request: [] }
+  - contract_version: "2024-11"
+    transform: { request: [] }
+`))
+	_, err := Load(dir)
+	var ve *ValidationError
+	if !errors.As(err, &ve) || ve.Field != "selector" {
+		t.Fatalf("want selector ValidationError, got %v", err)
+	}
+	if !strings.Contains(ve.Reason, "duplicate") {
+		t.Fatalf("reason = %q, want it to say %q for a duplicate version-only override", ve.Reason, "duplicate")
+	}
+}
+
 // TestLookupRoute covers the bundle's route-membership check used by the
 // proxy as the first-pass routing gate. Path-method pairs that any contract
 // binds must hit (and return a non-nil *Contract); everything else (unknown

@@ -32,12 +32,12 @@ import (
 //     and consistent with the rule that version errors are 400 while
 //     routing errors are 404.
 //   - all three match → return the contract.
-func Resolve(b *bundle.Bundle, path, method, headerValue string) (*bundle.Contract, *wireerror.Error) {
+func Resolve(b *bundle.Bundle, path, method, headerValue string, selectors ...bundle.Selectors) (*bundle.Contract, *wireerror.Error) {
 	v := strings.TrimSpace(headerValue)
 	if v == "" {
 		return nil, wireerror.UnsupportedContractVersion("missing contract-version header")
 	}
-	c, ok := b.Lookup(path, method, v)
+	c, ok := b.Lookup(path, method, v, selectors...)
 	if ok {
 		return c, nil
 	}

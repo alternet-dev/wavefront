@@ -160,9 +160,26 @@ func (c *Contract) Strict() bool { return c.strict }
 // per-version lookups that LookupRoute, Versions, and resolveChains all
 // rely on.
 type Bundle struct {
-	contracts []*Contract
-	byVersion map[string][]*Contract
-	files     *protoregistry.Files
+	contracts        []*Contract
+	byVersion        map[string][]*Contract
+	selectorVariants map[contractKey][]selectorVariant
+	files            *protoregistry.Files
+}
+
+// Selectors are the optional, opaque request attributes that further narrow
+// resolution within a contract version. They are not identities: wavefront
+// neither authenticates nor authorizes their values.
+type Selectors struct {
+	Profile string
+	Tenant  string
+	Cohort  string
+}
+
+type contractKey struct{ version, route, method string }
+
+type selectorVariant struct {
+	selectors Selectors
+	contract  *Contract
 }
 
 // Contract returns the first contract in the bundle whose contract_version
@@ -219,20 +236,36 @@ func (b *Bundle) LookupRoute(path, method string) (*Contract, bool) {
 //   - path/method is unknown to every version (this case is normally
 //     handled before negotiate by the proxy's route gate using LookupRoute).
 //
-// For a single-route bundle every version has exactly one contract, so
-// Lookup(c.Route(), c.Method(), c.ContractVersion()) trivially returns c —
-// the degenerate case continues to work without special-casing.
-func (b *Bundle) Lookup(path, method, version string) (*Contract, bool) {
+// In a single-route bundle, a three-argument lookup returns that version's
+// canonical contract. Pass selectors to resolve a selector-specific variant,
+// which may carry different transforms or a different target.
+func (b *Bundle) Lookup(path, method, version string, selectors ...Selectors) (*Contract, bool) {
 	cs, ok := b.byVersion[version]
 	if !ok {
 		return nil, false
 	}
+	var selected Selectors
+	if len(selectors) > 0 {
+		selected = selectors[0]
+	}
 	for _, c := range cs {
 		if c.route == path && c.method == method {
+			key := contractKey{version: version, route: path, method: method}
+			for _, variant := range b.selectorVariants[key] {
+				if selectorMatches(variant.selectors, selected) {
+					return variant.contract, true
+				}
+			}
 			return c, true
 		}
 	}
 	return nil, false
+}
+
+func selectorMatches(rule, request Selectors) bool {
+	return (rule.Profile == "" || rule.Profile == request.Profile) &&
+		(rule.Tenant == "" || rule.Tenant == request.Tenant) &&
+		(rule.Cohort == "" || rule.Cohort == request.Cohort)
 }
 
 // Versions returns the contract versions present in the bundle, sorted
@@ -308,6 +341,9 @@ type yamlResolutionFile struct {
 
 type yamlResolution struct {
 	ContractVersion string         `yaml:"contract_version"`
+	Profile         yaml.Node      `yaml:"profile"`
+	Tenant          yaml.Node      `yaml:"tenant"`
+	Cohort          yaml.Node      `yaml:"cohort"`
 	Transform       *yamlTransform `yaml:"transform"`
 	Route           *yamlRoute     `yaml:"route"`
 }
@@ -332,11 +368,12 @@ var allowedMethods = map[string]bool{
 // loadResolution reads the optional operator-owned resolution.yaml at the
 // bundle root. An absent file yields an empty map — no version has an
 // override. Strict decode; the schema version must be 1. Each override must
-// set exactly one of transform or route.
-func loadResolution(dir string) (map[string]yamlResolution, error) {
+// set exactly one of transform or route. Optional profile, tenant, and cohort
+// fields are an exact-match selector tuple within the contract version.
+func loadResolution(dir string) (map[string][]yamlResolution, error) {
 	raw, err := os.ReadFile(filepath.Join(dir, fileResolution))
 	if errors.Is(err, fs.ErrNotExist) {
-		return map[string]yamlResolution{}, nil
+		return map[string][]yamlResolution{}, nil
 	}
 	if err != nil {
 		return nil, &ReadError{File: fileResolution, Err: err}
@@ -350,14 +387,27 @@ func loadResolution(dir string) (map[string]yamlResolution, error) {
 	if yr.Version != 1 {
 		return nil, &UnsupportedVersionError{Version: yr.Version}
 	}
-	out := make(map[string]yamlResolution, len(yr.Overrides))
+	out := make(map[string][]yamlResolution, len(yr.Overrides))
 	for _, ov := range yr.Overrides {
 		cv := strings.TrimSpace(ov.ContractVersion)
 		if cv == "" {
 			return nil, &ValidationError{Field: "contract_version", Reason: "resolution override must name a contract version"}
 		}
-		if _, dup := out[cv]; dup {
-			return nil, &ValidationError{Contract: cv, Field: "contract_version", Reason: "duplicate resolution override"}
+		selectors, serr := resolutionSelectors(ov)
+		if serr != nil {
+			return nil, &ValidationError{Contract: cv, Field: "selector", Reason: serr.Error()}
+		}
+		for _, existing := range out[cv] {
+			existingSelectors, _ := resolutionSelectors(existing)
+			// The version-only rule is the intentional fallback. Every
+			// selector rule overlaps it by definition, but it is never a
+			// competing candidate because Lookup tries variants first.
+			if selectorEmpty(selectors) && selectorEmpty(existingSelectors) {
+				return nil, &ValidationError{Contract: cv, Field: "selector", Reason: "duplicate version-only resolution override"}
+			}
+			if !selectorEmpty(selectors) && !selectorEmpty(existingSelectors) && selectorOverlap(selectors, existingSelectors) {
+				return nil, &ValidationError{Contract: cv, Field: "selector", Reason: "ambiguous resolution overrides can match the same request"}
+			}
 		}
 		hasTransform := ov.Transform != nil
 		hasRoute := ov.Route != nil
@@ -367,9 +417,48 @@ func loadResolution(dir string) (map[string]yamlResolution, error) {
 		if hasRoute && strings.TrimSpace(ov.Route.Target) == "" {
 			return nil, &ValidationError{Contract: cv, Field: "route.target", Reason: "route.target must name a target"}
 		}
-		out[cv] = ov
+		out[cv] = append(out[cv], ov)
 	}
 	return out, nil
+}
+
+func resolutionSelectors(ov yamlResolution) (Selectors, error) {
+	var s Selectors
+	for _, field := range []struct {
+		name string
+		in   yaml.Node
+		out  *string
+	}{
+		{"profile", ov.Profile, &s.Profile},
+		{"tenant", ov.Tenant, &s.Tenant},
+		{"cohort", ov.Cohort, &s.Cohort},
+	} {
+		if field.in.Kind == 0 {
+			continue
+		}
+		var value string
+		if err := field.in.Decode(&value); err != nil {
+			return Selectors{}, fmt.Errorf("%s must be a string: %w", field.name, err)
+		}
+		*field.out = strings.TrimSpace(value)
+		if *field.out == "" {
+			return Selectors{}, fmt.Errorf("%s must not be blank when set", field.name)
+		}
+	}
+	return s, nil
+}
+
+// selectorOverlap reports whether a request can satisfy both selector tuples.
+// The zero value on either side of an axis is a wildcard, so two matching
+// rules would leave the bundle with no deterministic resolution to choose.
+func selectorOverlap(a, b Selectors) bool {
+	return (a.Profile == "" || b.Profile == "" || a.Profile == b.Profile) &&
+		(a.Tenant == "" || b.Tenant == "" || a.Tenant == b.Tenant) &&
+		(a.Cohort == "" || b.Cohort == "" || a.Cohort == b.Cohort)
+}
+
+func selectorEmpty(s Selectors) bool {
+	return s == (Selectors{})
 }
 
 // Load reads, parses, validates, and resolves the bundle in dir. The bundle
@@ -440,6 +529,7 @@ func Load(dir string) (*Bundle, error) {
 	// distinguished by (route, method).
 	var contracts []*Contract
 	byVersion := make(map[string][]*Contract)
+	selectorVariants := make(map[contractKey][]selectorVariant)
 	// seen detects true duplicates: same version AND same (route, method).
 	// A multi-route layer with the same (route, method) listed twice — or
 	// two layers each claiming the same (version, route, method) — is
@@ -484,53 +574,6 @@ func Load(dir string) (*Bundle, error) {
 					return nil, &MessageNotFoundError{Contract: c.contractVersion, Message: name}
 				}
 			}
-			if ov, hasOverride := resolutionMap[c.contractVersion]; hasOverride {
-				if ov.Transform != nil {
-					reqOps, oerr := toOps(c.contractVersion, "request", ov.Transform.Request, reqMsg, respMsg)
-					if oerr != nil {
-						return nil, oerr
-					}
-					respOps, oerr := toOps(c.contractVersion, "response", ov.Transform.Response, reqMsg, respMsg)
-					if oerr != nil {
-						return nil, oerr
-					}
-					c.requestOps = reqOps
-					c.responseOps = respOps
-					c.transformTarget = strings.TrimSpace(ov.Transform.Target)
-					if len(ov.Transform.ErrorResponses) > 0 {
-						c.errorResponseOps = make(map[int][]transform.Op, len(ov.Transform.ErrorResponses))
-						for code, raw := range ov.Transform.ErrorResponses {
-							status, perr := strconv.Atoi(strings.TrimSpace(code))
-							if perr != nil {
-								return nil, &ValidationError{Contract: c.contractVersion, Field: "transform.error_responses", Reason: "status key " + code + " is not a number"}
-							}
-							name, declared := c.errorMessages[status]
-							if !declared {
-								return nil, &ValidationError{Contract: c.contractVersion, Field: "transform.error_responses", Reason: "status " + code + " has no error_messages binding to transform"}
-							}
-							ed, ferr := files.FindDescriptorByName(protoreflect.FullName(name))
-							if ferr != nil {
-								return nil, &MessageNotFoundError{Contract: c.contractVersion, Message: name}
-							}
-							emd, ok := ed.(protoreflect.MessageDescriptor)
-							if !ok {
-								return nil, &MessageNotFoundError{Contract: c.contractVersion, Message: name}
-							}
-							// The bound error message is the response cross-check target:
-							// rename.to / default.field validate against the error type,
-							// exactly as 2xx response ops validate against response_message.
-							ops, oerr := toOps(c.contractVersion, "response", raw, reqMsg, emd)
-							if oerr != nil {
-								return nil, oerr
-							}
-							c.errorResponseOps[status] = ops
-						}
-					}
-				} else {
-					// Route override — named target, no transform ops.
-					c.target = strings.TrimSpace(ov.Route.Target)
-				}
-			}
 			contracts = append(contracts, c)
 			byVersion[c.contractVersion] = append(byVersion[c.contractVersion], c)
 		}
@@ -543,11 +586,101 @@ func Load(dir string) (*Bundle, error) {
 		}
 	}
 
-	if cerr := resolveChains(contracts, byVersion); cerr != nil {
+	// Materialize the version-only rule on the canonical contract and each
+	// selector-specific rule as an immutable variant. Selection happens at
+	// request time, but every transform is descriptor-validated at bundle load.
+	allContracts := append([]*Contract(nil), contracts...)
+	for _, c := range contracts {
+		raw := *c
+		for _, ov := range resolutionMap[c.contractVersion] {
+			sel, _ := resolutionSelectors(ov) // loadResolution already validated it.
+			if selectorEmpty(sel) {
+				if err := applyResolution(c, ov, files); err != nil {
+					return nil, err
+				}
+				continue
+			}
+			variant := raw
+			if err := applyResolution(&variant, ov, files); err != nil {
+				return nil, err
+			}
+			v := &variant
+			key := contractKey{version: c.contractVersion, route: c.route, method: c.method}
+			selectorVariants[key] = append(selectorVariants[key], selectorVariant{selectors: sel, contract: v})
+			allContracts = append(allContracts, v)
+		}
+	}
+
+	if cerr := resolveChains(allContracts, byVersion); cerr != nil {
 		return nil, cerr
 	}
 
-	return &Bundle{contracts: contracts, byVersion: byVersion, files: files}, nil
+	return &Bundle{contracts: contracts, byVersion: byVersion, selectorVariants: selectorVariants, files: files}, nil
+}
+
+// applyResolution validates and installs one resolution rule on c. It is used
+// for both the canonical version-only contract and immutable selector-specific
+// variants, so no request can activate an unchecked transform.
+func applyResolution(c *Contract, ov yamlResolution, files *protoregistry.Files) error {
+	if ov.Transform == nil {
+		c.target = strings.TrimSpace(ov.Route.Target)
+		return nil
+	}
+	reqDesc, err := messageDescriptor(files, c.contractVersion, c.requestMessage)
+	if err != nil {
+		return err
+	}
+	respDesc, err := messageDescriptor(files, c.contractVersion, c.responseMessage)
+	if err != nil {
+		return err
+	}
+	reqOps, err := toOps(c.contractVersion, "request", ov.Transform.Request, reqDesc, respDesc)
+	if err != nil {
+		return err
+	}
+	respOps, err := toOps(c.contractVersion, "response", ov.Transform.Response, reqDesc, respDesc)
+	if err != nil {
+		return err
+	}
+	c.requestOps = reqOps
+	c.responseOps = respOps
+	c.transformTarget = strings.TrimSpace(ov.Transform.Target)
+	if len(ov.Transform.ErrorResponses) == 0 {
+		return nil
+	}
+	c.errorResponseOps = make(map[int][]transform.Op, len(ov.Transform.ErrorResponses))
+	for code, raw := range ov.Transform.ErrorResponses {
+		status, err := strconv.Atoi(strings.TrimSpace(code))
+		if err != nil {
+			return &ValidationError{Contract: c.contractVersion, Field: "transform.error_responses", Reason: "status key " + code + " is not a number"}
+		}
+		name, declared := c.errorMessages[status]
+		if !declared {
+			return &ValidationError{Contract: c.contractVersion, Field: "transform.error_responses", Reason: "status " + code + " has no error_messages binding to transform"}
+		}
+		errDesc, err := messageDescriptor(files, c.contractVersion, name)
+		if err != nil {
+			return err
+		}
+		ops, err := toOps(c.contractVersion, "response", raw, reqDesc, errDesc)
+		if err != nil {
+			return err
+		}
+		c.errorResponseOps[status] = ops
+	}
+	return nil
+}
+
+func messageDescriptor(files *protoregistry.Files, contract, name string) (protoreflect.MessageDescriptor, error) {
+	d, err := files.FindDescriptorByName(protoreflect.FullName(name))
+	if err != nil {
+		return nil, &MessageNotFoundError{Contract: contract, Message: name}
+	}
+	md, ok := d.(protoreflect.MessageDescriptor)
+	if !ok {
+		return nil, &MessageNotFoundError{Contract: contract, Message: name}
+	}
+	return md, nil
 }
 
 // resolveChains walks each contract's transform.target links into an ordered
