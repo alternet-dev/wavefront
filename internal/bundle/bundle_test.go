@@ -626,6 +626,79 @@ overrides:
 	}
 }
 
+// TestLookupMultiAxisSelectorConjunctiveAndFallback pins the two sides of
+// selector resolution that single-axis cases cannot: a rule naming more
+// than one axis requires EVERY named axis to match the request, and a
+// request whose selectors do not match any variant falls back to the
+// version-only contract rather than returning no match.
+func TestLookupMultiAxisSelectorConjunctiveAndFallback(t *testing.T) {
+	dir := writeBundle(t, fdsBytes(t), validOpenAPI, validVersions)
+	mustWrite(t, filepath.Join(dir, "resolution.yaml"), []byte(`version: 1
+overrides:
+  - contract_version: "2024-11"
+    transform:
+      response:
+        - default: { field: text, value: base }
+  - contract_version: "2024-11"
+    profile: mobile
+    tenant: partner-a
+    transform:
+      response:
+        - default: { field: text, value: mobile-partner-a }
+`))
+	b, err := Load(dir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	cases := []struct {
+		name string
+		sel  Selectors
+		want string
+	}{
+		{"both-axes-match", Selectors{Profile: "mobile", Tenant: "partner-a"}, "mobile-partner-a"},
+		{"profile-matches-tenant-missing", Selectors{Profile: "mobile"}, "base"},
+		{"profile-matches-tenant-wrong", Selectors{Profile: "mobile", Tenant: "partner-b"}, "base"},
+		{"profile-wrong", Selectors{Profile: "desktop", Tenant: "partner-a"}, "base"},
+		{"all-empty", Selectors{}, "base"},
+		{"cohort-set-but-not-named-by-rule", Selectors{Profile: "mobile", Tenant: "partner-a", Cohort: "canary"}, "mobile-partner-a"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c, ok := b.Lookup("/v3/me/session", "GET", "2024-11", tc.sel)
+			if !ok {
+				t.Fatal("Lookup: no contract")
+			}
+			if len(c.ResponseOps()) != 1 || c.ResponseOps()[0].Value.JSON() != tc.want {
+				t.Fatalf("response ops = %#v, want default text=%q", c.ResponseOps(), tc.want)
+			}
+		})
+	}
+}
+
+// TestLoadResolutionBlankSelectorFieldRejected pins that an explicitly
+// empty-string selector field is a load error rather than silently acting
+// as the version-only wildcard. The pointer-to-string yamlResolution
+// shape distinguishes "unset" (nil) from "set to empty"; set-to-empty is
+// never the operator's intent.
+func TestLoadResolutionBlankSelectorFieldRejected(t *testing.T) {
+	for _, field := range []string{"profile", "tenant", "cohort"} {
+		t.Run(field, func(t *testing.T) {
+			dir := writeBundle(t, fdsBytes(t), validOpenAPI, validVersions)
+			mustWrite(t, filepath.Join(dir, "resolution.yaml"), []byte(
+				"version: 1\noverrides:\n  - contract_version: \"2024-11\"\n    "+field+": \"\"\n    transform: { request: [] }\n",
+			))
+			_, err := Load(dir)
+			var ve *ValidationError
+			if !errors.As(err, &ve) || ve.Field != "selector" {
+				t.Fatalf("want selector ValidationError, got %v", err)
+			}
+			if !strings.Contains(ve.Reason, field) || !strings.Contains(ve.Reason, "blank") {
+				t.Fatalf("reason = %q, want it to name %q and %q", ve.Reason, field, "blank")
+			}
+		})
+	}
+}
+
 // TestLookupRoute covers the bundle's route-membership check used by the
 // proxy as the first-pass routing gate. Path-method pairs that any contract
 // binds must hit (and return a non-nil *Contract); everything else (unknown
