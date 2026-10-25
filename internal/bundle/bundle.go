@@ -402,8 +402,10 @@ func loadResolution(dir string) (map[string][]yamlResolution, error) {
 			// The version-only rule is the intentional fallback. Every
 			// selector rule overlaps it by definition, but it is never a
 			// competing candidate because Lookup tries variants first.
-			if (selectorEmpty(selectors) && selectorEmpty(existingSelectors)) ||
-				(!selectorEmpty(selectors) && !selectorEmpty(existingSelectors) && selectorOverlap(selectors, existingSelectors)) {
+			if selectorEmpty(selectors) && selectorEmpty(existingSelectors) {
+				return nil, &ValidationError{Contract: cv, Field: "selector", Reason: "duplicate version-only resolution override"}
+			}
+			if !selectorEmpty(selectors) && !selectorEmpty(existingSelectors) && selectorOverlap(selectors, existingSelectors) {
 				return nil, &ValidationError{Contract: cv, Field: "selector", Reason: "ambiguous resolution overrides can match the same request"}
 			}
 		}
