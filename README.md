@@ -144,6 +144,9 @@ All configuration is environment variables, read once at startup.
 | `WAVEFRONT_TLS_CERT_FILE` | — | PEM certificate chain; required by `https` and `https+h3` |
 | `WAVEFRONT_TLS_KEY_FILE` | — | PEM private key; required by `https` and `https+h3` |
 | `WAVEFRONT_CONTRACT_VERSION_HEADER` | `X-Api-Contract-Version` | header carrying the client's contract version |
+| `WAVEFRONT_PROFILE_HEADER` | `X-Wavefront-Profile` | optional header carrying the client profile selector |
+| `WAVEFRONT_TENANT_HEADER` | `X-Wavefront-Tenant` | optional header carrying the tenant selector |
+| `WAVEFRONT_COHORT_HEADER` | `X-Wavefront-Cohort` | optional header carrying the migration cohort selector |
 | `WAVEFRONT_REQUEST_TIMEOUT_MS` | `15000` | upstream request timeout |
 | `WAVEFRONT_READ_HEADER_TIMEOUT_MS` | `10000` | data-plane `ReadHeaderTimeout` (slow-headers cap) |
 | `WAVEFRONT_READ_TIMEOUT_MS` | `30000` | data-plane `ReadTimeout` (headers + body) |

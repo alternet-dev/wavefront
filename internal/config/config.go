@@ -15,6 +15,9 @@
 //	WAVEFRONT_TLS_CERT_FILE           — PEM certificate chain (required for TLS modes)
 //	WAVEFRONT_TLS_KEY_FILE            — PEM private key (required for TLS modes)
 //	WAVEFRONT_CONTRACT_VERSION_HEADER — header carrying the contract version (default X-Api-Contract-Version)
+//	WAVEFRONT_PROFILE_HEADER          — header carrying the optional client profile (default X-Wavefront-Profile)
+//	WAVEFRONT_TENANT_HEADER           — header carrying the optional tenant key (default X-Wavefront-Tenant)
+//	WAVEFRONT_COHORT_HEADER           — header carrying the optional migration cohort (default X-Wavefront-Cohort)
 //	WAVEFRONT_REQUEST_TIMEOUT_MS      — per-request upstream timeout in ms (default 15000)
 //	WAVEFRONT_READ_HEADER_TIMEOUT_MS  — data-plane ReadHeaderTimeout in ms (default 10000)
 //	WAVEFRONT_READ_TIMEOUT_MS         — data-plane ReadTimeout (headers+body) in ms (default 30000)
@@ -47,6 +50,9 @@ type Config struct {
 	TLSCertFile           string
 	TLSKeyFile            string
 	ContractVersionHeader string
+	ProfileHeader         string
+	TenantHeader          string
+	CohortHeader          string
 	RequestTimeout        time.Duration
 	ReadHeaderTimeout     time.Duration
 	ReadTimeout           time.Duration
@@ -108,6 +114,9 @@ const (
 	defMetricsAddr       = "0.0.0.0:9090"
 	defInboundProtocol   = InboundHTTP1
 	defCVHeader          = "X-Api-Contract-Version"
+	defProfileHeader     = "X-Wavefront-Profile"
+	defTenantHeader      = "X-Wavefront-Tenant"
+	defCohortHeader      = "X-Wavefront-Cohort"
 	defTimeoutMS         = 15000
 	defReadHeaderTimeout = 10000
 	defReadTimeout       = 30000
@@ -246,6 +255,9 @@ func Load(opts ...Option) (*Config, error) {
 	}
 
 	cfg.ContractVersionHeader = withDefault("WAVEFRONT_CONTRACT_VERSION_HEADER", defCVHeader)
+	cfg.ProfileHeader = withDefault("WAVEFRONT_PROFILE_HEADER", defProfileHeader)
+	cfg.TenantHeader = withDefault("WAVEFRONT_TENANT_HEADER", defTenantHeader)
+	cfg.CohortHeader = withDefault("WAVEFRONT_COHORT_HEADER", defCohortHeader)
 
 	timeoutMS, e := parseIntVar(nonBlank, "WAVEFRONT_REQUEST_TIMEOUT_MS", defTimeoutMS)
 	if e != nil {
