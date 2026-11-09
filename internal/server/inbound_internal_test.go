@@ -31,7 +31,7 @@ func TestInboundProtocolExplicitPassthrough(t *testing.T) {
 }
 
 func TestWithHTTP3AdvertisementSetsAltSvcHeader(t *testing.T) {
-	noop := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
+	noop := http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {})
 	h, err := withHTTP3Advertisement("127.0.0.1:8443", noop)
 	if err != nil {
 		t.Fatalf("withHTTP3Advertisement: %v", err)
@@ -45,7 +45,7 @@ func TestWithHTTP3AdvertisementSetsAltSvcHeader(t *testing.T) {
 }
 
 func TestWithHTTP3AdvertisementRejectsMalformedAddr(t *testing.T) {
-	noop := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
+	noop := http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {})
 	_, err := withHTTP3Advertisement("no-port-here", noop)
 	if err == nil || !strings.Contains(err.Error(), "Alt-Svc") {
 		t.Fatalf("withHTTP3Advertisement bad addr = %v, want Alt-Svc error", err)
