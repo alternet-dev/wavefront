@@ -301,7 +301,7 @@ type timeoutConn struct {
 	buf bufConn
 }
 
-func (c *timeoutConn) Read(_ []byte) (int, error) { return 0, timeoutErr{} }
+func (c *timeoutConn) Read(_ []byte) (int, error)  { return 0, timeoutErr{} }
 func (c *timeoutConn) Write(p []byte) (int, error) { return c.buf.buf.Write(p) }
 
 // TestSniffingConnReadEmitsBoundaryOnTimeout verifies that Read calls
