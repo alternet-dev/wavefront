@@ -12,9 +12,12 @@ Implementation shape — package layout and the request path.
   loaded bundle; maps to a transform profile or a typed error.
 - **adapter** (`internal/adapter/`) — codec and interaction-model pairs. An
   adapter decodes inbound bytes into one complete upstream call and encodes the
-  corresponding response. `ProtoJSON` is selected by the server;
-  `GraphQL` implements the single-endpoint, request-shaped GraphQL exchange
-  behind the same boundary, ready for separate runtime-selection work.
+  corresponding response. `ProtoJSON` is selected by the server and handles
+  raw protobuf; `GRPCJSON` adds strict unary gRPC message framing around the
+  same descriptor-driven conversion; `GraphQL` implements the single-endpoint,
+  request-shaped GraphQL exchange behind the same boundary, ready for separate
+  runtime-selection work. The server transport, not the adapter, owns HTTP/2
+  routing and `grpc-status` trailers.
 - **transform** (`internal/transform/`) — applies the declarative mapping
   (add/rename/optionalize/default/coerce, route remap) in both directions.
 - **server** (`internal/server/`) — `net/http` listener, the one upstream
@@ -24,7 +27,7 @@ Implementation shape — package layout and the request path.
 ## Request path
 
 `server` accepts → route gate (path+method) → `negotiate` resolves the
-contract on (path, method, contract-version) → `adapter` decodes → `transform`
+contract on (path, method, contract-version, profile, tenant, cohort) → `adapter` decodes → `transform`
 maps request → `server` calls the resolved upstream → `transform` maps response
 → `adapter` encodes → `server` responds. On any failure, a typed error is
 encoded in the client's contract version.
