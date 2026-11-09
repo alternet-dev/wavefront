@@ -3,7 +3,8 @@
 // sees the inbound transport — DecodeRequest's product is the upstream intent.
 // A future GraphQL adapter (single endpoint, request-defined response shape)
 // would implement the same interface without touching server/negotiate. The
-// shipped codecs are external protobuf↔JSON and external JSON↔JSON.
+// shipped codecs are external protobuf, external JSON, and unary gRPC framing,
+// each converting to and from the internal JSON representation.
 package adapter
 
 import (

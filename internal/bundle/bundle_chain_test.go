@@ -102,6 +102,58 @@ overrides:
 	}
 }
 
+// TestLoadSelectorChainUsesVersionOnlyTargets verifies that a selector
+// variant can start a transform chain, while later versions resolve through
+// their version-only contracts rather than reapplying the request selectors.
+func TestLoadSelectorChainUsesVersionOnlyTargets(t *testing.T) {
+	dir := mk3Layer(t)
+	bundletest.WriteResolution(t, dir, `version: 1
+overrides:
+  - contract_version: "2024-01"
+    profile: mobile
+    transform:
+      request:
+        - rename: { from: text, to: mobile_message }
+      target: "2024-06"
+  - contract_version: "2024-06"
+    transform:
+      request:
+        - rename: { from: text, to: version_message }
+      target: "2024-12"
+  - contract_version: "2024-06"
+    profile: mobile
+    transform:
+      request:
+        - rename: { from: text, to: selected_again }
+`)
+	b, err := Load(dir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	start, ok := b.Lookup("/v3/echo", "POST", "2024-01", Selectors{Profile: "mobile"})
+	if !ok {
+		t.Fatal("2024-01 mobile contract not found")
+	}
+	selectedTarget, ok := b.Lookup("/v3/echo", "POST", "2024-06", Selectors{Profile: "mobile"})
+	if !ok {
+		t.Fatal("2024-06 mobile contract not found")
+	}
+	chain := start.Chain()
+	if got := contractVersions(chain); len(got) != 3 || got[0] != "2024-01" || got[1] != "2024-06" || got[2] != "2024-12" {
+		t.Fatalf("selector chain = %v, want [2024-01 2024-06 2024-12]", got)
+	}
+	if chain[1] == selectedTarget {
+		t.Fatal("selector from 2024-01 was incorrectly carried into the 2024-06 target")
+	}
+	if ops := chain[1].RequestOps(); len(ops) != 1 || ops[0].To.String() != "version_message" {
+		t.Fatalf("2024-06 target request ops = %#v, want version-only rename to version_message", ops)
+	}
+	if got := len(selectedTarget.Chain()); got != 1 {
+		t.Fatalf("direct 2024-06 mobile chain length = %d, want 1", got)
+	}
+}
+
 // TestLoadChainUnknownTargetRejected ensures a transform.target naming an
 // absent version is a hard *ValidationError at load time.
 func TestLoadChainUnknownTargetRejected(t *testing.T) {

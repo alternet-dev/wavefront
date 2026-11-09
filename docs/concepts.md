@@ -13,20 +13,24 @@ declarative edge so the internal API stays singular and free to evolve.
 
 ## The selector axis
 
-Every request carries selectors that determine how it is interpreted. The
-contract **version** picks the transform profile and the negotiated **codec**
-picks the adapter. The model is general: the same engine, bundle format, and
-transform vocabulary are designed to extend to other selectors.
+Every request carries selectors that determine how it is interpreted.
+`wavefront` always resolves on the contract **version** and the negotiated
+**codec**, and can refine that resolution with optional `profile`, `tenant`,
+and `cohort` selectors. The model is general: the same engine, bundle format,
+and transform vocabulary can extend to other selectors.
 
-- **version** — the client's external contract version.
+- **version** — the client's external contract version. The required base
+  selector.
 - **codec** — content negotiation (protobuf or JSON ⇄ internal JSON).
 - **profile** — client surface (mobile / web / TV) → BFF-shaped responses.
 - **tenant** — partner/tenant key → negotiated field names/units.
 - **cohort** — migration cohort → old contract over a rewritten backend.
 
-`version` and `codec` are built; `profile`, `tenant`, and `cohort` are
-designed-for. This selector generality is why `wavefront` is not "a protobuf
-gateway."
+`profile`, `tenant`, and `cohort` are optional exact-match refinements of the
+version selector, carried by configurable request headers. They are opaque
+resolution inputs, not identities: `wavefront` does not authenticate,
+authorize, or otherwise interpret them. This selector generality is why
+`wavefront` is not "a protobuf gateway."
 
 ## Vocabulary
 
@@ -40,6 +44,10 @@ gateway."
   value: field add / rename / optionalize / default / coerce; route remap.
 - **Adapter** — a codec pair (decode external, encode external). The shipped
   protobuf and descriptor-validated JSON adapters both target OpenAPI/JSON.
+  The adapter package also provides a unary gRPC framing variant: it unwraps
+  one uncompressed gRPC message before the same descriptor-driven conversion
+  and frames the encoded reply. Listener protocol support and runtime adapter
+  selection remain transport concerns, not codec behavior.
 - **Target (upstream)** — an internal HTTP/JSON backend. A deployment
   configures a default target plus, optionally, named targets; a contract
   version routes to one.

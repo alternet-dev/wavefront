@@ -63,6 +63,10 @@ A single layer's `versions.yaml` entry, abbreviated:
   encoder independently. When omitted, the response follows the request codec
   (or protobuf for a bodyless request).
 - Request must carry `X-Api-Contract-Version: <contract_version>`.
+- A deployment may also resolve a request by optional `X-Wavefront-Profile`,
+  `X-Wavefront-Tenant`, and `X-Wavefront-Cohort` headers (or operator-configured
+  replacements). Send them only when the selected bundle defines a matching
+  resolution rule; they are opaque values, not credentials.
 - Response on success (2xx): the `response_message` encoded in the negotiated
   representation, with its matching `Content-Type`.
 - Response on `wavefront`-originated failure: a `wavefront.v0.Error` protobuf,
