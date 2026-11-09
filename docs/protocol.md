@@ -1,7 +1,8 @@
 # Protocol
 
 The bundle schema and the wire contract. This is the part that must not change
-silently.
+silently. The compatibility promise is stated in the
+[stability declaration](#stability-declaration).
 
 `wavefront` performs **zero inference**: the route → message binding is
 materialized in the bundle by the generator and read verbatim.
@@ -65,12 +66,14 @@ contract table). Each contract names exactly one method, so wrong-method
 folds into the same 404 (no 405, no `Allow` header).
 
 The operator-owned `resolution.yaml` at the bundle root overrides how a
-version resolves — a `transform` shim, or a `route` to a named backend:
+version resolves — a `transform` shim, or a `route` to a named backend.
+Optional `profile`, `tenant`, and `cohort` fields refine the version key:
 
 ```yaml
 version: 1
 overrides:
   - contract_version: "2024-11"         # the version this override applies to
+    profile: mobile                      # optional exact-match selector
     transform:                          # mechanical stanzas applied to the body
       target: "2025-03"                 # optional: chain to another version's resolution
       request:
@@ -79,16 +82,26 @@ overrides:
       response:
         - optionalize: { field: avatar_url }
   - contract_version: "2023-05"
+    tenant: partner-a                    # optional exact-match selector
     route:                              # ...or route this version to a named target
       target: legacy-backend
 ```
 
-An override sets **exactly one** of `transform` or `route`. A `transform`
-whose `target` names another version **chains** — the proxy applies each
-link's stanzas in turn, out to the version that terminates the chain at a
-backend. A `route.target` names a backend from the deployment's target table
-(`WAVEFRONT_TARGETS`); `WAVEFRONT_UPSTREAM_BASE_URL` is the default target a
-version uses with no override.
+An override sets **exactly one** of `transform` or `route`. A selector field
+must be non-blank when present. A selector-specific override matches only
+when every selector it names exactly equals the corresponding configured
+request-header value; unnamed selector axes are wildcards. A version-only
+override (no selector fields) is the fallback. Two selector-specific
+overrides that could match one request are invalid at bundle load, so runtime
+resolution is never order-dependent. A selector-specific `transform.target`
+continues through the target version's version-only resolution; it does not
+silently carry selector rules across versions.
+
+A `transform` whose `target` names another version **chains** — the proxy
+applies each link's stanzas in turn, out to the version that terminates the
+chain at a backend. A `route.target` names a backend from the deployment's
+target table (`WAVEFRONT_TARGETS`); `WAVEFRONT_UPSTREAM_BASE_URL` is the
+default target a version uses with no override.
 
 ## Transform vocabulary
 
@@ -152,6 +165,14 @@ The client declares its contract version in
 `WAVEFRONT_CONTRACT_VERSION_HEADER` (default `X-Api-Contract-Version`).
 Missing / unknown / unsupported ⇒ a typed `unsupported_contract_version`
 error (see the error contract below), never a silent best-guess.
+
+After version negotiation, `wavefront` reads the optional profile, tenant,
+and cohort headers configured by `WAVEFRONT_PROFILE_HEADER`,
+`WAVEFRONT_TENANT_HEADER`, and `WAVEFRONT_COHORT_HEADER` (defaults
+`X-Wavefront-Profile`, `X-Wavefront-Tenant`, and `X-Wavefront-Cohort`). A
+missing or blank optional selector simply cannot match a rule that names it;
+it does not produce a negotiation error. These values are opaque bundle keys,
+not authentication or authorization claims.
 
 ## Error contract
 
@@ -334,11 +355,78 @@ wavefront-originated response (an error synthesized before any upstream call —
 upstream CORS to mirror and carries none, so a browser cannot read it
 cross-origin. Those are misconfigured-request conditions, not the normal flow.
 
-## Forward compatibility
+## Stability declaration
 
-Removing or renaming a schema field or a transform verb is a breaking change.
-The bundle schema and the transform vocabulary are append-only — a break is a
-deliberate, reviewed decision, never a silent one.
+**Status: stable.** Bundle schema version 1 and the client-facing wire contract
+described in this document are compatibility surfaces, not implementation
+details. This declaration applies from the first wavefront release that
+contains it; it is independent of wavefront's pre-1.0 product version.
+
+### Stable surfaces
+
+The **bundle-schema promise** covers:
+
+- the layer layout and the roles of `descriptors.binpb`, `openapi.json`,
+  `versions.yaml`, and `resolution.yaml`;
+- the version 1 fields, accepted values, defaults, validation rules, and
+  semantics of `versions.yaml` and `resolution.yaml`; and
+- the transform verb names, path grammar, and verb semantics.
+
+The **wire-contract promise** covers:
+
+- the request media type, contract-version negotiation, and route/method
+  matching rules;
+- success and non-success status dispatch, protobuf body selection, and the
+  no-body rule for 204/205;
+- the meanings of `X-Wavefront-Error` and
+  `X-Wavefront-Contract-Version`, including when each is present; and
+- the `wavefront.v0.Error` field numbers and types, existing error-code
+  meanings and HTTP status mappings, and the documented standard headers.
+
+Operational configuration, metrics, logs, CLI presentation, and the internal
+JSON shape spoken to an upstream are not part of these two stability surfaces.
+The human-readable `wavefront.v0.Error.message` text is diagnostic, not a
+machine-readable contract; clients branch on status, headers, and `code`.
+
+### Compatible evolution
+
+Within bundle schema version 1, a bundle that conforms to the documented schema
+remains valid and keeps the same meaning in later readers. Existing files,
+fields, accepted values, defaults, transform verbs, and validation semantics
+are not removed, renamed, repurposed, or tightened for conforming inputs.
+Compatible additions may introduce optional fields, accepted values, or
+transform verbs; a bundle that does not use the addition behaves as before. A
+deprecated version 1 field or verb remains accepted for the lifetime of
+version 1.
+
+Compatibility runs from an older bundle to a newer runtime. The loader uses
+strict YAML decoding, so the reverse is deliberately not promised: an older
+runtime can reject a bundle that uses a field or verb introduced by a newer
+release. It fails at load rather than ignoring an instruction. Upgrade the
+runtime before generating a bundle that uses a newly introduced schema
+feature; keeping `wavefront` and `wavefront-bundle` on the same release is the
+simple rule.
+
+The wire contract evolves additively. New response headers, error codes,
+statuses for new failure classes, and protobuf fields may be added. Existing
+ones keep their meanings and are not reused. Clients must ignore unknown
+response headers and protobuf fields and treat an unknown, non-empty
+`X-Wavefront-Error` (and its matching `Error.code`) as a generic
+wavefront-originated failure. Those rules let an older client continue to
+interoperate with a newer runtime.
+
+Fixing behavior that contradicts this document is not a contract break.
+Changing undocumented byte serialization, header order or casing, diagnostic
+text, or behavior for an input the schema already rejects is also outside the
+promise.
+
+### Breaking evolution
+
+A breaking bundle change requires a new schema version; version 1 is never
+reinterpreted in place. A breaking wire change requires a separately
+identifiable wire version and a documented migration path; it does not silently
+replace the contract above. Deprecation by itself does not permit removal from
+an existing version.
 
 The `wavefront.v0.Error` wire message is declared canonically at
 [`proto/wavefront/v0/error.proto`](../proto/wavefront/v0/error.proto). It is
@@ -346,4 +434,6 @@ gated by `buf breaking` in CI against `trunk`, so a breaking edit to the
 proto is mechanically refused. The in-code descriptor in
 `internal/wireerror/errorproto.go` is pinned to this file by
 `internal/wireerror/proto_consistency_test.go` — the two cannot drift apart
-without a test failure.
+without a test failure. Strict bundle decoding and the explicit schema-version
+check provide the corresponding fail-fast boundary for bundle changes;
+semantic compatibility remains a review requirement.
