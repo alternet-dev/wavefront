@@ -11,7 +11,10 @@ Implementation shape — package layout and the request path.
   request from its `(URL.Path, Method, X-Api-Contract-Version)` against the
   loaded bundle; maps to a transform profile or a typed error.
 - **adapter** (`internal/adapter/`) — codec pairs. Decode inbound external
-  bytes to a neutral value tree; encode the response back. `protobuf` first.
+  bytes to a neutral value tree; encode the response back. `ProtoJSON` handles
+  raw protobuf and `GRPCJSON` adds strict unary gRPC message framing around the
+  same descriptor-driven conversion. The server transport, not the adapter,
+  owns HTTP/2 routing and `grpc-status` trailers.
 - **transform** (`internal/transform/`) — applies the declarative mapping
   (add/rename/optionalize/default/coerce, route remap) in both directions.
 - **server** (`internal/server/`) — `net/http` listener, the one upstream
@@ -21,7 +24,7 @@ Implementation shape — package layout and the request path.
 ## Request path
 
 `server` accepts → route gate (path+method) → `negotiate` resolves the
-contract on (path, method, contract-version) → `adapter` decodes → `transform`
+contract on (path, method, contract-version, profile, tenant, cohort) → `adapter` decodes → `transform`
 maps request → `server` calls the resolved upstream → `transform` maps response
 → `adapter` encodes → `server` responds. On any failure, a typed error is
 encoded in the client's contract version.
