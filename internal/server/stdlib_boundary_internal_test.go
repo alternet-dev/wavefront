@@ -1,7 +1,9 @@
 package server
 
 import (
+	"bytes"
 	"net"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
@@ -113,5 +115,113 @@ func TestSniffingConnWriteEmptyDoesNotCaptureStatus(t *testing.T) {
 	}
 	if got := c.capturedStatus(); got != 200 {
 		t.Fatalf("after real write: capturedStatus = %d, want 200", got)
+	}
+}
+
+// TestIsInterceptedBoundaryStatus confirms that exactly 408, 417, and 431 are
+// classified as stdlib-boundary statuses and that no other code is.
+func TestIsInterceptedBoundaryStatus(t *testing.T) {
+	cases := []struct {
+		status int
+		want   bool
+	}{
+		{http.StatusRequestTimeout, true},              // 408
+		{http.StatusExpectationFailed, true},           // 417
+		{http.StatusRequestHeaderFieldsTooLarge, true}, // 431
+		// Non-boundary codes that must not be intercepted.
+		{http.StatusOK, false},
+		{http.StatusBadRequest, false},
+		{http.StatusNotFound, false},
+		{http.StatusInternalServerError, false},
+		{0, false},
+	}
+	for _, tc := range cases {
+		if got := isInterceptedBoundaryStatus(tc.status); got != tc.want {
+			t.Errorf("isInterceptedBoundaryStatus(%d) = %v, want %v", tc.status, got, tc.want)
+		}
+	}
+}
+
+// TestBoundaryError confirms boundaryError returns the right wire-error shape
+// for each intercepted status and nil for any status that is not a known
+// stdlib boundary.
+func TestBoundaryError(t *testing.T) {
+	cases := []struct {
+		status   int
+		wantCode string
+		wantNil  bool
+	}{
+		{http.StatusRequestTimeout, "request_header_timeout", false},
+		{http.StatusExpectationFailed, "expectation_failed", false},
+		{http.StatusRequestHeaderFieldsTooLarge, "request_header_too_large", false},
+		// Non-boundary statuses must return nil so emitBoundary is a no-op.
+		{http.StatusBadRequest, "", true},
+		{http.StatusInternalServerError, "", true},
+		{0, "", true},
+	}
+	for _, tc := range cases {
+		got := boundaryError(tc.status)
+		if tc.wantNil {
+			if got != nil {
+				t.Errorf("boundaryError(%d) = %v, want nil", tc.status, got)
+			}
+			continue
+		}
+		if got == nil {
+			t.Errorf("boundaryError(%d) = nil, want code %q", tc.status, tc.wantCode)
+			continue
+		}
+		if got.Code() != tc.wantCode {
+			t.Errorf("boundaryError(%d).Code() = %q, want %q", tc.status, got.Code(), tc.wantCode)
+		}
+		if got.HTTPStatus() != tc.status {
+			t.Errorf("boundaryError(%d).HTTPStatus() = %d, want %d", tc.status, got.HTTPStatus(), tc.status)
+		}
+	}
+}
+
+// bufConn is a net.Conn whose Write goes to a bytes.Buffer so emitBoundary
+// can be tested without a real network connection.
+type bufConn struct {
+	nullConn
+	buf bytes.Buffer
+}
+
+func (c *bufConn) Write(p []byte) (int, error) { return c.buf.Write(p) }
+
+// TestSniffingConnEmitBoundaryIdempotent verifies that the emitted flag
+// prevents a second emitBoundary call from writing a second envelope, even
+// when both calls reference the same boundary status.
+func TestSniffingConnEmitBoundaryIdempotent(t *testing.T) {
+	bc := &bufConn{}
+	c := &sniffingConn{Conn: bc}
+	if err := c.emitBoundary(http.StatusRequestTimeout); err != nil {
+		t.Fatalf("first emitBoundary: %v", err)
+	}
+	firstLen := bc.buf.Len()
+	if firstLen == 0 {
+		t.Fatal("first emitBoundary wrote nothing to the connection")
+	}
+	// Second call with the same status must be a no-op.
+	if err := c.emitBoundary(http.StatusRequestTimeout); err != nil {
+		t.Fatalf("second emitBoundary: %v", err)
+	}
+	if bc.buf.Len() != firstLen {
+		t.Fatalf("second emitBoundary wrote %d extra bytes, want 0 (must be idempotent)",
+			bc.buf.Len()-firstLen)
+	}
+}
+
+// TestSniffingConnEmitBoundaryUnknownStatusIsNoop confirms that emitBoundary
+// for a status that boundaryError does not recognize writes nothing and returns
+// nil — not a half-formed envelope.
+func TestSniffingConnEmitBoundaryUnknownStatusIsNoop(t *testing.T) {
+	bc := &bufConn{}
+	c := &sniffingConn{Conn: bc}
+	if err := c.emitBoundary(http.StatusBadRequest); err != nil {
+		t.Fatalf("emitBoundary(400): %v", err)
+	}
+	if bc.buf.Len() != 0 {
+		t.Fatalf("emitBoundary(400) wrote %d bytes, want 0", bc.buf.Len())
 	}
 }

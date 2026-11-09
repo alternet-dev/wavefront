@@ -396,3 +396,42 @@ func TestStdlibBoundaryNormalRequestDoesNotIncrement(t *testing.T) {
 		}
 	}
 }
+
+// TestStdlibBoundaryDialAndDropDoesNotIncrement exercises the StateNew →
+// StateClosed path where the client dials but sends no bytes at all. Because
+// the entry is never marked active and no status was captured, the counter
+// must remain unchanged — a silent drop does not qualify as a stdlib-boundary
+// event.
+func TestStdlibBoundaryDialAndDropDoesNotIncrement(t *testing.T) {
+	// Short header timeout so the test completes quickly even if net/http
+	// decides to wait on a header that never arrives.
+	dataSrv, opsSrv, _ := newBoundaryTestServer(t, 100*time.Millisecond)
+
+	statuses := []string{"unknown", "408", "431", "417"}
+	before := make(map[string]float64, len(statuses))
+	for _, s := range statuses {
+		before[s] = scrapeBoundaryCount(t, opsSrv.URL, s)
+	}
+
+	u, err := url.Parse(dataSrv.URL)
+	if err != nil {
+		t.Fatalf("parse url: %v", err)
+	}
+	conn, err := net.Dial("tcp", u.Host)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	// Close without writing a single byte. The server sees StateNew → StateClosed
+	// with active=false and no captured status.
+	conn.Close()
+
+	// Give the ConnState goroutine time to fire before checking.
+	time.Sleep(150 * time.Millisecond)
+
+	for _, s := range statuses {
+		if got := scrapeBoundaryCount(t, opsSrv.URL, s); got != before[s] {
+			t.Errorf(`wavefront_stdlib_boundary_total{status=%q} = %v, want %v (dial-and-drop must not increment any label)`,
+				s, got, before[s])
+		}
+	}
+}
