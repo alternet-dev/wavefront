@@ -241,6 +241,25 @@ func TestEncodeResponseEmptyMessageReturnsNoBody(t *testing.T) {
 	}
 }
 
+// TestEncodeResponseEmptyMessageReturnsNoBodyJSON pins the JSONJSON side of the
+// same bodyless-response invariant: the content type is the JSON media type,
+// not the protobuf alias, so a 204 served through the JSON adapter advertises
+// no body and no incorrect envelope.
+func TestEncodeResponseEmptyMessageReturnsNoBodyJSON(t *testing.T) {
+	a := NewJSONJSON(testResolver{testFiles(t)})
+
+	out, ct, werr := a.EncodeResponse(tb{method: "DELETE", route: "/v3/items/{id}", req: "acme.v1.Empty", resp: "acme.v1.Empty"}, nil)
+	if werr != nil {
+		t.Fatalf("EncodeResponse: %v", werr)
+	}
+	if len(out) != 0 {
+		t.Errorf("out = %q, want empty", out)
+	}
+	if ct != MediaTypeJSON {
+		t.Errorf("contentType = %q, want %q", ct, MediaTypeJSON)
+	}
+}
+
 func TestEncodeResponseJSONToProtoWithWKT(t *testing.T) {
 	files := testFiles(t)
 	a := NewProtoJSON(testResolver{files})
@@ -359,5 +378,21 @@ func TestEncodeErrorUnboundStatusIsUpstreamError(t *testing.T) {
 	b := tb{method: "POST", route: "/v3/echo", resp: "acme.v1.Pong", errs: nil}
 	if _, _, werr := a.EncodeError(b, 409, []byte(`{}`)); werr == nil {
 		t.Fatal("EncodeError on an unbound status returned nil error; want upstream_error")
+	}
+}
+
+// TestEncodeErrorJSONUnboundStatusIsUpstreamError pins the JSONJSON side of the
+// unbound-status rule: a status with no declared error message is a bundle-
+// level programmer error on either adapter and must surface as upstream_error.
+func TestEncodeErrorJSONUnboundStatusIsUpstreamError(t *testing.T) {
+	files := testFiles(t)
+	a := NewJSONJSON(testResolver{files})
+	b := tb{method: "POST", route: "/v3/echo", resp: "acme.v1.Pong", errs: nil}
+	_, _, werr := a.EncodeError(b, 409, []byte(`{}`))
+	if werr == nil {
+		t.Fatal("EncodeError on an unbound status returned nil error; want upstream_error")
+	}
+	if werr.Code() != "upstream_error" {
+		t.Errorf("code = %q, want upstream_error", werr.Code())
 	}
 }
