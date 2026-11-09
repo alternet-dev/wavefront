@@ -43,7 +43,11 @@ built. This selector generality is why `wavefront` is not "a protobuf gateway."
 - **Transform** — the declarative request/response mapping for a selector
   value: field add / rename / optionalize / default / coerce; route remap.
 - **Adapter** — a codec pair (decode external, encode external). `protobuf ↔
-  OpenAPI/JSON` is the reference adapter.
+  OpenAPI/JSON` is the reference adapter. The adapter package also provides a
+  unary gRPC framing variant: it unwraps one uncompressed gRPC message before
+  the same descriptor-driven conversion and frames the encoded reply. Listener
+  protocol support and runtime adapter selection remain transport concerns, not
+  codec behavior.
 - **Target (upstream)** — an internal HTTP/JSON backend. A deployment
   configures a default target plus, optionally, named targets; a contract
   version routes to one.
