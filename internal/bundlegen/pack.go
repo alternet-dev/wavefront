@@ -74,11 +74,19 @@ func outputOutsideBundle(bundleDir, output string) error {
 	if err != nil {
 		return fmt.Errorf("resolve bundle directory: %w", err)
 	}
+	bundleReal, err := filepath.EvalSymlinks(bundleAbs)
+	if err != nil {
+		return fmt.Errorf("resolve bundle directory: %w", err)
+	}
 	outputAbs, err := filepath.Abs(output)
 	if err != nil {
 		return fmt.Errorf("resolve output path: %w", err)
 	}
-	rel, err := filepath.Rel(bundleAbs, outputAbs)
+	outputReal, err := realpathBestEffort(outputAbs)
+	if err != nil {
+		return fmt.Errorf("resolve output path: %w", err)
+	}
+	rel, err := filepath.Rel(bundleReal, outputReal)
 	if err != nil {
 		return fmt.Errorf("compare bundle and output paths: %w", err)
 	}
@@ -86,6 +94,29 @@ func outputOutsideBundle(bundleDir, output string) error {
 		return fmt.Errorf("archive output must be outside the canonical bundle directory")
 	}
 	return nil
+}
+
+// realpathBestEffort resolves symlinks for the longest existing prefix of p,
+// then appends any non-existent trailing components unchanged. This lets the
+// symlink-safety check work when the output file or its parent directory has
+// not been created yet.
+func realpathBestEffort(p string) (string, error) {
+	real, err := filepath.EvalSymlinks(p)
+	if err == nil {
+		return real, nil
+	}
+	if !os.IsNotExist(err) {
+		return "", err
+	}
+	parent := filepath.Dir(p)
+	if parent == p {
+		return p, nil
+	}
+	parentReal, err := realpathBestEffort(parent)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(parentReal, filepath.Base(p)), nil
 }
 
 func packEntries(bundleDir string) ([]string, error) {

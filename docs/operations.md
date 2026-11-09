@@ -128,7 +128,6 @@ request.
 | Symptom | Cause | Fix |
 |---|---|---|
 | Process refuses to start | bad/missing bundle or required env unset | stderr logs the specific error; check `WAVEFRONT_BUNDLE_PATH`, `WAVEFRONT_UPSTREAM_BASE_URL` |
-| `/ready` stays 503 forever | bundle didn't load at boot | check the fail-fast log line; verify the bundle directory or archive |
 | Spike of `unsupported_contract_version` (400) | client header value not in the bundle | check the bundle has that version; check `WAVEFRONT_CONTRACT_VERSION_HEADER` matches between ingress and the proxy |
 | Spike of `transform_failed` (422) on one version | a request stanza can't apply to live payloads | inspect that version's `resolution.yaml` entry; the source field is absent or unparseable |
 | Spike of `transform_failed` (502) on one version | the live upstream shape drifted from that version's response stanzas | regenerate the bundle or update the version's response stanzas to the new shape |

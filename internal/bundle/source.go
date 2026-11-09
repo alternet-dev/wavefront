@@ -37,9 +37,8 @@ func (e *ArchiveError) Error() string {
 }
 func (e *ArchiveError) Unwrap() error { return e.Err }
 
-// openSource returns a filesystem rooted at bundlePath. Directories are read
-// in place. Regular files are gzip-compressed tar archives and are expanded
-// into an in-memory filesystem once, before the normal loader runs.
+// bundleSource is the read interface over a bundle, whether it lives in a
+// directory or was expanded from a packed archive.
 type bundleSource interface {
 	readFile(name string) ([]byte, error)
 	readDir(name string) ([]fs.DirEntry, error)
@@ -108,6 +107,9 @@ func (e memoryDirEntry) Mode() fs.FileMode {
 	return 0o444
 }
 
+// openSource returns a filesystem rooted at bundlePath. Directories are read
+// in place. Regular files are gzip-compressed tar archives and are expanded
+// into an in-memory filesystem once, before the normal loader runs.
 func openSource(bundlePath string) (bundleSource, error) {
 	info, err := os.Stat(bundlePath)
 	if err != nil {
