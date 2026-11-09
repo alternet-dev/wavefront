@@ -57,6 +57,10 @@ A single layer's `versions.yaml` entry, abbreviated:
 - Request body: the `request_message` marshaled to protobuf bytes.
 - Request `Content-Type`: `application/protobuf`.
 - Request must carry `X-Api-Contract-Version: <contract_version>`.
+- A deployment may also resolve a request by optional `X-Wavefront-Profile`,
+  `X-Wavefront-Tenant`, and `X-Wavefront-Cohort` headers (or operator-configured
+  replacements). Send them only when the selected bundle defines a matching
+  resolution rule; they are opaque values, not credentials.
 - Response on success (2xx): the `response_message` marshaled to protobuf
   bytes; `Content-Type: application/protobuf`.
 - Response on `wavefront`-originated failure: a `wavefront.v0.Error` protobuf,

@@ -324,7 +324,11 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request) {
 	// order, hiding the per-route binding. For a single-route bundle the
 	// degenerate case (one contract per version) reduces to the same
 	// behaviour with no special-casing.
-	c, werr := negotiate.Resolve(b, r.URL.Path, r.Method, r.Header.Get(s.cfg.ContractVersionHeader))
+	c, werr := negotiate.Resolve(b, r.URL.Path, r.Method, r.Header.Get(s.cfg.ContractVersionHeader), bundle.Selectors{
+		Profile: strings.TrimSpace(r.Header.Get(s.cfg.ProfileHeader)),
+		Tenant:  strings.TrimSpace(r.Header.Get(s.cfg.TenantHeader)),
+		Cohort:  strings.TrimSpace(r.Header.Get(s.cfg.CohortHeader)),
+	})
 	if werr != nil {
 		fail(werr, "")
 		return
