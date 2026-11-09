@@ -289,6 +289,21 @@ func TestRunVerifyMissingFlag(t *testing.T) {
 	}
 }
 
+// TestRunVerifyUsageAdvertisesArchiveForm confirms the usage line printed
+// when --bundle is missing names both forms the subcommand accepts — a
+// directory and a packed archive — so a caller does not have to read the
+// flag help to discover the archive form.
+func TestRunVerifyUsageAdvertisesArchiveForm(t *testing.T) {
+	var buf bytes.Buffer
+	if code := run([]string{"verify"}, &buf); code != 2 {
+		t.Fatalf("verify without --bundle: exit %d, want 2", code)
+	}
+	got := buf.String()
+	if !strings.Contains(got, "archive") {
+		t.Errorf("verify usage does not advertise the packed archive form:\n%s", got)
+	}
+}
+
 // --- draft-shim subcommand ---
 
 func writeDriftPair(t *testing.T) (bundleDir, fromVer, toVer string) {
@@ -380,6 +395,19 @@ func TestRunDraftShimStrictSurfacesCandidate(t *testing.T) {
 func TestRunDraftShimMissingFlags(t *testing.T) {
 	if code := runDraftShim([]string{"--bundle", t.TempDir()}, io.Discard, io.Discard); code != 2 {
 		t.Fatalf("missing --from/--to: exit %d, want 2", code)
+	}
+}
+
+// TestRunDraftShimUsageAdvertisesArchiveForm confirms the usage line names
+// both the directory and packed-archive forms the subcommand accepts.
+func TestRunDraftShimUsageAdvertisesArchiveForm(t *testing.T) {
+	var buf bytes.Buffer
+	if code := runDraftShim(nil, &buf, io.Discard); code != 2 {
+		t.Fatalf("draft-shim without flags: exit %d, want 2", code)
+	}
+	got := buf.String()
+	if !strings.Contains(got, "archive") {
+		t.Errorf("draft-shim usage does not advertise the packed archive form:\n%s", got)
 	}
 }
 
