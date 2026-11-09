@@ -9,8 +9,8 @@
 //	wavefront-bundle pack --bundle <dir> --out <file.tar.gz>
 //	wavefront-bundle remove --version <id> --bundle <dir>
 //	wavefront-bundle retire --version <id> --bundle <dir>
-//	wavefront-bundle verify --bundle <dir>
-//	wavefront-bundle draft-shim --bundle <dir> --from <id> --to <id> [--out <file>] [--strict]
+//	wavefront-bundle verify --bundle <dir-or-archive>
+//	wavefront-bundle draft-shim --bundle <dir-or-archive> --from <id> --to <id> [--out <file>] [--strict]
 package main
 
 import (
@@ -155,7 +155,7 @@ func runVerify(args []string, errOut io.Writer) int {
 		return 2
 	}
 	if *bundleDir == "" {
-		fmt.Fprintln(errOut, "usage: wavefront-bundle verify --bundle <dir>")
+		fmt.Fprintln(errOut, "usage: wavefront-bundle verify --bundle <dir-or-archive>")
 		return 2
 	}
 	if err := bundlegen.Verify(*bundleDir); err != nil {
@@ -180,7 +180,7 @@ func runDraftShim(args []string, errOut, stdout io.Writer) int {
 		return 2
 	}
 	if *bundleDir == "" || *fromVersion == "" || *toVersion == "" {
-		fmt.Fprintln(errOut, "usage: wavefront-bundle draft-shim --bundle <dir> --from <version> --to <version> [--out <file>] [--strict]")
+		fmt.Fprintln(errOut, "usage: wavefront-bundle draft-shim --bundle <dir-or-archive> --from <version> --to <version> [--out <file>] [--strict]")
 		return 2
 	}
 	fromBytes, err := bundle.ReadFile(*bundleDir, filepath.ToSlash(filepath.Join(*fromVersion, "openapi.json")))
