@@ -269,6 +269,11 @@ func TestRunVerifyMissingFlag(t *testing.T) {
 
 func writeDriftPair(t *testing.T) (bundleDir, fromVer, toVer string) {
 	t.Helper()
+	return writeDriftPairWithRequestFields(t, "userName", "user_name")
+}
+
+func writeDriftPairWithRequestFields(t *testing.T, fromField, toField string) (bundleDir, fromVer, toVer string) {
+	t.Helper()
 	bundleDir = t.TempDir()
 	fromVer = "2024-01"
 	toVer = "2024-06"
@@ -278,14 +283,14 @@ func writeDriftPair(t *testing.T) (bundleDir, fromVer, toVer string) {
 "requestBody":{"content":{"application/json":{"schema":{"$ref":"#/components/schemas/Req"}}}},
 "responses":{"200":{"content":{"application/json":{"schema":{"$ref":"#/components/schemas/Resp"}}}}}}}},
 "components":{"schemas":{
-"Req":{"type":"object","properties":{"userName":{"type":"string"}}},
+"Req":{"type":"object","properties":{"` + fromField + `":{"type":"string"}}},
 "Resp":{"type":"object","properties":{"ok":{"type":"boolean"}}}}}}`},
 		{toVer, `{"openapi":"3.0.0","info":{"title":"t","version":"` + toVer + `"},
 "paths":{"/v/echo":{"post":{
 "requestBody":{"content":{"application/json":{"schema":{"$ref":"#/components/schemas/Req"}}}},
 "responses":{"200":{"content":{"application/json":{"schema":{"$ref":"#/components/schemas/Resp"}}}}}}}},
 "components":{"schemas":{
-"Req":{"type":"object","properties":{"user_name":{"type":"string"}}},
+"Req":{"type":"object","properties":{"` + toField + `":{"type":"string"}}},
 "Resp":{"type":"object","properties":{"ok":{"type":"boolean"}}}}}}`},
 	} {
 		dir := filepath.Join(bundleDir, layer.name)
@@ -381,6 +386,25 @@ func TestRunDraftShimRejectsOutOfRangeRenameConfidence(t *testing.T) {
 		[]string{"--bundle", bundleDir, "--from", fromVer, "--to", toVer, "--rename-confidence", "1.1"},
 		io.Discard, io.Discard); code != 1 {
 		t.Fatalf("draft-shim out-of-range confidence: exit %d, want 1", code)
+	}
+}
+
+func TestRunDraftShimRenameConfidenceAcceptsSimilarNames(t *testing.T) {
+	bundleDir, fromVer, toVer := writeDriftPairWithRequestFields(t, "deliveryState", "deliveryStatus")
+	var out bytes.Buffer
+	code := runDraftShim(
+		[]string{"--bundle", bundleDir, "--from", fromVer, "--to", toVer, "--rename-confidence", "0.8"},
+		io.Discard, &out)
+	if code != 0 {
+		t.Fatalf("draft-shim --rename-confidence: exit %d, want 0", code)
+	}
+	for _, want := range []string{
+		"# CONFIDENT: name-similarity:",
+		`- rename: { from: "deliveryState", to: "deliveryStatus" }`,
+	} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("draft-shim --rename-confidence output missing %q:\n%s", want, out.String())
+		}
 	}
 }
 
