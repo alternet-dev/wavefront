@@ -125,6 +125,12 @@ func validateGraphQLResponse(in []byte) error {
 			if err := json.Unmarshal(messageRaw, &message); err != nil {
 				return errors.New("each errors entry message must be a string")
 			}
+			if extensionsRaw, ok := errorObject["extensions"]; ok {
+				var extensions map[string]json.RawMessage
+				if err := json.Unmarshal(extensionsRaw, &extensions); err != nil || extensions == nil {
+					return errors.New("each errors entry extensions must be an object")
+				}
+			}
 		}
 	}
 	if extensionsRaw, ok := obj["extensions"]; ok {
