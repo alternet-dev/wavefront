@@ -318,10 +318,10 @@ the header.
 
 ### Stdlib-boundary statuses
 
-A small set of statuses is emitted by Go's `net/http` request reader **before**
-any wavefront handler runs. The data-plane listener preserves the stdlib parser. For `417` and `431`,
-it intercepts `net/http`'s replies before they reach the client and replaces
-each with the normal wire-error envelope. For `408`, `net/http` closes the
+Go's `net/http` request reader can fail **before** any wavefront handler runs.
+For `417` and `431`, the data-plane listener preserves the stdlib parser,
+intercepts `net/http`'s replies before they reach the client, and replaces each
+with the normal wire-error envelope. For `408`, `net/http` closes the
 connection without writing a reply; the listener synthesizes a new `408`
 wire-error envelope when it observes the header-read timeout. Because no
 `http.Request` is available at that point, `X-Wavefront-Contract-Version` is

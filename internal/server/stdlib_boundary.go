@@ -9,20 +9,21 @@ import (
 	"net/http"
 	"strconv"
 	"sync/atomic"
+	"time"
 
 	"github.com/alternet-dev/wavefront/internal/wireerror"
 )
 
 // stdlib-boundary interception — issue #91.
 //
-// A small set of HTTP statuses are emitted by net/http's request reader
-// BEFORE the wavefront handler runs: 408 (slow header), 431 (oversized
-// headers), 417 (non-100-continue Expect). The data-plane listener preserves
-// the stdlib parser and its limits. For 417 and 431, it intercepts net/http's
-// replies and replaces them with wavefront wire-error envelopes. For 408,
-// net/http closes without writing a reply; the listener synthesizes the
-// envelope after observing a header-read timeout on the connection. Because no
-// http.Request exists for these replies, their contract version is unknown.
+// A small set of HTTP statuses can arise in net/http's request reader BEFORE
+// the wavefront handler runs: 431 (oversized headers) and 417
+// (non-100-continue Expect) are replies from net/http; 408 is synthesized by
+// this listener when net/http closes a slow-header connection without a reply.
+// The data-plane listener preserves the stdlib parser and its limits while
+// replacing or synthesizing those replies as wavefront wire-error envelopes.
+// Because no http.Request exists for these replies, their contract version is
+// unknown.
 //
 // State model (HTTP/1.1; wavefront is plaintext-only, no HTTP/2):
 //
@@ -33,7 +34,9 @@ import (
 //                   keepalive boundary failures (request N succeeds, request
 //                   N+1 fails the stdlib parser) are still observed.
 //   StateIdle     — handler completed and keepalive is parked. Clear the
-//                   connection-local handler marker for the next request.
+//                   connection-local handler marker and response status, and
+//                   mark the conn as awaiting the first bytes of its next
+//                   request.
 //   StateHijacked — terminal per net/http docs. Delete the entry so the map
 //                   does not leak even though hijack is not a wavefront code
 //                   path today.
@@ -77,20 +80,17 @@ func (s *Server) connState(c net.Conn, state http.ConnState) {
 		// has neither an active entry nor a captured status and is ignored.
 		s.connStateMap.Store(c, &connEntry{})
 	case http.StateActive:
-		// Set or reset the entry. Reset matters for keepalive: request N
-		// may have run the handler (handlerRan=true), but request N+1 may
-		// fail in net/http's parser before reaching the handler. Each
-		// StateActive starts a fresh "did the handler run this round?"
-		// observation.
-		entry := &connEntry{}
-		entry.active.Store(true)
-		s.connStateMap.Store(c, entry)
+		// Confirm a fresh "did the handler run this round?" observation. A
+		// keepalive probe can buffer a complete malformed request before this
+		// callback fires, so sniffingConn starts the same observation as soon
+		// as it sees that probe receive request bytes.
+		s.markRequestStarted(c)
 	case http.StateIdle:
 		// The next request on a keepalive connection begins after this state.
-		// Clear the connection-local marker while retaining the entry for a
-		// normal close after a successfully handled request.
+		// Clear per-request state while retaining the entry for a normal close
+		// after a successfully handled request.
 		if sc, ok := c.(*sniffingConn); ok {
-			sc.resetHandlerSeen()
+			sc.beginIdle()
 		}
 	case http.StateHijacked:
 		// Terminal per net/http docs ("does not transition to StateClosed").
@@ -121,10 +121,22 @@ func (s *Server) connState(c net.Conn, state http.ConnState) {
 	}
 }
 
+// markRequestStarted records a fresh request observation before the handler
+// can run. It is called by ConnState on a normal StateActive transition and by
+// sniffingConn as soon as a keepalive probe proves that a next request began.
+// The latter covers requests fully buffered by the probe: net/http can parse a
+// malformed one without emitting StateActive during that parse.
+func (s *Server) markRequestStarted(c net.Conn) {
+	entry := &connEntry{}
+	entry.active.Store(true)
+	s.connStateMap.Store(c, entry)
+}
+
 // boundaryStatusLabel returns the label value for the stdlib-boundary counter
-// based on the status that the sniffing conn captured on the first response
-// write. Returns the literal "unknown" when c is not wrapped or no response
-// status was captured.
+// based on the status that the sniffing conn captured while handling the
+// current request. The status may come from a response write or directly from
+// the synthesized 408 path. Returns the literal "unknown" when c is not
+// wrapped or no response status was captured.
 func boundaryStatusLabel(c net.Conn) string {
 	sc, ok := c.(*sniffingConn)
 	if !ok {
@@ -221,21 +233,45 @@ func (l *sniffingListener) Accept() (net.Conn, error) {
 // It is otherwise a transparent net.Conn wrapper.
 type sniffingConn struct {
 	net.Conn
-	server      *Server
-	handlerSeen atomic.Bool
-	status      atomic.Int32 // 0 if no response status has been captured
-	emitted     atomic.Bool
+	server            *Server
+	handlerSeen       atomic.Bool
+	waitingForRequest atomic.Bool
+	idleDeadlineSet   atomic.Bool
+	status            atomic.Int32 // 0 if no response status has been captured
+	emitted           atomic.Bool
 }
 
 func (c *sniffingConn) Read(p []byte) (int, error) {
 	n, err := c.Conn.Read(p)
-	if err != nil && !c.handlerSeen.Load() && isTimeout(err) {
+	if n > 0 {
+		// A successful idle probe means a new request has started. The next
+		// timeout, if any, belongs to that request's header read rather than
+		// the keepalive wait.
+		c.requestStarted()
+	}
+	if err != nil && !c.handlerSeen.Load() && !c.waitingForRequest.Load() && isTimeout(err) {
 		// net/http closes a slow-header connection without writing a response.
 		// Emit the envelope before returning its timeout error so the stdlib
 		// parser keeps ownership of connection shutdown.
 		_ = c.emitBoundary(http.StatusRequestTimeout)
 	}
 	return n, err
+}
+
+// SetReadDeadline notices when net/http finishes its idle probe from bytes it
+// already buffered. In that case no Read reaches this wrapper, but clearing
+// the idle deadline still proves that a new request started. The following
+// non-zero deadline is the request's header deadline.
+func (c *sniffingConn) SetReadDeadline(t time.Time) error {
+	if !c.waitingForRequest.Load() {
+		return c.Conn.SetReadDeadline(t)
+	}
+	if !t.IsZero() {
+		c.idleDeadlineSet.Store(true)
+	} else if c.idleDeadlineSet.Load() {
+		c.requestStarted()
+	}
+	return c.Conn.SetReadDeadline(t)
 }
 
 func (c *sniffingConn) Write(p []byte) (int, error) {
@@ -256,7 +292,29 @@ func (c *sniffingConn) Write(p []byte) (int, error) {
 
 func (c *sniffingConn) markHandlerSeen() { c.handlerSeen.Store(true) }
 
-func (c *sniffingConn) resetHandlerSeen() { c.handlerSeen.Store(false) }
+// beginIdle resets request-local state after a handled response and marks the
+// connection's next read as an idle keepalive probe. A timeout during that
+// probe is a normal close, not a 408. Read (or SetReadDeadline for buffered
+// bytes) clears waitingForRequest once a new request begins.
+func (c *sniffingConn) beginIdle() {
+	c.handlerSeen.Store(false)
+	c.status.Store(0)
+	c.idleDeadlineSet.Store(false)
+	c.waitingForRequest.Store(true)
+}
+
+// requestStarted clears the idle-probe marker exactly once and starts a fresh
+// ConnState observation. It may be called by Read after the probe obtains
+// bytes, or by SetReadDeadline when the probe found bytes already buffered.
+func (c *sniffingConn) requestStarted() {
+	if !c.waitingForRequest.CompareAndSwap(true, false) {
+		return
+	}
+	c.idleDeadlineSet.Store(false)
+	if c.server != nil {
+		c.server.markRequestStarted(c)
+	}
+}
 
 func (c *sniffingConn) capturedStatus() int { return int(c.status.Load()) }
 
