@@ -408,6 +408,61 @@ func TestRunDraftShimRenameConfidenceAcceptsSimilarNames(t *testing.T) {
 	}
 }
 
+// TestRunDraftShimRenameConfidenceZeroAcceptsAnyNameChange confirms the lower
+// boundary: at --rename-confidence 0 the threshold accepts any same-type pair
+// regardless of normalized name distance, producing a confident rename where
+// the default threshold would emit an ambiguous candidate block.
+func TestRunDraftShimRenameConfidenceZeroAcceptsAnyNameChange(t *testing.T) {
+	// "alpha" and "zeta" have low Levenshtein similarity; the default
+	// threshold (1.0) would not auto-match them as a rename.
+	bundleDir, fromVer, toVer := writeDriftPairWithRequestFields(t, "alpha", "zeta")
+	var out bytes.Buffer
+	code := runDraftShim(
+		[]string{"--bundle", bundleDir, "--from", fromVer, "--to", toVer, "--rename-confidence", "0"},
+		io.Discard, &out)
+	if code != 0 {
+		t.Fatalf("draft-shim --rename-confidence 0: exit %d, want 0", code)
+	}
+	if !strings.Contains(out.String(), `- rename: { from: "alpha", to: "zeta" }`) {
+		t.Errorf("confidence=0 should emit a confident rename for any same-type pair:\n%s", out.String())
+	}
+	if strings.Contains(out.String(), "# AMBIGUOUS pair") {
+		t.Errorf("confidence=0 should not leave a candidates block:\n%s", out.String())
+	}
+}
+
+// TestRunDraftShimRenameIntentRejectsMalformedYAML confirms that an intent
+// file that is not valid YAML causes exit 1, not exit 2 from an unknown flag.
+func TestRunDraftShimRenameIntentRejectsMalformedYAML(t *testing.T) {
+	bundleDir, fromVer, toVer := writeDriftPair(t)
+	intentPath := filepath.Join(t.TempDir(), "bad.yaml")
+	if err := os.WriteFile(intentPath, []byte("not: [valid: yaml"), 0o600); err != nil {
+		t.Fatalf("write intent file: %v", err)
+	}
+	code := runDraftShim(
+		[]string{"--bundle", bundleDir, "--from", fromVer, "--to", toVer, "--rename-intent", intentPath},
+		io.Discard, io.Discard)
+	if code != 1 {
+		t.Fatalf("draft-shim with malformed intent YAML: exit %d, want 1", code)
+	}
+}
+
+// TestRunDraftShimRenameIntentRejectsUnsupportedVersion confirms that an
+// intent file whose version field is not 1 causes exit 1.
+func TestRunDraftShimRenameIntentRejectsUnsupportedVersion(t *testing.T) {
+	bundleDir, fromVer, toVer := writeDriftPair(t)
+	intentPath := filepath.Join(t.TempDir(), "v2.yaml")
+	if err := os.WriteFile(intentPath, []byte("version: 2\nrenames:\n  - from: userName\n    to: user_name\n"), 0o600); err != nil {
+		t.Fatalf("write intent file: %v", err)
+	}
+	code := runDraftShim(
+		[]string{"--bundle", bundleDir, "--from", fromVer, "--to", toVer, "--rename-intent", intentPath},
+		io.Discard, io.Discard)
+	if code != 1 {
+		t.Fatalf("draft-shim with unsupported intent version: exit %d, want 1", code)
+	}
+}
+
 func TestRunDraftShimMissingFlags(t *testing.T) {
 	if code := runDraftShim([]string{"--bundle", t.TempDir()}, io.Discard, io.Discard); code != 2 {
 		t.Fatalf("missing --from/--to: exit %d, want 2", code)
