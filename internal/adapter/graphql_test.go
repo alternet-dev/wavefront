@@ -148,6 +148,16 @@ func TestGraphQLEncodeResponseRejectsInvalidEnvelope(t *testing.T) {
 	}
 }
 
+func TestGraphQLEncodeResponseRejectsInvalidErrorExtensions(t *testing.T) {
+	a := NewGraphQL()
+	in := []byte(`{"errors":[{"message":"not found","extensions":["invalid"]}]}`)
+
+	_, _, werr := a.EncodeResponse(tb{}, in)
+	if werr == nil || werr.Code() != "upstream_error" {
+		t.Fatalf("EncodeResponse error = %v, want upstream_error", werr)
+	}
+}
+
 func TestGraphQLEncodeErrorUsesGraphQLEnvelope(t *testing.T) {
 	a := NewGraphQL()
 	in := []byte(`{"errors":[{"message":"rate limited"}]}`)
