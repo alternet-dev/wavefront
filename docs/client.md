@@ -442,8 +442,9 @@ The `wavefront.v0.Error` codes consumers see most often:
 - `request_header_too_large` (431) — request headers exceeded the server
   header limit.
 
-On a non-2xx response with no `X-Wavefront-Error` header, the body is a
-declared typed error (see above). The data-plane listener converts its own
-408, 417, and 431 request-reader failures into `wavefront.v0.Error` envelopes,
-so clients handle them through the same header and body path as other
-wavefront-originated failures.
+The data-plane listener converts its own 408, 417, and 431 request-reader
+failures into `wavefront.v0.Error` envelopes with `X-Wavefront-Error` set,
+so clients handle them through the same path as other wavefront-originated
+failures. Net/http can still emit other pre-handler responses — such as a 400
+for a malformed request line — without that header; those are not typed
+contract errors.

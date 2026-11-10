@@ -319,9 +319,11 @@ the header.
 ### Stdlib-boundary statuses
 
 A small set of statuses is emitted by Go's `net/http` request reader **before**
-any wavefront handler runs. The data-plane listener preserves the stdlib
-parser but intercepts its `408`, `417`, and `431` replies before they reach the
-client, replacing each with the normal wire-error envelope. Because no
+any wavefront handler runs. The data-plane listener preserves the stdlib parser. For `417` and `431`,
+it intercepts `net/http`'s replies before they reach the client and replaces
+each with the normal wire-error envelope. For `408`, `net/http` closes the
+connection without writing a reply; the listener synthesizes a new `408`
+wire-error envelope when it observes the header-read timeout. Because no
 `http.Request` is available at that point, `X-Wavefront-Contract-Version` is
 `unknown`.
 
@@ -332,7 +334,8 @@ client, replacing each with the normal wire-error envelope. Because no
 | 431 Request Header Fields Too Large | `request_header_too_large` | request headers exceed `net/http`'s `MaxHeaderBytes` limit |
 
 Occurrences remain surfaced as the Prometheus counter
-`wavefront_stdlib_boundary_total`, labelled by the intercepted status.
+`wavefront_stdlib_boundary_total`, labelled by the captured status code or
+`unknown` when no status line was observed before the connection closed.
 
 ### Response header invariant
 

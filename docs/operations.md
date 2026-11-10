@@ -132,7 +132,8 @@ request.
 | Spike of `unknown_route` (404) | client URL `(path, method)` not bound by any contract in the bundle | check the bundle's bindings; wrong-method folds here on purpose (no `Allow` header) |
 | Spike of `internal_error` (500) | a handler panic recovered by middleware | check logs for the panic stack — this is always a bug |
 | `unavailable` (503) on the proxy path at boot | request arrived before the bundle finished loading | `Retry-After: 1` hint; legitimate boot race, brief and self-healing |
-| Non-zero `wavefront_stdlib_boundary_total` | clients hitting `net/http`'s boundary (408 slow header / 431 oversized headers / 417 bad `Expect`) before the wavefront handler runs | tune `WAVEFRONT_READ_HEADER_TIMEOUT_MS` or check client behavior; wavefront returns the matching wire-error envelope |
+| Non-zero `wavefront_stdlib_boundary_total` with a `408`, `417`, or `431` label | clients hitting `net/http`'s boundary (408 slow header / 417 bad `Expect` / 431 oversized headers) before the wavefront handler runs | tune `WAVEFRONT_READ_HEADER_TIMEOUT_MS` or check client behavior; wavefront returns the matching wire-error envelope |
+| Non-zero `wavefront_stdlib_boundary_total` with an `unknown` label or a non-matching status label | a pre-handler connection closed without producing one of the three intercepted statuses (e.g., abrupt client disconnect mid-read or net/http wrote a non-intercepted status) | investigate client behavior; no wire-error envelope was sent for these cases |
 
 ## Failure modes
 

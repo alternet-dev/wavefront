@@ -18,8 +18,10 @@ import (
 // A small set of HTTP statuses are emitted by net/http's request reader
 // BEFORE the wavefront handler runs: 408 (slow header), 431 (oversized
 // headers), 417 (non-100-continue Expect). The data-plane listener preserves
-// the stdlib parser and its limits, but replaces those replies with normal
-// wavefront wire-error envelopes at the connection boundary. Because no
+// the stdlib parser and its limits. For 417 and 431, it intercepts net/http's
+// replies and replaces them with wavefront wire-error envelopes. For 408,
+// net/http closes without writing a reply; the listener synthesizes the
+// envelope after observing a header-read timeout on the connection. Because no
 // http.Request exists for these replies, their contract version is unknown.
 //
 // State model (HTTP/1.1; wavefront is plaintext-only, no HTTP/2):
