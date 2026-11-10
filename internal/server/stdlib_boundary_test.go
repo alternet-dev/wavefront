@@ -88,7 +88,7 @@ func scrapeErrorCount(t *testing.T, opsURL, code string) float64 {
 // notifyOnConnClosed wraps the data-plane ConnState callback and reports when
 // its StateClosed work has completed. Tests use it to observe asynchronous
 // metric updates without relying on a scheduling-dependent sleep.
-func notifyOnConnClosed(closed chan<- struct{}) func(*http.Server) {
+func notifyOnConnClosed(stateClosed chan<- struct{}) func(*http.Server) {
 	return func(srv *http.Server) {
 		connState := srv.ConnState
 		srv.ConnState = func(c net.Conn, state http.ConnState) {
@@ -97,7 +97,7 @@ func notifyOnConnClosed(closed chan<- struct{}) func(*http.Server) {
 			}
 			if state == http.StateClosed {
 				select {
-				case closed <- struct{}{}:
+				case stateClosed <- struct{}{}:
 				default:
 				}
 			}
@@ -105,10 +105,10 @@ func notifyOnConnClosed(closed chan<- struct{}) func(*http.Server) {
 	}
 }
 
-func waitForConnClosed(t *testing.T, closed <-chan struct{}) {
+func waitForConnClosed(t *testing.T, stateClosed <-chan struct{}) {
 	t.Helper()
 	select {
-	case <-closed:
+	case <-stateClosed:
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for the data-plane StateClosed callback")
 	}
@@ -398,10 +398,10 @@ func TestStdlibBoundaryKeepaliveSlowHeaderReturns408Envelope(t *testing.T) {
 // probes an idle connection before it starts reading another request, so no
 // wire-error envelope or boundary metric belongs to that normal close.
 func TestStdlibBoundaryKeepaliveIdleTimeoutClosesSilently(t *testing.T) {
-	closed := make(chan struct{}, 1)
+	stateClosed := make(chan struct{}, 1)
 	dataSrv, opsSrv, _ := newBoundaryTestServer(t, 5*time.Second,
 		func(srv *http.Server) { srv.IdleTimeout = 50 * time.Millisecond },
-		notifyOnConnClosed(closed),
+		notifyOnConnClosed(stateClosed),
 	)
 	beforeBoundary := scrapeBoundaryCount(t, opsSrv.URL, "408")
 	beforeErrors := scrapeErrorCount(t, opsSrv.URL, "request_header_timeout")
@@ -436,7 +436,7 @@ func TestStdlibBoundaryKeepaliveIdleTimeoutClosesSilently(t *testing.T) {
 		resp.Body.Close()
 		t.Fatalf("idle close produced unsolicited response status %d, want connection close", resp.StatusCode)
 	}
-	waitForConnClosed(t, closed)
+	waitForConnClosed(t, stateClosed)
 
 	if got := scrapeBoundaryCount(t, opsSrv.URL, "408"); got != beforeBoundary {
 		t.Errorf(`wavefront_stdlib_boundary_total{status="408"} = %v, want %v (idle close must not count as a header timeout)`, got, beforeBoundary)
@@ -450,8 +450,8 @@ func TestStdlibBoundaryKeepaliveIdleTimeoutClosesSilently(t *testing.T) {
 // parser failure after a handled keepalive request is labelled with the
 // failure's response, rather than the previous request's status.
 func TestStdlibBoundaryKeepaliveParserFailureUsesCurrentStatus(t *testing.T) {
-	closed := make(chan struct{}, 1)
-	dataSrv, opsSrv, _ := newBoundaryTestServer(t, 5*time.Second, notifyOnConnClosed(closed))
+	stateClosed := make(chan struct{}, 1)
+	dataSrv, opsSrv, _ := newBoundaryTestServer(t, 5*time.Second, notifyOnConnClosed(stateClosed))
 	before400 := scrapeBoundaryCount(t, opsSrv.URL, "400")
 	before404 := scrapeBoundaryCount(t, opsSrv.URL, "404")
 
@@ -493,7 +493,7 @@ func TestStdlibBoundaryKeepaliveParserFailureUsesCurrentStatus(t *testing.T) {
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("parser failure status = %d, want 400", resp.StatusCode)
 	}
-	waitForConnClosed(t, closed)
+	waitForConnClosed(t, stateClosed)
 
 	if got := scrapeBoundaryCount(t, opsSrv.URL, "400"); got != before400+1 {
 		t.Errorf(`wavefront_stdlib_boundary_total{status="400"} = %v, want %v (parser failure status)`, got, before400+1)
@@ -578,8 +578,8 @@ func TestStdlibBoundaryNormalRequestDoesNotIncrement(t *testing.T) {
 func TestStdlibBoundaryDialAndDropDoesNotIncrement(t *testing.T) {
 	// Short header timeout so the test completes quickly even if net/http
 	// decides to wait on a header that never arrives.
-	closed := make(chan struct{}, 1)
-	dataSrv, opsSrv, _ := newBoundaryTestServer(t, 100*time.Millisecond, notifyOnConnClosed(closed))
+	stateClosed := make(chan struct{}, 1)
+	dataSrv, opsSrv, _ := newBoundaryTestServer(t, 100*time.Millisecond, notifyOnConnClosed(stateClosed))
 
 	statuses := []string{"unknown", "408", "431", "417"}
 	before := make(map[string]float64, len(statuses))
@@ -601,7 +601,7 @@ func TestStdlibBoundaryDialAndDropDoesNotIncrement(t *testing.T) {
 
 	// ConnState completes before the notification is sent, so the metric check
 	// observes the terminal callback rather than an arbitrary point in time.
-	waitForConnClosed(t, closed)
+	waitForConnClosed(t, stateClosed)
 
 	for _, s := range statuses {
 		if got := scrapeBoundaryCount(t, opsSrv.URL, s); got != before[s] {
