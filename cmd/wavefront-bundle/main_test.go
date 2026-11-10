@@ -118,14 +118,59 @@ func TestRunAddForceOnFreshBundle(t *testing.T) {
 }
 
 func TestRunUnknownSubcommand(t *testing.T) {
-	if code := run([]string{"frobnicate"}, io.Discard); code == 0 {
+	var errOut bytes.Buffer
+	code := run([]string{"frobnicate"}, &errOut)
+	if code == 0 {
 		t.Fatal("unknown subcommand: want non-zero exit code")
+	}
+	if !strings.Contains(errOut.String(), `"frobnicate"`) {
+		t.Errorf("unknown subcommand error should quote the name, got:\n%s", errOut.String())
 	}
 }
 
 func TestRunNoSubcommand(t *testing.T) {
-	if code := run(nil, io.Discard); code == 0 {
+	var errOut bytes.Buffer
+	code := run(nil, &errOut)
+	if code == 0 {
 		t.Fatal("no subcommand: want non-zero exit code")
+	}
+	for _, want := range []string{"add", "remove", "retire", "verify", "draft-shim", "gen-types"} {
+		if !strings.Contains(errOut.String(), want) {
+			t.Errorf("no-subcommand usage should list %q, got:\n%s", want, errOut.String())
+		}
+	}
+}
+
+// TestRunGenTypesHelpListsFlags verifies that --help advertises the surface
+// of the gen-types subcommand so users can discover the generator inputs,
+// the external plugin-path escape hatch, and the repeatable --opt flag.
+func TestRunGenTypesHelpListsFlags(t *testing.T) {
+	var errOut bytes.Buffer
+	if code := runGenTypes([]string{"--help"}, &errOut, io.Discard); code != 0 {
+		t.Fatalf("gen-types --help: exit %d, want 0", code)
+	}
+	for _, want := range []string{"-bundle", "-out", "-plugin", "-plugin-path", "-opt", "-version"} {
+		if !strings.Contains(errOut.String(), want) {
+			t.Errorf("gen-types --help output missing %q:\n%s", want, errOut.String())
+		}
+	}
+}
+
+// TestRunGenTypesErrorPrefix pins the stderr prefix on the GenTypes error
+// path so the CLI's diagnostics remain greppable from shell pipelines.
+func TestRunGenTypesErrorPrefix(t *testing.T) {
+	missingBundle := filepath.Join(t.TempDir(), "missing")
+	var errOut bytes.Buffer
+	code := runGenTypes([]string{
+		"--bundle", missingBundle,
+		"--out", filepath.Join(t.TempDir(), "generated"),
+		"--plugin", "go",
+	}, &errOut, io.Discard)
+	if code != 1 {
+		t.Fatalf("gen-types with missing bundle: exit %d, want 1", code)
+	}
+	if !strings.HasPrefix(errOut.String(), "wavefront-bundle:") {
+		t.Errorf("gen-types error should start with the command prefix, got:\n%s", errOut.String())
 	}
 }
 
