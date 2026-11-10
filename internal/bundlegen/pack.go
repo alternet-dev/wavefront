@@ -101,9 +101,9 @@ func outputOutsideBundle(bundleDir, output string) error {
 // symlink-safety check work when the output file or its parent directory has
 // not been created yet.
 func realpathBestEffort(p string) (string, error) {
-	real, err := filepath.EvalSymlinks(p)
+	resolved, err := filepath.EvalSymlinks(p)
 	if err == nil {
-		return real, nil
+		return resolved, nil
 	}
 	if !os.IsNotExist(err) {
 		return "", err
