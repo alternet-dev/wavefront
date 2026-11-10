@@ -72,11 +72,11 @@ func scrapeErrorCount(t *testing.T, opsURL, code string) float64 {
 			!strings.Contains(line, `transform_outcome=""`) {
 			continue
 		}
-		close := strings.LastIndex(line, "} ")
-		if close < 0 {
+		closeIdx := strings.LastIndex(line, "} ")
+		if closeIdx < 0 {
 			t.Fatalf("malformed wavefront_errors_total line %q", line)
 		}
-		v, err := strconv.ParseFloat(strings.TrimSpace(line[close+2:]), 64)
+		v, err := strconv.ParseFloat(strings.TrimSpace(line[closeIdx+2:]), 64)
 		if err != nil {
 			t.Fatalf("parse errors value from %q: %v", line, err)
 		}
