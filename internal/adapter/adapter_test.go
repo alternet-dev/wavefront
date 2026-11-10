@@ -396,3 +396,48 @@ func TestEncodeErrorJSONUnboundStatusIsUpstreamError(t *testing.T) {
 		t.Errorf("code = %q, want upstream_error", werr.Code())
 	}
 }
+
+// TestDecodeRequestEmptyMessageSendsNoBodyJSON: a zero-field request_message
+// through the JSON adapter must also send no body and no Content-Type — the
+// bodyless path is codec-independent and must hold for JSONJSON as it does for
+// ProtoJSON.
+func TestDecodeRequestEmptyMessageSendsNoBodyJSON(t *testing.T) {
+	a := NewJSONJSON(testResolver{testFiles(t)})
+
+	call, werr := a.DecodeRequest(tb{method: "GET", route: "/v3/items/{id}", req: "acme.v1.Empty", resp: "acme.v1.Pong"}, nil)
+	if werr != nil {
+		t.Fatalf("DecodeRequest: %v", werr)
+	}
+	if call.Method != "GET" || call.Path != "/v3/items/{id}" {
+		t.Errorf("method/path = %q %q", call.Method, call.Path)
+	}
+	if len(call.Body) != 0 {
+		t.Errorf("Body = %q, want empty (bodyless upstream call must not send {})", call.Body)
+	}
+	if call.ContentType != "" {
+		t.Errorf("ContentType = %q, want empty (no body declares no envelope)", call.ContentType)
+	}
+}
+
+// TestEncodeResponseInvalidJSONForJSONJSON: invalid upstream JSON through the
+// JSON adapter must surface as upstream_error, not a panic or nil error — the
+// same invariant that ProtoJSON holds for descriptor-invalid upstream bodies.
+func TestEncodeResponseInvalidJSONForJSONJSON(t *testing.T) {
+	a := NewJSONJSON(testResolver{testFiles(t)})
+	_, _, werr := a.EncodeResponse(tb{method: "POST", route: "/x", req: "acme.v1.Ping", resp: "acme.v1.Pong"}, []byte("definitely not json"))
+	if werr == nil || werr.Code() != "upstream_error" {
+		t.Fatalf("want upstream_error, got %v", werr)
+	}
+}
+
+// TestUnresolvableBindingIsTypedErrorJSONJSON: an unresolvable request_message
+// through the JSON adapter must return a *wireerror.Error — the same typed-
+// error contract that ProtoJSON provides.
+func TestUnresolvableBindingIsTypedErrorJSONJSON(t *testing.T) {
+	a := NewJSONJSON(testResolver{testFiles(t)})
+	_, werr := a.DecodeRequest(tb{method: "POST", route: "/x", req: "acme.v1.Ghost", resp: "acme.v1.Pong"}, []byte{})
+	var we *wireerror.Error
+	if !errors.As(error(werr), &we) {
+		t.Fatalf("want *wireerror.Error, got %v", werr)
+	}
+}
