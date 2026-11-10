@@ -163,3 +163,52 @@ func TestGraphQLEncodeErrorUsesGraphQLEnvelope(t *testing.T) {
 		t.Errorf("response changed: got %s, want %s", out, in)
 	}
 }
+
+func TestGraphQLEncodeErrorRejectsInvalidEnvelope(t *testing.T) {
+	tests := map[string][]byte{
+		"malformed JSON":   []byte(`{"errors":`),
+		"no result member": []byte(`{"extensions":{"cost":1}}`),
+		"empty errors":     []byte(`{"errors":[]}`),
+	}
+
+	a := NewGraphQL()
+	for name, in := range tests {
+		t.Run(name, func(t *testing.T) {
+			_, _, werr := a.EncodeError(tb{}, 500, in)
+			if werr == nil || werr.Code() != "upstream_error" {
+				t.Fatalf("EncodeError error = %v, want upstream_error", werr)
+			}
+		})
+	}
+}
+
+func TestGraphQLEncodeResponseAcceptsPartialResult(t *testing.T) {
+	a := NewGraphQL()
+	// GraphQL spec allows data and errors together for partial results.
+	in := []byte(`{"data":{"item":{"id":"1"}},"errors":[{"message":"fetch warning","path":["item","extra"]}]}`)
+
+	out, ct, werr := a.EncodeResponse(tb{}, in)
+	if werr != nil {
+		t.Fatalf("EncodeResponse: %v", werr)
+	}
+	if ct != "application/graphql-response+json" {
+		t.Errorf("contentType = %q, want application/graphql-response+json", ct)
+	}
+	if !bytes.Equal(out, in) {
+		t.Errorf("response changed: got %s, want %s", out, in)
+	}
+}
+
+func TestGraphQLDecodeRequestAcceptsEmptyObjectParameters(t *testing.T) {
+	a := NewGraphQL()
+	// Empty objects are valid for variables and extensions per the spec.
+	in := []byte(`{"query":"{ viewer { id } }","variables":{},"extensions":{}}`)
+
+	call, werr := a.DecodeRequest(tb{}, in)
+	if werr != nil {
+		t.Fatalf("DecodeRequest: %v", werr)
+	}
+	if !bytes.Equal(call.Body, in) {
+		t.Errorf("body changed: got %s, want %s", call.Body, in)
+	}
+}
