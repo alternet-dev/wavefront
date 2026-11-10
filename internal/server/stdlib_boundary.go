@@ -236,7 +236,6 @@ type sniffingConn struct {
 	server            *Server
 	handlerSeen       atomic.Bool
 	waitingForRequest atomic.Bool
-	idleDeadlineSet   atomic.Bool
 	status            atomic.Int32 // 0 if no response status has been captured
 	emitted           atomic.Bool
 }
@@ -259,16 +258,15 @@ func (c *sniffingConn) Read(p []byte) (int, error) {
 }
 
 // SetReadDeadline notices when net/http finishes its idle probe from bytes it
-// already buffered. In that case no Read reaches this wrapper, but clearing
-// the idle deadline still proves that a new request started. The following
-// non-zero deadline is the request's header deadline.
+// already buffered. In that case no Read reaches this wrapper. net/http's
+// keepalive loop clears the read deadline once its bufio Peek has observed
+// the next request's first bytes, whether those came from the wire or from
+// the buffer and whether or not an idle deadline was ever set. Treating that
+// zero SetReadDeadline as proof the next request started handles the
+// pipelined-buffered-prefix case when IdleTimeout and ReadTimeout are both
+// zero.
 func (c *sniffingConn) SetReadDeadline(t time.Time) error {
-	if !c.waitingForRequest.Load() {
-		return c.Conn.SetReadDeadline(t)
-	}
-	if !t.IsZero() {
-		c.idleDeadlineSet.Store(true)
-	} else if c.idleDeadlineSet.Load() {
+	if t.IsZero() && c.waitingForRequest.Load() {
 		c.requestStarted()
 	}
 	return c.Conn.SetReadDeadline(t)
@@ -299,7 +297,6 @@ func (c *sniffingConn) markHandlerSeen() { c.handlerSeen.Store(true) }
 func (c *sniffingConn) beginIdle() {
 	c.handlerSeen.Store(false)
 	c.status.Store(0)
-	c.idleDeadlineSet.Store(false)
 	c.waitingForRequest.Store(true)
 }
 
@@ -310,7 +307,6 @@ func (c *sniffingConn) requestStarted() {
 	if !c.waitingForRequest.CompareAndSwap(true, false) {
 		return
 	}
-	c.idleDeadlineSet.Store(false)
 	if c.server != nil {
 		c.server.markRequestStarted(c)
 	}

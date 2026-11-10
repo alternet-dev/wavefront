@@ -393,6 +393,63 @@ func TestStdlibBoundaryKeepaliveSlowHeaderReturns408Envelope(t *testing.T) {
 	}
 }
 
+// TestStdlibBoundaryKeepalivePipelinedSlowHeaderReturns408Envelope covers
+// the pipelined-buffered-prefix case: the client sends a handled request
+// AND the next request's prefix in one write. The server has no non-zero
+// idle deadline (IdleTimeout and ReadTimeout are both zero in this setup),
+// so after StateIdle net/http reads the prefix of the next request from
+// bufio without any Read reaching sniffingConn. The following header
+// deadline then times out on a wire Read; the listener must still emit a
+// 408 envelope and count the boundary, because the handler never ran for
+// that pipelined request.
+func TestStdlibBoundaryKeepalivePipelinedSlowHeaderReturns408Envelope(t *testing.T) {
+	const headerTimeout = 50 * time.Millisecond
+	dataSrv, opsSrv, _ := newBoundaryTestServer(t, headerTimeout)
+	before := scrapeBoundaryCount(t, opsSrv.URL, "408")
+
+	u, err := url.Parse(dataSrv.URL)
+	if err != nil {
+		t.Fatalf("parse url: %v", err)
+	}
+	conn, err := net.Dial("tcp", u.Host)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
+
+	// Pipeline the handled request AND the next request's prefix in one
+	// write. On localhost the server's bufio buffers both before the first
+	// handler completes, so StateIdle fires with the prefix already buffered.
+	pipelined := fmt.Sprintf(
+		"GET /not-in-the-bundle HTTP/1.1\r\nHost: %s\r\n\r\n"+
+			"GET /v3/echo HTTP/1.1\r\n",
+		u.Host,
+	)
+	if _, err := conn.Write([]byte(pipelined)); err != nil {
+		t.Fatalf("write pipelined requests: %v", err)
+	}
+
+	br := bufio.NewReader(conn)
+	resp, err := http.ReadResponse(br, nil)
+	if err != nil {
+		t.Fatalf("read handled response: %v", err)
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("handled response status = %d, want 404", resp.StatusCode)
+	}
+
+	assertBoundaryEnvelope(t, br, http.StatusRequestTimeout, "request_header_timeout")
+
+	got := waitForBoundaryCount(t, opsSrv.URL, "408", before+1, 2*time.Second)
+	if got != before+1 {
+		t.Fatalf(`wavefront_stdlib_boundary_total{status="408"} = %v, want %v (before=%v)`,
+			got, before+1, before)
+	}
+}
+
 // TestStdlibBoundaryKeepaliveIdleTimeoutClosesSilently verifies that an idle
 // keepalive close is not confused with a request-header timeout. net/http
 // probes an idle connection before it starts reading another request, so no
