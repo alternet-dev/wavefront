@@ -174,17 +174,20 @@ type ShimProposal struct {
 }
 
 // RenameIntent is one operator-authored old-to-new top-level field mapping.
-// A mapping applies to any request or response direction in the compared
-// OpenAPI pair where both fields exist and have the same primitive type.
+// A mapping applies to a direction where the from name was removed and the to
+// name was added, and both carry the same primitive type. A direction that
+// still contains both names as persistent fields does not apply the rename.
 type RenameIntent struct {
 	From string `yaml:"from"`
 	To   string `yaml:"to"`
 }
 
 // DraftOptions controls heuristic rename detection. RenameConfidence is a
-// normalized edit-similarity threshold from 0 to 1; 1 preserves the historic
-// exact case/separator-normalized behavior. Strict suppresses heuristics but
-// still permits explicit RenameIntents.
+// normalized edit-similarity threshold from 0 to 1; at 1, only pairs whose
+// case-and-separator-normalized names are identical are auto-renamed. Names
+// that consist solely of separators (for example "_" and "-") normalize to an
+// empty string and therefore match each other at this threshold. Strict
+// suppresses heuristics but still permits explicit RenameIntents.
 type DraftOptions struct {
 	RenameConfidence float64
 	Strict           bool
@@ -257,10 +260,11 @@ func DraftShim(fromOpenAPI, toOpenAPI []byte) (*ShimProposal, error) {
 }
 
 // DraftShimStrict is the operator escape hatch: it suppresses every heuristic
-// rename and reports each non-intent removed/added pair as a candidate instead.
-// Use when the drafter's confidence is itself the thing in question — for
-// example when reviewing a high-stakes contract drift and an auto-rename would
-// short-circuit a decision the operator wants to make.
+// rename and reports each type-compatible non-intent removed/added pair as a
+// candidate instead. Pairs without a recognized primitive type are left as
+// notes, not candidates. Use when the drafter's confidence is itself the thing
+// in question — for example when reviewing a high-stakes contract drift and an
+// auto-rename would short-circuit a decision the operator wants to make.
 func DraftShimStrict(fromOpenAPI, toOpenAPI []byte) (*ShimProposal, error) {
 	return DraftShimWithOptions(fromOpenAPI, toOpenAPI, DraftOptions{RenameConfidence: 1, Strict: true})
 }

@@ -484,8 +484,8 @@ func TestRunDraftShimMissingLayer(t *testing.T) {
 // branch in run() so a regression there is caught.
 func TestRunDraftShimRoutesThroughDispatcher(t *testing.T) {
 	bundleDir, fromVer, toVer := writeDriftPair(t)
-	// run() writes shimproposal to os.Stdout which we cannot capture here, but
-	// exit 0 confirms the full dispatch path reached runDraftShim successfully.
+	// exit 0 confirms the full dispatch path reached runDraftShim successfully;
+	// --out directs the shim proposal to a temp file rather than os.Stdout.
 	code := run([]string{"draft-shim", "--bundle", bundleDir, "--from", fromVer, "--to", toVer, "--out", filepath.Join(t.TempDir(), "out.yaml")}, io.Discard)
 	if code != 0 {
 		t.Fatalf("run draft-shim via dispatcher: exit %d, want 0", code)

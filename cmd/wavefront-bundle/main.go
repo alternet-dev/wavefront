@@ -146,7 +146,7 @@ func runDraftShim(args []string, errOut, stdout io.Writer) int {
 	fromVersion := fs.String("from", "", "the old contract version (layer subdir) to bridge from")
 	toVersion := fs.String("to", "", "the new contract version (layer subdir) to bridge to")
 	outFile := fs.String("out", "", "write the drafted override to this file; default stdout")
-	strict := fs.Bool("strict", false, "suppress heuristic renames; surface every non-intent removed/added pair as a candidate")
+	strict := fs.Bool("strict", false, "suppress heuristic renames; surface each type-compatible non-intent removed/added pair as a candidate")
 	renameConfidence := fs.Float64("rename-confidence", 1, "minimum normalized name similarity for heuristic same-type renames (0 to 1; 1 preserves exact normalized-name matching)")
 	renameIntent := fs.String("rename-intent", "", "YAML file of explicit old-to-new same-type field rename mappings for this comparison")
 	if err := fs.Parse(args); err != nil {

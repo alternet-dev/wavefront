@@ -53,8 +53,9 @@ renames:
 ```
 
 Each entry must name top-level, same-primitive-type fields on at least one
-request or response direction in the selected pair of layers. Intent wins
-over the confidence threshold and `--strict`; on a response it is applied in
+request or response direction in the selected pair of layers. If either mapped
+name appears in a direction without its mate, validation rejects the file. Intent
+wins over the confidence threshold and `--strict`; on a response it is applied in
 reverse. The file is input to one `draft-shim` invocation, not generated
 bundle state, so it cannot accidentally affect a later version diff. Keep it
 with the migration source that owns that specific comparison.
