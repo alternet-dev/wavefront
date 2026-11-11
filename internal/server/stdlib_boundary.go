@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -236,13 +237,17 @@ type sniffingConn struct {
 	server            *Server
 	handlerSeen       atomic.Bool
 	waitingForRequest atomic.Bool
+	idleDeadlineSet   atomic.Bool
+	pendingHeaderRead atomic.Bool
 	status            atomic.Int32 // 0 if no response status has been captured
 	emitted           atomic.Bool
+	requestBytes      requestBytesTracker
 }
 
 func (c *sniffingConn) Read(p []byte) (int, error) {
 	n, err := c.Conn.Read(p)
 	if n > 0 {
+		c.requestBytes.observe(p[:n])
 		// A successful idle probe means a new request has started. The next
 		// timeout, if any, belongs to that request's header read rather than
 		// the keepalive wait.
@@ -257,19 +262,37 @@ func (c *sniffingConn) Read(p []byte) (int, error) {
 	return n, err
 }
 
-// SetReadDeadline notices when net/http finishes its idle probe from bytes it
-// already buffered. In that case no Read reaches this wrapper. net/http's
-// keepalive loop clears the read deadline once its bufio Peek has observed
-// the next request's first bytes, whether those came from the wire or from
-// the buffer and whether or not an idle deadline was ever set. Treating that
-// zero SetReadDeadline as proof the next request started handles the
-// pipelined-buffered-prefix case when IdleTimeout and ReadTimeout are both
-// zero.
+// SetReadDeadline distinguishes net/http's first idle-probe deadline from the
+// zero deadline it sets after Peek(4) has observed a new request. A prefix of
+// one to three bytes may already be in net/http's bufio.Reader, so Peek waits
+// for a fourth byte without calling Read. requestBytes detects that prefix and
+// preserves a header deadline across the first zero-deadline call.
 func (c *sniffingConn) SetReadDeadline(t time.Time) error {
-	if t.IsZero() && c.waitingForRequest.Load() {
-		c.requestStarted()
+	if c.waitingForRequest.Load() {
+		if !c.idleDeadlineSet.Swap(true) {
+			return c.Conn.SetReadDeadline(t)
+		}
+		if t.IsZero() {
+			c.requestStarted()
+		}
+		return c.Conn.SetReadDeadline(t)
+	}
+	if c.pendingHeaderRead.Load() && !c.idleDeadlineSet.Swap(true) && t.IsZero() {
+		if d := c.readHeaderTimeout(); d > 0 {
+			return c.Conn.SetReadDeadline(time.Now().Add(d))
+		}
 	}
 	return c.Conn.SetReadDeadline(t)
+}
+
+func (c *sniffingConn) readHeaderTimeout() time.Duration {
+	if c.server == nil {
+		return 0
+	}
+	if c.server.cfg.ReadHeaderTimeout > 0 {
+		return c.server.cfg.ReadHeaderTimeout
+	}
+	return c.server.cfg.ReadTimeout
 }
 
 func (c *sniffingConn) Write(p []byte) (int, error) {
@@ -298,6 +321,16 @@ func (c *sniffingConn) beginIdle() {
 	c.handlerSeen.Store(false)
 	c.status.Store(0)
 	c.waitingForRequest.Store(true)
+	c.idleDeadlineSet.Store(false)
+	c.pendingHeaderRead.Store(false)
+	if c.requestBytes.resetAndHasNextRequest() {
+		// net/http's buffered reader already holds a prefix of the next
+		// request. Its idle Peek(4) can block before reaching c.Read, so keep
+		// a header deadline active until that probe either succeeds or times
+		// out.
+		c.pendingHeaderRead.Store(true)
+		c.requestStarted()
+	}
 }
 
 // requestStarted clears the idle-probe marker exactly once and starts a fresh
@@ -343,11 +376,11 @@ func boundaryError(status int) *wireerror.Error {
 // emitBoundary writes one complete envelope to the underlying connection. It
 // bypasses c.Write to avoid re-entering the interception path.
 func (c *sniffingConn) emitBoundary(status int) error {
-	if !c.emitted.CompareAndSwap(false, true) {
-		return nil
-	}
 	werr := boundaryError(status)
 	if werr == nil {
+		return nil
+	}
+	if !c.emitted.CompareAndSwap(false, true) {
 		return nil
 	}
 	c.status.Store(int32(status))
@@ -370,6 +403,102 @@ func (c *sniffingConn) emitBoundary(status int) error {
 		Close:         true,
 	}
 	return resp.Write(c.Conn)
+}
+
+// requestBytesTracker recognizes the end of the request currently reaching
+// the handler. It only needs to retain enough information to notice bytes for
+// a following request that net/http has already read into its private buffer.
+// Requests with chunked or malformed length metadata are intentionally not
+// inferred: false positives would turn an ordinary idle close into a 408.
+type requestBytesTracker struct {
+	header        []byte
+	bodyRemaining int64
+	tracking      bool
+	complete      bool
+	nextRequest   bool
+}
+
+const maxTrackedRequestHeader = 1 << 20
+
+func (t *requestBytesTracker) observe(p []byte) {
+	if !t.tracking && !t.complete {
+		t.tracking = true
+		t.bodyRemaining = -1
+	}
+	for len(p) > 0 && t.tracking {
+		if t.complete {
+			t.nextRequest = true
+			return
+		}
+		if t.bodyRemaining >= 0 {
+			n := int64(len(p))
+			if n > t.bodyRemaining {
+				n = t.bodyRemaining
+			}
+			p = p[n:]
+			t.bodyRemaining -= n
+			if t.bodyRemaining == 0 {
+				t.complete = true
+			}
+			continue
+		}
+		remaining := maxTrackedRequestHeader - len(t.header)
+		if remaining <= 0 {
+			t.tracking = false
+			return
+		}
+		if len(p) > remaining {
+			t.header = append(t.header, p[:remaining]...)
+			t.tracking = false
+			return
+		}
+		t.header = append(t.header, p...)
+		p = nil
+		end := bytes.Index(t.header, []byte("\r\n\r\n"))
+		if end < 0 {
+			return
+		}
+		body, ok := requestBodyLength(t.header[:end+4])
+		if !ok {
+			t.tracking = false
+			return
+		}
+		p = t.header[end+4:]
+		t.header = t.header[:end+4]
+		t.bodyRemaining = body
+		if body == 0 {
+			t.complete = true
+		}
+	}
+}
+
+func (t *requestBytesTracker) resetAndHasNextRequest() bool {
+	next := t.nextRequest
+	*t = requestBytesTracker{tracking: true, bodyRemaining: -1}
+	return next
+}
+
+func requestBodyLength(header []byte) (int64, bool) {
+	lines := strings.Split(string(header), "\r\n")
+	var length int64
+	for _, line := range lines[1:] {
+		name, value, ok := strings.Cut(line, ":")
+		if !ok {
+			continue
+		}
+		if strings.EqualFold(name, "Transfer-Encoding") && strings.Contains(strings.ToLower(value), "chunked") {
+			return 0, false
+		}
+		if !strings.EqualFold(name, "Content-Length") {
+			continue
+		}
+		parsed, err := strconv.ParseInt(strings.TrimSpace(value), 10, 64)
+		if err != nil || parsed < 0 || (length != 0 && length != parsed) {
+			return 0, false
+		}
+		length = parsed
+	}
+	return length, true
 }
 
 // parseStatusLine extracts the numeric status code from the start of an
