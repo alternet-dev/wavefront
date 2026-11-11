@@ -225,6 +225,51 @@ func TestSniffingConnEmitBoundaryUnknownStatusIsNoop(t *testing.T) {
 	if bc.buf.Len() != 0 {
 		t.Fatalf("emitBoundary(400) wrote %d bytes, want 0", bc.buf.Len())
 	}
+	if err := c.emitBoundary(http.StatusRequestTimeout); err != nil {
+		t.Fatalf("emitBoundary(408) after unknown status: %v", err)
+	}
+	if bc.buf.Len() == 0 {
+		t.Fatal("emitBoundary(408) after unknown status wrote nothing")
+	}
+}
+
+func TestRequestBytesTrackerDetectsBufferedNextRequest(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want bool
+	}{
+		{
+			name: "complete request only",
+			in:   "GET / HTTP/1.1\r\nHost: example.test\r\n\r\n",
+		},
+		{
+			name: "three byte next prefix",
+			in: "GET / HTTP/1.1\r\nHost: example.test\r\n\r\n" +
+				"GET",
+			want: true,
+		},
+		{
+			name: "body is not a next request",
+			in: "POST / HTTP/1.1\r\nHost: example.test\r\nContent-Length: 3\r\n\r\n" +
+				"GET",
+		},
+		{
+			name: "next prefix after body",
+			in: "POST / HTTP/1.1\r\nHost: example.test\r\nContent-Length: 3\r\n\r\n" +
+				"abcGET",
+			want: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var tracker requestBytesTracker
+			tracker.observe([]byte(tc.in))
+			if got := tracker.resetAndHasNextRequest(); got != tc.want {
+				t.Fatalf("resetAndHasNextRequest() = %v, want %v", got, tc.want)
+			}
+		})
+	}
 }
 
 // TestSniffingConnWriteInterceptsBoundaryStatusBeforeHandler verifies that

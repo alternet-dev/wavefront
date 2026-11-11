@@ -131,6 +131,24 @@ func waitForBoundaryCount(t *testing.T, opsURL, status string, want float64, d t
 	return got
 }
 
+// waitForErrorCount waits for the error counter to reflect an emitted boundary
+// envelope. The listener increments this counter before returning control to
+// net/http, but the polling keeps this assertion independent of serve-loop
+// scheduling.
+func waitForErrorCount(t *testing.T, opsURL, code string, want float64, d time.Duration) float64 {
+	t.Helper()
+	deadline := time.Now().Add(d)
+	var got float64
+	for time.Now().Before(deadline) {
+		got = scrapeErrorCount(t, opsURL, code)
+		if got >= want {
+			return got
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	return got
+}
+
 // newBoundaryTestServer wires up a data-plane server with a tight
 // ReadHeaderTimeout suitable for the boundary tests, plus its companion ops
 // listener for scraping. The data plane uses an unstarted httptest server
@@ -225,6 +243,7 @@ func TestStdlibBoundarySlowHeaderReturns408Envelope(t *testing.T) {
 	dataSrv, opsSrv, _ := newBoundaryTestServer(t, headerTimeout)
 
 	before := scrapeBoundaryCount(t, opsSrv.URL, "408")
+	beforeErrors := scrapeErrorCount(t, opsSrv.URL, "request_header_timeout")
 
 	u, err := url.Parse(dataSrv.URL)
 	if err != nil {
@@ -251,6 +270,9 @@ func TestStdlibBoundarySlowHeaderReturns408Envelope(t *testing.T) {
 	if got != before+1 {
 		t.Fatalf(`wavefront_stdlib_boundary_total{status="408"} = %v, want %v (before=%v)`,
 			got, before+1, before)
+	}
+	if got := waitForErrorCount(t, opsSrv.URL, "request_header_timeout", beforeErrors+1, 2*time.Second); got != beforeErrors+1 {
+		t.Fatalf(`wavefront_errors_total{code="request_header_timeout"} = %v, want %v (before=%v)`, got, beforeErrors+1, beforeErrors)
 	}
 
 	for _, status := range []string{"unknown", "431", "417", "400"} {
@@ -279,6 +301,7 @@ func TestStdlibBoundaryOversizedHeadersIncrements431(t *testing.T) {
 	})
 
 	before := scrapeBoundaryCount(t, opsSrv.URL, "431")
+	beforeErrors := scrapeErrorCount(t, opsSrv.URL, "request_header_too_large")
 
 	u, err := url.Parse(dataSrv.URL)
 	if err != nil {
@@ -314,11 +337,15 @@ func TestStdlibBoundaryOversizedHeadersIncrements431(t *testing.T) {
 		t.Fatalf(`wavefront_stdlib_boundary_total{status="431"} = %v, want %v (before=%v)`,
 			got, before+1, before)
 	}
+	if got := waitForErrorCount(t, opsSrv.URL, "request_header_too_large", beforeErrors+1, 2*time.Second); got != beforeErrors+1 {
+		t.Fatalf(`wavefront_errors_total{code="request_header_too_large"} = %v, want %v (before=%v)`, got, beforeErrors+1, beforeErrors)
+	}
 }
 
 func TestStdlibBoundaryUnexpectedExpectReturns417Envelope(t *testing.T) {
 	dataSrv, opsSrv, _ := newBoundaryTestServer(t, 5*time.Second)
 	before := scrapeBoundaryCount(t, opsSrv.URL, "417")
+	beforeErrors := scrapeErrorCount(t, opsSrv.URL, "expectation_failed")
 
 	u, err := url.Parse(dataSrv.URL)
 	if err != nil {
@@ -347,6 +374,9 @@ func TestStdlibBoundaryUnexpectedExpectReturns417Envelope(t *testing.T) {
 	if got != before+1 {
 		t.Fatalf(`wavefront_stdlib_boundary_total{status="417"} = %v, want %v (before=%v)`,
 			got, before+1, before)
+	}
+	if got := waitForErrorCount(t, opsSrv.URL, "expectation_failed", beforeErrors+1, 2*time.Second); got != beforeErrors+1 {
+		t.Fatalf(`wavefront_errors_total{code="expectation_failed"} = %v, want %v (before=%v)`, got, beforeErrors+1, beforeErrors)
 	}
 }
 
@@ -418,12 +448,14 @@ func TestStdlibBoundaryKeepalivePipelinedSlowHeaderReturns408Envelope(t *testing
 	t.Cleanup(func() { _ = conn.Close() })
 	_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
 
-	// Pipeline the handled request AND the next request's prefix in one
-	// write. On localhost the server's bufio buffers both before the first
-	// handler completes, so StateIdle fires with the prefix already buffered.
+	// Pipeline the handled request AND only the three-byte "GET" prefix of
+	// the next request in one write. On localhost the server's bufio buffers
+	// the prefix before the first handler completes. net/http's keepalive
+	// Peek(4) must then wait for a fourth byte, so the listener needs to keep
+	// the header deadline rather than treating the prefix as an idle socket.
 	pipelined := fmt.Sprintf(
 		"GET /not-in-the-bundle HTTP/1.1\r\nHost: %s\r\n\r\n"+
-			"GET /v3/echo HTTP/1.1\r\n",
+			"GET",
 		u.Host,
 	)
 	if _, err := conn.Write([]byte(pipelined)); err != nil {
