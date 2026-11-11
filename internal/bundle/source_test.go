@@ -2,10 +2,14 @@ package bundle
 
 import (
 	"archive/tar"
+	"bytes"
 	"compress/gzip"
 	"errors"
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -13,6 +17,16 @@ type testArchiveEntry struct {
 	name     string
 	data     []byte
 	typeflag byte
+}
+
+func validArchiveEntries(t *testing.T) []testArchiveEntry {
+	t.Helper()
+	return []testArchiveEntry{
+		{name: "layer/", typeflag: tar.TypeDir},
+		{name: "layer/descriptors.binpb", data: fdsBytes(t)},
+		{name: "layer/openapi.json", data: []byte(validOpenAPI)},
+		{name: "layer/versions.yaml", data: []byte(validVersions)},
+	}
 }
 
 func writeTestArchive(t *testing.T, entries []testArchiveEntry) string {
@@ -143,5 +157,86 @@ func TestLoadRejectsDuplicateArchiveEntry(t *testing.T) {
 	var archiveErr *ArchiveError
 	if !errors.As(err, &archiveErr) {
 		t.Fatalf("Load duplicate entries error = %v, want ArchiveError", err)
+	}
+}
+
+func TestLoadRejectsRegularFileWithTrailingSlash(t *testing.T) {
+	archive := writeTestArchive(t, []testArchiveEntry{{name: "layer/openapi.json", data: []byte("x")}})
+	raw, err := os.ReadFile(archive)
+	if err != nil {
+		t.Fatalf("read archive: %v", err)
+	}
+	gz, err := gzip.NewReader(bytes.NewReader(raw))
+	if err != nil {
+		t.Fatalf("open gzip: %v", err)
+	}
+	tarBytes, err := io.ReadAll(gz)
+	if err != nil {
+		t.Fatalf("read tar: %v", err)
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatalf("close gzip: %v", err)
+	}
+	copy(tarBytes, []byte("layer/openapi.json/"))
+	for i := 148; i < 156; i++ {
+		tarBytes[i] = ' '
+	}
+	var checksum int
+	for _, b := range tarBytes[:512] {
+		checksum += int(b)
+	}
+	copy(tarBytes[148:156], fmt.Sprintf("%06o\x00 ", checksum))
+	var rewritten bytes.Buffer
+	zw := gzip.NewWriter(&rewritten)
+	if _, err := zw.Write(tarBytes); err != nil {
+		t.Fatalf("rewrite gzip: %v", err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatalf("close rewritten gzip: %v", err)
+	}
+	if err := os.WriteFile(archive, rewritten.Bytes(), 0o600); err != nil {
+		t.Fatalf("write rewritten archive: %v", err)
+	}
+	_, err = Load(archive)
+	var archiveErr *ArchiveError
+	if !errors.As(err, &archiveErr) {
+		t.Fatalf("Load trailing-slash regular file error = %v, want ArchiveError", err)
+	}
+}
+
+func TestLoadRejectsTrailingGarbageAfterGzipMember(t *testing.T) {
+	archive := writeTestArchive(t, validArchiveEntries(t))
+	f, err := os.OpenFile(archive, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatalf("open archive: %v", err)
+	}
+	if _, err := f.Write([]byte("not a gzip member")); err != nil {
+		t.Fatalf("append garbage: %v", err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("close archive: %v", err)
+	}
+	_, err = Load(archive)
+	var archiveErr *ArchiveError
+	if !errors.As(err, &archiveErr) {
+		t.Fatalf("Load trailing garbage error = %v, want ArchiveError", err)
+	}
+}
+
+func TestLoadCountsImplicitDirectoriesTowardArchiveEntryLimit(t *testing.T) {
+	entries := validArchiveEntries(t)
+	for i := 0; i < 51; i++ {
+		// Each name is within maxArchivePathBytes, but their disjoint parents
+		// exceed maxArchiveEntries when materialized in memory.
+		entries = append(entries, testArchiveEntry{
+			name: "layer/" + fmt.Sprintf("p%03d", i) + strings.Repeat("/d", 2_000) + "/file",
+			data: []byte("x"),
+		})
+	}
+	archive := writeTestArchive(t, entries)
+	_, err := Load(archive)
+	var archiveErr *ArchiveError
+	if !errors.As(err, &archiveErr) {
+		t.Fatalf("Load archive with excessive implicit directories error = %v, want ArchiveError", err)
 	}
 }
