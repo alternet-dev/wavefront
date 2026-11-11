@@ -478,6 +478,32 @@ func TestRunDraftShimMissingLayer(t *testing.T) {
 	}
 }
 
+// TestRunDraftShimRoutesThroughDispatcher confirms that the top-level run()
+// dispatcher forwards the draft-shim subcommand to runDraftShim. All other
+// draft-shim tests call runDraftShim directly; this one exercises the routing
+// branch in run() so a regression there is caught.
+func TestRunDraftShimRoutesThroughDispatcher(t *testing.T) {
+	bundleDir, fromVer, toVer := writeDriftPair(t)
+	// run() writes shimproposal to os.Stdout which we cannot capture here, but
+	// exit 0 confirms the full dispatch path reached runDraftShim successfully.
+	code := run([]string{"draft-shim", "--bundle", bundleDir, "--from", fromVer, "--to", toVer, "--out", filepath.Join(t.TempDir(), "out.yaml")}, io.Discard)
+	if code != 0 {
+		t.Fatalf("run draft-shim via dispatcher: exit %d, want 0", code)
+	}
+}
+
+// TestRunDraftShimRejectsNegativeRenameConfidence confirms the lower bound of
+// the --rename-confidence range: a value below 0 must return exit 1, mirroring
+// the rejection already tested for values above 1.
+func TestRunDraftShimRejectsNegativeRenameConfidence(t *testing.T) {
+	bundleDir, fromVer, toVer := writeDriftPair(t)
+	if code := runDraftShim(
+		[]string{"--bundle", bundleDir, "--from", fromVer, "--to", toVer, "--rename-confidence", "-0.1"},
+		io.Discard, io.Discard); code != 1 {
+		t.Fatalf("draft-shim negative confidence: exit %d, want 1", code)
+	}
+}
+
 // --- verify: candidates-block check ---
 
 func TestRunVerifyRefusesUnresolvedCandidatesBlock(t *testing.T) {
