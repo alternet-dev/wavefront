@@ -160,12 +160,21 @@ func (j *JSONJSON) DecodeRequest(b Binding, in []byte) (UpstreamCall, *wireerror
 	if err != nil {
 		return UpstreamCall{}, wireerror.DecodeFailed("request_message " + b.RequestMessage() + " is not resolvable")
 	}
-	if md.Fields().Len() == 0 {
-		return UpstreamCall{Method: b.Method(), Path: b.Route()}, nil
-	}
+	// A zero-field message is the generator's synthetic Empty, bound to a
+	// bodyless operation (no requestBody). The upstream call then carries no
+	// body and no Content-Type. Any bytes the client did supply are still
+	// descriptor-validated: protojson rejects malformed JSON and unknown fields,
+	// so a body for a bodyless binding surfaces as decode_failed rather than
+	// being silently discarded.
+	empty := md.Fields().Len() == 0
 	msg := dynamicpb.NewMessage(md)
-	if err := protojson.Unmarshal(in, msg); err != nil {
-		return UpstreamCall{}, wireerror.DecodeFailed("request body is not valid JSON for " + b.RequestMessage())
+	if !empty || len(in) > 0 {
+		if err := protojson.Unmarshal(in, msg); err != nil {
+			return UpstreamCall{}, wireerror.DecodeFailed("request body is not valid JSON for " + b.RequestMessage())
+		}
+	}
+	if empty {
+		return UpstreamCall{Method: b.Method(), Path: b.Route()}, nil
 	}
 	canonical, err := protojson.Marshal(msg)
 	if err != nil {

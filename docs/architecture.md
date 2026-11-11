@@ -12,11 +12,13 @@ Implementation shape — package layout and the request path.
   loaded bundle; maps to a transform profile or a typed error.
 - **adapter** (`internal/adapter/`) — descriptor-backed codec pairs. Decode
   external protobuf, external JSON, or unary gRPC-framed protobuf to the
-  internal JSON value tree and encode the response in the representation
-  selected by `Accept`. `ProtoJSON` and `JSONJSON` share the same
-  descriptor-driven conversion; `GRPCJSON` wraps it in strict unary gRPC
-  message framing. The server transport, not the adapter, owns HTTP/2 routing
-  and `grpc-status` trailers.
+  internal JSON value tree, then encode the response. `ProtoJSON` and
+  `JSONJSON` are the HTTP codecs and share the same descriptor-driven
+  conversion; their response representation is selected by `Accept`.
+  `GRPCJSON` wraps the same conversion in strict unary gRPC message framing
+  and does not participate in `Accept` negotiation — a gRPC request is always
+  answered with a gRPC response. The server transport, not the adapter, owns
+  HTTP/2 routing and `grpc-status` trailers.
 - **transform** (`internal/transform/`) — applies the declarative mapping
   (add/rename/optionalize/default/coerce, route remap) in both directions.
 - **server** (`internal/server/`) — `net/http` listener, the one upstream

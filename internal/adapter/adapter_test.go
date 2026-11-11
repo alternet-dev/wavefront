@@ -441,3 +441,60 @@ func TestUnresolvableBindingIsTypedErrorJSONJSON(t *testing.T) {
 		t.Fatalf("want *wireerror.Error, got %v", werr)
 	}
 }
+
+// TestJSONJSONBodylessRejectsMalformedBody: bytes supplied against a
+// zero-field request_message must be descriptor-validated. Malformed JSON
+// surfaces as decode_failed instead of being silently discarded; the JSON
+// adapter advertises descriptor validation on every body.
+func TestJSONJSONBodylessRejectsMalformedBody(t *testing.T) {
+	a := NewJSONJSON(testResolver{testFiles(t)})
+	_, werr := a.DecodeRequest(
+		tb{method: "POST", route: "/v3/items", req: "acme.v1.Empty", resp: "acme.v1.Pong"},
+		[]byte("not json"),
+	)
+	if werr == nil {
+		t.Fatal("DecodeRequest accepted malformed JSON against Empty; want decode_failed")
+	}
+	if werr.Code() != "decode_failed" {
+		t.Errorf("code = %q, want decode_failed", werr.Code())
+	}
+}
+
+// TestJSONJSONBodylessRejectsUnknownFields: a body with fields the
+// zero-field request_message does not declare must fail validation. The
+// adapter contract is that unknown fields are a client contract breach, not
+// a silently accepted payload — the bodyless path is no exception.
+func TestJSONJSONBodylessRejectsUnknownFields(t *testing.T) {
+	a := NewJSONJSON(testResolver{testFiles(t)})
+	_, werr := a.DecodeRequest(
+		tb{method: "POST", route: "/v3/items", req: "acme.v1.Empty", resp: "acme.v1.Pong"},
+		[]byte(`{"unexpected":1}`),
+	)
+	if werr == nil {
+		t.Fatal("DecodeRequest accepted unknown fields against Empty; want decode_failed")
+	}
+	if werr.Code() != "decode_failed" {
+		t.Errorf("code = %q, want decode_failed", werr.Code())
+	}
+}
+
+// TestJSONJSONBodylessAcceptsEmptyObject: a syntactically valid body carrying
+// no declared fields is still a bodyless binding. The descriptor validates
+// (no unknown fields), and the upstream call stays bodyless rather than
+// forwarding `{}` to the backend.
+func TestJSONJSONBodylessAcceptsEmptyObject(t *testing.T) {
+	a := NewJSONJSON(testResolver{testFiles(t)})
+	call, werr := a.DecodeRequest(
+		tb{method: "POST", route: "/v3/items", req: "acme.v1.Empty", resp: "acme.v1.Pong"},
+		[]byte(`{}`),
+	)
+	if werr != nil {
+		t.Fatalf("DecodeRequest: %v", werr)
+	}
+	if len(call.Body) != 0 {
+		t.Errorf("Body = %q, want empty", call.Body)
+	}
+	if call.ContentType != "" {
+		t.Errorf("ContentType = %q, want empty", call.ContentType)
+	}
+}

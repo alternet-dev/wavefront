@@ -287,8 +287,10 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request) {
 	// value that excludes every shipped codec is 406.
 	//
 	// Ordering: AFTER the route gate (so unknown_route still wins on an
-	// unmatched path) and BEFORE the body read/decode (so decode_failed stays
-	// reserved for malformed protobuf inside a valid envelope).
+	// unmatched path) and BEFORE the body read/decode (so decode_failed is
+	// reached only through a valid envelope — it covers malformed protobuf,
+	// and for the JSON adapter malformed, unknown-field, or descriptor-
+	// incompatible JSON).
 	//
 	// No-body rule: with no bytes there is no request envelope to negotiate;
 	// protobuf is the compatibility fallback decoder, and Accept still chooses
