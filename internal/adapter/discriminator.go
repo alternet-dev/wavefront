@@ -29,8 +29,8 @@ type discInfo struct {
 // transformWrappedToFlat rewrites protojson's output JSON for md so each mapped
 // discriminator wrapper carries the flattened OpenAPI wire shape (discriminator
 // property + member fields at the top level). It is a no-op when resolver does
-// not implement DiscriminatorResolver, so adapters without typed-union support
-// stay byte-identical.
+// not implement DiscriminatorResolver. A resolver that implements the
+// capability still parses and re-marshals JSON even when no wrapper matches.
 func transformWrappedToFlat(md protoreflect.MessageDescriptor, resolver MessageResolver, in []byte) ([]byte, error) {
 	disc, ok := resolver.(DiscriminatorResolver)
 	if !ok {
@@ -41,8 +41,8 @@ func transformWrappedToFlat(md protoreflect.MessageDescriptor, resolver MessageR
 
 // transformFlatToWrapped rewrites an upstream JSON body for md so each mapped
 // discriminator position is wrapped under the matched oneof member key, which
-// is what protojson will accept against the generated schema. No-op when
-// resolver does not implement DiscriminatorResolver.
+// is what protojson will accept against the generated schema. It returns the
+// original bytes only when resolver does not implement DiscriminatorResolver.
 func transformFlatToWrapped(md protoreflect.MessageDescriptor, resolver MessageResolver, in []byte) ([]byte, error) {
 	disc, ok := resolver.(DiscriminatorResolver)
 	if !ok {
@@ -61,7 +61,8 @@ const (
 // transformJSON is the shared JSON walk: decode in, visit it against md,
 // apply the discriminator transform at each wrapper position, re-encode.
 // An input that is not a JSON object at the root (null, scalar, array) is
-// returned verbatim — a message body in this adapter is always a JSON object.
+// returned verbatim. Bodies bound directly to google.protobuf.Value may use
+// any of those JSON shapes, and none can contain a discriminator wrapper.
 func transformJSON(md protoreflect.MessageDescriptor, resolver DiscriminatorResolver, in []byte, dir transformDir) ([]byte, error) {
 	if len(in) == 0 {
 		return in, nil

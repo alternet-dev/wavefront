@@ -17,10 +17,11 @@
 // google/protobuf/struct.proto is embedded in the layer when any WKT lowering
 // is used. These lowerings apply inline or via a $ref: a non-object component
 // (enum, typed dict, union, open object) referenced by a field lowers the same
-// as the equivalent inline schema; only an object-with-properties component
-// becomes a proto message, which is what a request/response body must $ref.
-// A body that $refs an open object, unconstrained schema, or untagged union
-// binds directly to its Struct/Value message. allOf, a mixed
+// as the equivalent inline schema; an object-with-properties component becomes
+// a generated proto message, while an open object, unconstrained schema, or
+// untagged union becomes the corresponding Struct/Value message. A request or
+// response body may $ref any component that lowers to one of those messages.
+// allOf, a mixed
 // additionalProperties, an inline (non-$ref) body, and an untyped non-empty
 // leaf stay hard errors rather than a lossy bundle. Output is
 // byte-reproducible (sorted, deterministic marshal) for the consumer's

@@ -82,7 +82,8 @@ func (p *ProtoJSON) DecodeRequest(b Binding, in []byte) (UpstreamCall, *wireerro
 	}
 	// Discriminated unions carry a flattened upstream wire shape, but protojson
 	// writes the wrapped proto3-oneof shape; collapse wrapped → flat for the
-	// upstream body (#132). No-op when the resolver has no discriminators.
+	// upstream body (#132). The original bytes pass through when the resolver
+	// does not support discriminators.
 	flat, terr := transformWrappedToFlat(md, p.resolver, j)
 	if terr != nil {
 		return UpstreamCall{}, wireerror.DecodeFailed("could not flatten discriminated union: " + terr.Error())
@@ -126,8 +127,8 @@ func (p *ProtoJSON) encodeMessage(name string, upstreamJSON []byte) ([]byte, str
 		return nil, "application/protobuf", nil
 	}
 	// Upstream carries the flattened discriminator shape; protojson needs the
-	// wrapped proto3-oneof shape (#132). No-op when the resolver has no
-	// discriminators.
+	// wrapped proto3-oneof shape (#132). The original bytes pass through when
+	// the resolver does not support discriminators.
 	wrapped, terr := transformFlatToWrapped(md, p.resolver, upstreamJSON)
 	if terr != nil {
 		return nil, "", wireerror.UpstreamError("could not wrap discriminated union: " + terr.Error())

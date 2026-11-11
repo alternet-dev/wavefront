@@ -266,7 +266,7 @@ func TestEncodeErrorUnboundStatusIsUpstreamError(t *testing.T) {
 }
 
 // discFiles builds a self-contained registry with a nested discriminator
-// wrapper: Env{Pet pet = 1} and Env.Pet{oneof variant {Cat cat; Dog dog}},
+// wrapper: Env{PetVariant pet = 1} and Env.PetVariant{oneof variant {Cat cat; Dog dog}},
 // where Cat has fields petType + meow, Dog has petType + woof. This is the
 // shape bundlegen emits for a mapped discriminated union property (#132).
 func discFiles(t *testing.T) *protoregistry.Files {

@@ -107,11 +107,11 @@ default target a version uses with no override.
 ### Typed discriminated unions
 
 A discriminated `anyOf` / `oneOf` whose sibling `discriminator` carries an
-explicit `mapping` lowers to a generated wrapper message holding a proto3
-`oneof` — the client decodes a typed variant instead of the opaque
-`google.protobuf.Struct` fallback. The wrapper is nested in the containing
-message, named `<FieldNameCamelCase>Variant`, and its single `oneof variant`
-carries one field per mapped member.
+explicit `mapping` of values to local `#/components/schemas/` references lowers
+to a generated wrapper message holding a proto3 `oneof` — the client decodes a
+typed variant instead of the opaque `google.protobuf.Struct` fallback. The
+wrapper is nested in the containing message, named `<FieldNameCamelCase>Variant`,
+and its single `oneof variant` carries one field per mapped member.
 
 ```yaml
 # OpenAPI
@@ -137,10 +137,10 @@ message PetEnvelope {
 
 The two wire shapes differ: OpenAPI flattens the discriminator alongside the
 member's fields (`{"petType":"cat","meow":"purr"}`), protojson wraps them
-under the member key (`{"cat":{"meow":"purr"}}`). Each layer that uses a
+under the member key (`{"cat":{"petType":"cat","meow":"purr"}}`). Each layer that uses a
 mapped discriminated union emits a `discriminators.yaml` sidecar; the proxy's
-adapter reads it to transform between the two shapes on decode (upstream →
-proto) and encode (proto → upstream).
+adapter reads it to transform between the two shapes on request decode
+(protobuf → upstream) and response encode (upstream → protobuf).
 
 ```yaml
 # <layer>/discriminators.yaml

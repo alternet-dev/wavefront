@@ -97,8 +97,8 @@ type discriminatorMetadata struct {
 }
 
 // renderDiscriminatorsYAML emits the layer's discriminators.yaml body from a
-// list of wrapper-message entries, sorted by (Message) for byte-reproducibility.
-// Returns ("", nil) when entries is empty — a layer with no mapped
+// list of wrapper-message entries, sorted by Message for byte-reproducibility.
+// It returns "" when entries is empty — a layer with no mapped
 // discriminated unions carries no sidecar at all, so bundles that don't use
 // the construct stay byte-identical to pre-#132 output.
 func renderDiscriminatorsYAML(entries []discriminatorMetadata) string {
