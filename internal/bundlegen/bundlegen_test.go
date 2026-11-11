@@ -1954,6 +1954,85 @@ func TestAddBindsExplicitlyEmptyOpenObjectsAsStructBodies(t *testing.T) {
 	}
 }
 
+// TestAddLowersExplicitlyEmptyOpenObjectComponentsInNestedFields pins the
+// nested lowering for a $ref'd object with an empty properties map that
+// explicitly remains open. Both a field and an array item lower to Struct.
+func TestAddLowersExplicitlyEmptyOpenObjectComponentsInNestedFields(t *testing.T) {
+	const template = `{
+  "openapi": "3.1.0",
+  "info": {"title": "t", "version": "0"},
+  "paths": {"/x": {"get": {"operationId": "x", "responses": {"200": {
+    "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Envelope"}}}}}}}},
+  "components": {"schemas": {
+    "Envelope": {"type": "object", "properties": {
+      "single": {"$ref": "#/components/schemas/Open"},
+      "many": {"type": "array", "items": {"$ref": "#/components/schemas/Open"}}
+    }},
+    "Open": {"type": "object", "properties": {}, "additionalProperties": OPEN}
+  }}
+}`
+	for name, open := range map[string]string{
+		"true":         "true",
+		"empty schema": "{}",
+	} {
+		t.Run(name, func(t *testing.T) {
+			out := t.TempDir()
+			in := writeOpenAPI(t, strings.Replace(template, "OPEN", open, 1))
+			if err := bundlegen.Add(in, out, false); err != nil {
+				t.Fatalf("Add: %v", err)
+			}
+			b, err := bundle.Load(out)
+			if err != nil {
+				t.Fatalf("generated bundle did not load: %v", err)
+			}
+			envelope, err := b.Message("wavefront.gen.v0.Envelope")
+			if err != nil {
+				t.Fatalf("resolve Envelope: %v", err)
+			}
+			single := envelope.Fields().ByName(protoName("single"))
+			if single == nil || single.Message() == nil || string(single.Message().FullName()) != "google.protobuf.Struct" {
+				t.Errorf("single field = %v, want google.protobuf.Struct", fullName(single))
+			}
+			many := envelope.Fields().ByName(protoName("many"))
+			if many == nil || !many.IsList() || many.Message() == nil || string(many.Message().FullName()) != "google.protobuf.Struct" {
+				t.Errorf("many item = %v, want repeated google.protobuf.Struct", fullName(many))
+			}
+		})
+	}
+}
+
+// TestAddRejectsExplicitlyEmptyOpenObjectComponentAsMapValue pins the current
+// map boundary: a $ref'd open object is not a supported proto map value.
+func TestAddRejectsExplicitlyEmptyOpenObjectComponentAsMapValue(t *testing.T) {
+	const template = `{
+  "openapi": "3.1.0",
+  "info": {"title": "t", "version": "0"},
+  "paths": {"/x": {"get": {"operationId": "x", "responses": {"200": {
+    "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Envelope"}}}}}}}},
+  "components": {"schemas": {
+    "Envelope": {"type": "object", "properties": {
+      "values": {"type": "object", "additionalProperties": {"$ref": "#/components/schemas/Open"}}
+    }},
+    "Open": {"type": "object", "properties": {}, "additionalProperties": OPEN}
+  }}
+}`
+	for name, open := range map[string]string{
+		"true":         "true",
+		"empty schema": "{}",
+	} {
+		t.Run(name, func(t *testing.T) {
+			in := writeOpenAPI(t, strings.Replace(template, "OPEN", open, 1))
+			err := bundlegen.Add(in, t.TempDir(), false)
+			if err == nil {
+				t.Fatal("expected a hard error, got nil")
+			}
+			if !strings.Contains(err.Error(), `map value type "object" is unsupported`) {
+				t.Errorf("map value rejection = %q, want unsupported object value", err)
+			}
+		})
+	}
+}
+
 // TestAddBindsWKTComponentsAsErrorBodies covers #121's error-body surface: an
 // open object or untagged union referenced as a 4xx/5xx response binds to
 // google.protobuf.Struct or google.protobuf.Value respectively, and
@@ -2010,8 +2089,8 @@ func TestAddRejectsNonMessageComponentAsBody(t *testing.T) {
 	const template = `{
   "openapi": "3.1.0",
   "info": {"title": "t", "version": "0"},
-	  "paths": {"/x": {"get": {"operationId": "x", "responses": {"200": {
-	    "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Body"}}}}}}}},
+  "paths": {"/x": {"get": {"operationId": "x", "responses": {"200": {
+    "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Body"}}}}}}}},
   "components": {"schemas": {"Body": SCHEMA}}
 }`
 	cases := map[string]string{
@@ -2027,8 +2106,9 @@ func TestAddRejectsNonMessageComponentAsBody(t *testing.T) {
 			if err == nil {
 				t.Fatal("expected a hard error, got nil")
 			}
-			if !strings.Contains(err.Error(), "must be an object with properties") {
-				t.Errorf("body-direct rejection = %q, want it to mention 'must be an object with properties'", err.Error())
+			const want = "must be an object with properties, an open object, an unconstrained {} schema, or an untagged union"
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("body-direct rejection = %q, want it to mention %q", err.Error(), want)
 			}
 		})
 	}

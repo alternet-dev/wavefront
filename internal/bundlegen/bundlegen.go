@@ -288,7 +288,7 @@ func buildDescriptors(doc openAPI, roots []string, pkg, version string) ([]byte,
 		if wkt := bodyWKTMessageName(doc.Components.Schemas[r]); wkt != "" {
 			bodyWKTs[r] = wkt
 		} else {
-			return nil, nil, nil, fmt.Errorf("schema %q must be an object with properties", r)
+			return nil, nil, nil, fmt.Errorf("schema %q must be an object with properties, an open object, an unconstrained {} schema, or an untagged union", r)
 		}
 	}
 
@@ -917,7 +917,9 @@ func wktMessageName(sc *schema) string {
 // bodyWKTMessageName is the subset of WKT lowerings accepted as a component
 // bound directly to a request, response, or error body for #121. A tagged union
 // is also Struct-backed when nested (#129), but accepting it as a body root is a
-// separate surface and is deliberately not folded into this helper.
+// separate surface and is deliberately not folded into this helper. An inline
+// empty {} body binds the synthetic Empty in refSchemaName; only a $ref'd empty
+// component reaches this helper and binds google.protobuf.Value.
 func bodyWKTMessageName(sc *schema) string {
 	switch {
 	case isOpenObject(sc):
