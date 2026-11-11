@@ -234,6 +234,48 @@ func TestLoadRejectsTrailingGarbageAfterGzipMember(t *testing.T) {
 	}
 }
 
+func TestLoadHandlesArchiveWithGzipHeaderName(t *testing.T) {
+	// Write an archive whose gzip stream carries a non-empty FNAME field, using
+	// the same write pattern as writeTestArchive. Before the fix, gzip.NewReader
+	// read the header from the raw file without limit; this test exercises the
+	// new limitedFile code path and confirms normal archives still load.
+	filename := filepath.Join(t.TempDir(), "bundle.tar.gz")
+	f, err := os.Create(filename)
+	if err != nil {
+		t.Fatalf("create archive: %v", err)
+	}
+	gz := gzip.NewWriter(f)
+	gz.Name = strings.Repeat("x", 255)
+	tw := tar.NewWriter(gz)
+	for _, e := range validArchiveEntries(t) {
+		typeflag := e.typeflag
+		if typeflag == 0 {
+			typeflag = tar.TypeReg
+		}
+		hdr := &tar.Header{Name: e.name, Mode: 0o644, Size: int64(len(e.data)), Typeflag: typeflag}
+		if err := tw.WriteHeader(hdr); err != nil {
+			t.Fatalf("write header %q: %v", e.name, err)
+		}
+		if len(e.data) > 0 && typeflag == tar.TypeReg {
+			if _, err := tw.Write(e.data); err != nil {
+				t.Fatalf("write entry %q: %v", e.name, err)
+			}
+		}
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatalf("close tar: %v", err)
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatalf("close gzip: %v", err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("close file: %v", err)
+	}
+	if _, err := Load(filename); err != nil {
+		t.Fatalf("Load archive with gzip FNAME header: %v", err)
+	}
+}
+
 func TestLoadCountsImplicitDirectoriesTowardArchiveEntryLimit(t *testing.T) {
 	entries := validArchiveEntries(t)
 	for i := 0; i < 51; i++ {

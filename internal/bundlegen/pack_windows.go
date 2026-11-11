@@ -111,9 +111,15 @@ type packedFile struct {
 
 func writePackedBundle(dst *os.File, bundleDir string) error {
 	var files []packedFile
+	var totalBytes int64
+	var entryCount int
 	err := filepath.WalkDir(bundleDir, func(name string, entry fs.DirEntry, err error) error {
 		if err != nil {
 			return err
+		}
+		entryCount++
+		if entryCount > maxPackEntries {
+			return fmt.Errorf("bundle has more than %d entries", maxPackEntries)
 		}
 		if name != bundleDir && !entry.IsDir() {
 			info, e := entry.Info()
@@ -123,6 +129,15 @@ func writePackedBundle(dst *os.File, bundleDir string) error {
 			if !info.Mode().IsRegular() {
 				return fmt.Errorf("bundle entry %s is not a regular file", name)
 			}
+			rel, _ := filepath.Rel(bundleDir, name)
+			relSlash := filepath.ToSlash(rel)
+			if len(relSlash) > maxPackPathBytes {
+				return fmt.Errorf("bundle entry path %s exceeds %d bytes", relSlash, maxPackPathBytes)
+			}
+			if info.Size() > maxPackBytes || totalBytes > maxPackBytes-info.Size() {
+				return fmt.Errorf("bundle exceeds %d bytes", maxPackBytes)
+			}
+			totalBytes += info.Size()
 			files = append(files, packedFile{name: name, info: info})
 		}
 		return nil

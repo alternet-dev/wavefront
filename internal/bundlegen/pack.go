@@ -93,7 +93,8 @@ func writePackedBundle(dst *os.File, root int) error {
 	}
 	gz.ModTime, gz.OS = time.Time{}, 255
 	tw := tar.NewWriter(gz)
-	if err := writeDir(tw, root, ""); err != nil {
+	var state packState
+	if err := writeDir(tw, root, "", &state); err != nil {
 		return err
 	}
 	if err := tw.Close(); err != nil {
@@ -105,7 +106,7 @@ func writePackedBundle(dst *os.File, root int) error {
 	return nil
 }
 
-func writeDir(tw *tar.Writer, dir int, prefix string) error {
+func writeDir(tw *tar.Writer, dir int, prefix string, state *packState) error {
 	copyFD, err := unix.Dup(dir)
 	if err != nil {
 		return err
@@ -118,7 +119,9 @@ func writeDir(tw *tar.Writer, dir int, prefix string) error {
 	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
 	for _, entry := range entries {
-		fd, err := unix.Openat(dir, entry.Name(), unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+		// O_NONBLOCK prevents blocking when the entry is a FIFO that has no
+		// writer; fstat below then rejects it as a non-regular file.
+		fd, err := unix.Openat(dir, entry.Name(), unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
 		if err != nil {
 			return fmt.Errorf("open bundle entry %s: %w", entry.Name(), err)
 		}
@@ -128,8 +131,17 @@ func writeDir(tw *tar.Writer, dir int, prefix string) error {
 			return err
 		}
 		name := prefix + entry.Name()
+		if len(name) > maxPackPathBytes {
+			unix.Close(fd)
+			return fmt.Errorf("bundle entry path %s exceeds %d bytes", name, maxPackPathBytes)
+		}
+		state.entries++
+		if state.entries > maxPackEntries {
+			unix.Close(fd)
+			return fmt.Errorf("bundle has more than %d entries", maxPackEntries)
+		}
 		if st.Mode&unix.S_IFMT == unix.S_IFDIR {
-			err = writeDir(tw, fd, name+"/")
+			err = writeDir(tw, fd, name+"/", state)
 			unix.Close(fd)
 			if err != nil {
 				return err
@@ -139,6 +151,10 @@ func writeDir(tw *tar.Writer, dir int, prefix string) error {
 		if st.Mode&unix.S_IFMT != unix.S_IFREG {
 			unix.Close(fd)
 			return fmt.Errorf("bundle entry %s is not a regular file", name)
+		}
+		if st.Size < 0 || st.Size > maxPackBytes || state.totalBytes > maxPackBytes-st.Size {
+			unix.Close(fd)
+			return fmt.Errorf("bundle exceeds %d bytes", maxPackBytes)
 		}
 		src := os.NewFile(uintptr(fd), name)
 		h := &tar.Header{Name: name, Mode: int64(st.Mode & 0o777), Size: st.Size, ModTime: time.Time{}, Typeflag: tar.TypeReg, Format: tar.FormatPAX}
@@ -154,6 +170,7 @@ func writeDir(tw *tar.Writer, dir int, prefix string) error {
 		if closeErr != nil {
 			return closeErr
 		}
+		state.totalBytes += st.Size
 	}
 	return nil
 }

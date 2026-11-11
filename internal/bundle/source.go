@@ -162,7 +162,11 @@ func openSource(bundlePath string) (bundleSource, error) {
 func readArchive(f *os.File, filename string) (bundleSource, error) {
 	defer f.Close()
 
-	gz, err := gzip.NewReader(f)
+	// Limit raw bytes before gzip.NewReader so the gzip header (including FNAME
+	// and FCOMMENT fields) counts against the budget, not just the decompressed
+	// content.
+	limitedFile := &archiveLimitReader{r: f, remaining: maxArchiveBytes}
+	gz, err := gzip.NewReader(limitedFile)
 	if err != nil {
 		return nil, &ArchiveError{File: filename, Err: fmt.Errorf("gzip header: %w", err)}
 	}
