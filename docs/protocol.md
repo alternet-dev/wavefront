@@ -187,10 +187,11 @@ resolved route binding and both become JSON at the internal backend boundary.
 - Request and response choices are independent: a JSON request may ask for a
   protobuf response, and the reverse is also valid.
 
-Responses that reach codec negotiation carry `Vary: Accept`, including the
-406 alternative, so shared caches do not reuse one codec's representation for
-another. The internal request always asks the backend for `application/json`;
-when it has a body, that body is also sent as `application/json`.
+Responses that reach codec negotiation carry `Vary: Accept, Content-Type`,
+including the 406 alternative, so shared caches account for both the requested
+response representation and the request codec used to break negotiation ties.
+The internal request always asks the backend for `application/json`; when it
+has a body, that body is also sent as `application/json`.
 
 JSON uses protobuf's canonical JSON mapping for the binding's message
 descriptor. It is not an unvalidated passthrough: malformed JSON, unknown
@@ -388,7 +389,8 @@ source of truth. A CORS preflight (`OPTIONS` with `Origin` +
 response relayed, bypassing routing and the codec; it never 404s as an unbound
 route. On a proxied response, the upstream's `Access-Control-*` values are
 carried through verbatim and its `Vary` tokens are merged with wavefront's
-codec-negotiation `Accept` token. The one gap is deliberate: a
+codec-negotiation `Accept` and `Content-Type` tokens. The one gap is
+deliberate: a
 wavefront-originated error is written by wavefront, not the upstream, so
 there are no upstream CORS headers to mirror. Browsers therefore cannot read
 any of them cross-origin, whether synthesized before any upstream call

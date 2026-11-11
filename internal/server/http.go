@@ -149,9 +149,9 @@ func addVary(h http.Header, values ...string) {
 // copyCORSHeaders carries the upstream's CORS response headers (Access-Control-*
 // and the accompanying Vary) onto dst. wavefront does not own CORS — the
 // upstream is the single source of truth (#147) — so Access-Control-* values
-// are relayed verbatim and Vary is merged with wavefront's Accept token. A
-// response wavefront synthesizes without calling an upstream carries none (the
-// documented pass-through gap).
+// are relayed verbatim and Vary is merged with wavefront's codec-negotiation
+// tokens. A response wavefront synthesizes without calling an upstream carries
+// none (the documented pass-through gap).
 func copyCORSHeaders(dst, src http.Header) {
 	for k, vs := range src {
 		if k == "Vary" {
@@ -302,9 +302,11 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// A cache must not reuse one negotiated representation for a request with a
-	// different Accept value. Set this before response negotiation so the 406
-	// alternative is covered too; later upstream Vary values are appended.
-	addVary(w.Header(), headerAccept)
+	// different Accept or Content-Type value. Content-Type participates because
+	// the request codec breaks omitted, wildcard, and equal-weight Accept ties.
+	// Set these before response negotiation so the 406 alternative is covered
+	// too; later upstream Vary values are appended.
+	addVary(w.Header(), headerAccept, headerContentType)
 	responseCodec, ok := s.codecs.responseAdapter(r.Header.Values(headerAccept), requestCodec)
 	if !ok {
 		fail(wireerror.NotAcceptable("request Accept does not permit "+adapter.MediaTypeProtobuf+" or "+adapter.MediaTypeJSON), "")

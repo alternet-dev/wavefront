@@ -53,6 +53,9 @@ func TestJSONRequestDefaultsToJSONResponse(t *testing.T) {
 	if got := resp.Header.Values("Vary"); !headerValuesContainToken(got, "Accept") {
 		t.Errorf("Vary = %q, want Accept", got)
 	}
+	if got := resp.Header.Values("Vary"); !headerValuesContainToken(got, "Content-Type") {
+		t.Errorf("Vary = %q, want Content-Type because the request codec is the response fallback", got)
+	}
 	if upstreamContentType != "application/json" {
 		t.Errorf("upstream Content-Type = %q, want application/json", upstreamContentType)
 	}
@@ -116,16 +119,26 @@ func TestRequestAndResponseCodecsNegotiateIndependently(t *testing.T) {
 			t.Fatalf("request: %v", err)
 		}
 		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("status = %d, want 200", resp.StatusCode)
+		}
 		if got := resp.Header.Get("Content-Type"); got != "application/protobuf" {
 			t.Fatalf("Content-Type = %q, want application/protobuf", got)
 		}
-		out, _ := io.ReadAll(resp.Body)
+		out, err := io.ReadAll(resp.Body)
+		if err != nil {
+			t.Fatalf("read response body: %v", err)
+		}
 		md, err := b.Message("acme.v1.Pong")
 		if err != nil {
 			t.Fatalf("resolve Pong: %v", err)
 		}
-		if err := proto.Unmarshal(out, dynamicpb.NewMessage(md)); err != nil {
+		message := dynamicpb.NewMessage(md)
+		if err := proto.Unmarshal(out, message); err != nil {
 			t.Fatalf("response body is not protobuf Pong: %v", err)
+		}
+		if got := message.Get(md.Fields().ByName("text")).String(); got != "pong" {
+			t.Errorf("response text = %q, want pong", got)
 		}
 	})
 }
