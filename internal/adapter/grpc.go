@@ -27,6 +27,8 @@ type GRPCJSON struct {
 	protoJSON *ProtoJSON
 }
 
+// NewGRPCJSON constructs a unary gRPC adapter that frames uncompressed
+// messages around the descriptor-driven protobuf-to-JSON conversion.
 func NewGRPCJSON(r MessageResolver) *GRPCJSON {
 	return &GRPCJSON{protoJSON: NewProtoJSON(r)}
 }
@@ -97,6 +99,8 @@ func decodeUnaryGRPC(in []byte) ([]byte, *wireerror.Error) {
 }
 
 func encodeUnaryGRPC(payload []byte) ([]byte, *wireerror.Error) {
+	// Reaching this guard in a unit test requires a payload larger than 4 GiB;
+	// keep the explicit check before converting the length to uint32.
 	if uint64(len(payload)) > math.MaxUint32 {
 		return nil, wireerror.UpstreamError("upstream response exceeds the gRPC message length limit")
 	}
