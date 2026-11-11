@@ -183,16 +183,15 @@ func runDraftShim(args []string, errOut, stdout io.Writer) int {
 		fmt.Fprintln(errOut, "usage: wavefront-bundle draft-shim --bundle <dir-or-archive> --from <version> --to <version> [--out <file>] [--strict]")
 		return 2
 	}
-	fromBytes, err := bundle.ReadFile(*bundleDir, filepath.ToSlash(filepath.Join(*fromVersion, "openapi.json")))
+	files, err := bundle.ReadFiles(*bundleDir,
+		filepath.ToSlash(filepath.Join(*fromVersion, "openapi.json")),
+		filepath.ToSlash(filepath.Join(*toVersion, "openapi.json")),
+	)
 	if err != nil {
 		fmt.Fprintln(errOut, "wavefront-bundle draft-shim:", err)
 		return 1
 	}
-	toBytes, err := bundle.ReadFile(*bundleDir, filepath.ToSlash(filepath.Join(*toVersion, "openapi.json")))
-	if err != nil {
-		fmt.Fprintln(errOut, "wavefront-bundle draft-shim:", err)
-		return 1
-	}
+	fromBytes, toBytes := files[0], files[1]
 	var proposal *bundlegen.ShimProposal
 	if *strict {
 		proposal, err = bundlegen.DraftShimStrict(fromBytes, toBytes)

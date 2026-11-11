@@ -172,7 +172,11 @@ func installArchive(root int, source, output string) error {
 		return fmt.Errorf("open output directory: %w", err)
 	}
 	defer unix.Close(parent)
-	if withinDir(parent, root) {
+	inside, err := withinDir(parent, root)
+	if err != nil {
+		return fmt.Errorf("check archive output containment: %w", err)
+	}
+	if inside {
 		return fmt.Errorf("archive output must be outside the canonical bundle directory")
 	}
 	input, err := os.Open(source)
@@ -210,45 +214,42 @@ func installArchive(root int, source, output string) error {
 	return nil
 }
 
-func withinDir(dir, ancestor int) bool {
-	a, err := unix.Dup(ancestor)
-	if err != nil {
-		return false
-	}
-	defer unix.Close(a)
-	af := os.NewFile(uintptr(a), "bundle")
-	ai, err := af.Stat()
-	af.Close()
-	if err != nil {
-		return false
+func withinDir(dir, ancestor int) (bool, error) {
+	var ancestorStat unix.Stat_t
+	if err := unix.Fstat(ancestor, &ancestorStat); err != nil {
+		return false, err
 	}
 	c, err := unix.Dup(dir)
 	if err != nil {
-		return false
+		return false, err
 	}
-	defer func() { unix.Close(c) }()
+	defer unix.Close(c)
 	for {
-		f := os.NewFile(uintptr(c), "directory")
-		ci, err := f.Stat()
-		f.Close()
-		if err != nil {
-			return false
+		var currentStat unix.Stat_t
+		if err := unix.Fstat(c, &currentStat); err != nil {
+			return false, err
 		}
-		if os.SameFile(ai, ci) {
-			return true
+		if sameDirectory(currentStat, ancestorStat) {
+			return true, nil
 		}
 		p, err := unix.Openat(c, "..", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
 		if err != nil {
-			return false
+			return false, err
 		}
-		pf := os.NewFile(uintptr(p), "parent")
-		pi, e := pf.Stat()
-		pf.Close()
-		if e != nil || os.SameFile(pi, ci) {
+		var parentStat unix.Stat_t
+		if err := unix.Fstat(p, &parentStat); err != nil {
 			unix.Close(p)
-			return false
+			return false, err
+		}
+		if sameDirectory(parentStat, currentStat) {
+			unix.Close(p)
+			return false, nil
 		}
 		unix.Close(c)
 		c = p
 	}
+}
+
+func sameDirectory(a, b unix.Stat_t) bool {
+	return a.Dev == b.Dev && a.Ino == b.Ino
 }

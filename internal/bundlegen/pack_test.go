@@ -81,3 +81,24 @@ func TestPackRefusesOutputViaSymlinkInsideCanonicalBundle(t *testing.T) {
 		t.Fatal("Pack output via symlink into canonical bundle: want error")
 	}
 }
+
+func TestPackRefusesOutputViaSymlinkIntoBundleSubdirectory(t *testing.T) {
+	in := writeOpenAPI(t, sampleOpenAPI)
+	bundleDir := t.TempDir()
+	if err := bundlegen.Add(in, bundleDir, false); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+
+	// The output parent resolves below the bundle root rather than to the root
+	// itself. It must still be rejected before archive installation can replace
+	// a canonical bundle file.
+	outsideDir := t.TempDir()
+	linkPath := filepath.Join(outsideDir, "layer")
+	if err := os.Symlink(filepath.Join(bundleDir, "2026-05-17"), linkPath); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+
+	if err := bundlegen.Pack(bundleDir, filepath.Join(linkPath, "versions.yaml")); err == nil {
+		t.Fatal("Pack output via symlink into canonical bundle subdirectory: want error")
+	}
+}

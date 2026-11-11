@@ -139,24 +139,27 @@ func (e memoryDirEntry) Mode() fs.FileMode {
 // in place. Regular files are gzip-compressed tar archives and are expanded
 // into an in-memory filesystem once, before the normal loader runs.
 func openSource(bundlePath string) (bundleSource, error) {
-	info, err := os.Stat(bundlePath)
+	f, err := openBundleFile(bundlePath)
 	if err != nil {
 		return nil, &ReadError{File: bundlePath, Err: err}
 	}
+	info, err := f.Stat()
+	if err != nil {
+		f.Close()
+		return nil, &ReadError{File: bundlePath, Err: err}
+	}
 	if info.IsDir() {
+		f.Close()
 		return directorySource{os.DirFS(bundlePath)}, nil
 	}
 	if !info.Mode().IsRegular() {
+		f.Close()
 		return nil, &ReadError{File: bundlePath, Err: errors.New("bundle path is neither a directory nor a regular archive file")}
 	}
-	return readArchive(bundlePath)
+	return readArchive(f, bundlePath)
 }
 
-func readArchive(filename string) (bundleSource, error) {
-	f, err := os.Open(filename)
-	if err != nil {
-		return nil, &ArchiveError{File: filename, Err: err}
-	}
+func readArchive(f *os.File, filename string) (bundleSource, error) {
 	defer f.Close()
 
 	gz, err := gzip.NewReader(f)
@@ -275,13 +278,28 @@ func archivePath(name string, isDir bool) (string, error) {
 // archive. It is used by bundle tooling that needs source documents without
 // duplicating the archive reader.
 func ReadFile(bundlePath, name string) ([]byte, error) {
+	files, err := ReadFiles(bundlePath, name)
+	if err != nil {
+		return nil, err
+	}
+	return files[0], nil
+}
+
+// ReadFiles reads files from one canonical bundle directory or packed archive
+// snapshot. It is used when related source documents must not be mixed across
+// separate archive opens.
+func ReadFiles(bundlePath string, names ...string) ([][]byte, error) {
 	source, err := openSource(bundlePath)
 	if err != nil {
 		return nil, err
 	}
-	data, err := source.readFile(name)
-	if err != nil {
-		return nil, &ReadError{File: name, Err: err}
+	files := make([][]byte, len(names))
+	for i, name := range names {
+		data, err := source.readFile(name)
+		if err != nil {
+			return nil, &ReadError{File: name, Err: err}
+		}
+		files[i] = data
 	}
-	return data, nil
+	return files, nil
 }

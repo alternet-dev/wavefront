@@ -98,6 +98,17 @@ func TestLoadPackedArchive(t *testing.T) {
 	}
 }
 
+func TestReadFilesReadsFromOneArchiveSnapshot(t *testing.T) {
+	archive := writeTestArchive(t, validArchiveEntries(t))
+	files, err := ReadFiles(archive, "layer/openapi.json", "layer/versions.yaml")
+	if err != nil {
+		t.Fatalf("ReadFiles from packed archive: %v", err)
+	}
+	if len(files) != 2 || string(files[0]) != validOpenAPI || string(files[1]) != validVersions {
+		t.Fatalf("ReadFiles = %q, want OpenAPI and versions documents", files)
+	}
+}
+
 func TestLoadRejectsArchiveWithBadGzipTrailer(t *testing.T) {
 	archive := writeTestArchive(t, []testArchiveEntry{{name: "file", data: []byte("content")}})
 	raw, err := os.ReadFile(archive)
