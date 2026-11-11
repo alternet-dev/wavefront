@@ -16,7 +16,7 @@ import (
 
 // Pack writes a deterministic archive on Windows. Windows does not expose
 // directory-descriptor operations through the standard library, so it rejects
-// link entries and resolves the output path before writing it.
+// link entries and checks the output's existing ancestors before writing it.
 func Pack(bundleDir, output string) error {
 	if err := Verify(bundleDir); err != nil {
 		return fmt.Errorf("verify source bundle: %w", err)
@@ -49,16 +49,27 @@ func Pack(bundleDir, output string) error {
 }
 
 func outputOutsideBundle(bundleDir, output string) error {
-	b, err := filepath.Abs(bundleDir)
+	bundle, err := filepath.EvalSymlinks(bundleDir)
 	if err != nil {
-		return err
+		return fmt.Errorf("resolve bundle directory: %w", err)
 	}
-	o, err := filepath.Abs(output)
+	bi, err := os.Stat(bundle)
 	if err != nil {
-		return err
+		return fmt.Errorf("stat bundle directory: %w", err)
 	}
-	if rel, err := filepath.Rel(b, o); err == nil && (rel == "." || len(rel) < 2 || rel[:2] != "..") {
-		return fmt.Errorf("archive output must be outside the canonical bundle directory")
+	p, err := filepath.Abs(filepath.Dir(output))
+	if err != nil {
+		return fmt.Errorf("resolve output path: %w", err)
+	}
+	for {
+		if i, e := os.Stat(p); e == nil && os.SameFile(bi, i) {
+			return fmt.Errorf("archive output must be outside the canonical bundle directory")
+		}
+		n := filepath.Dir(p)
+		if n == p {
+			break
+		}
+		p = n
 	}
 	return nil
 }
