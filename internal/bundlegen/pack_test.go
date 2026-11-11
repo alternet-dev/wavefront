@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
-	"runtime"
 	"testing"
 
 	"github.com/alternet-dev/wavefront/internal/bundle"
@@ -63,9 +62,6 @@ func TestPackRefusesOutputInsideCanonicalBundle(t *testing.T) {
 }
 
 func TestPackRefusesOutputViaSymlinkInsideCanonicalBundle(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("symlinks require elevated privileges on Windows")
-	}
 	in := writeOpenAPI(t, sampleOpenAPI)
 	bundleDir := t.TempDir()
 	if err := bundlegen.Add(in, bundleDir, false); err != nil {
@@ -78,7 +74,7 @@ func TestPackRefusesOutputViaSymlinkInsideCanonicalBundle(t *testing.T) {
 	outsideDir := t.TempDir()
 	linkPath := filepath.Join(outsideDir, "link")
 	if err := os.Symlink(bundleDir, linkPath); err != nil {
-		t.Fatalf("symlink: %v", err)
+		t.Skipf("symlink unavailable: %v", err)
 	}
 
 	if err := bundlegen.Pack(bundleDir, filepath.Join(linkPath, "bundle.tar.gz")); err == nil {
