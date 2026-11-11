@@ -91,6 +91,34 @@ type memoryDirEntry struct {
 	size int64
 }
 
+var errArchiveExpanded = errors.New("archive expands beyond configured limit")
+
+// archiveLimitReader applies the expansion limit to every byte emitted by the
+// gzip stream, including tar metadata and bytes after tar's end markers.
+// Reading one byte beyond the limit distinguishes a stream exactly at the
+// limit from one that continues past it.
+type archiveLimitReader struct {
+	r         io.Reader
+	remaining int64
+}
+
+func (r *archiveLimitReader) Read(p []byte) (int, error) {
+	if r.remaining == 0 {
+		var one [1]byte
+		n, err := r.r.Read(one[:])
+		if n > 0 {
+			return 0, errArchiveExpanded
+		}
+		return 0, err
+	}
+	if int64(len(p)) > r.remaining {
+		p = p[:r.remaining]
+	}
+	n, err := r.r.Read(p)
+	r.remaining -= int64(n)
+	return n, err
+}
+
 func (e memoryDirEntry) Name() string      { return e.name }
 func (e memoryDirEntry) IsDir() bool       { return e.dir }
 func (e memoryDirEntry) Type() fs.FileMode { return e.Mode().Type() }
@@ -135,14 +163,14 @@ func readArchive(filename string) (bundleSource, error) {
 	if err != nil {
 		return nil, &ArchiveError{File: filename, Err: fmt.Errorf("gzip header: %w", err)}
 	}
-	defer gz.Close()
-	gz.Multistream(false)
 
 	source := &memorySource{files: map[string][]byte{}, dirs: map[string]struct{}{}}
 	seen := map[string]struct{}{}
-	tr := tar.NewReader(gz)
+	limited := &archiveLimitReader{r: gz, remaining: maxArchiveBytes}
+	tr := tar.NewReader(limited)
 	var total int64
 	entryCount := 0
+	implicitDirCount := 0
 	for {
 		hdr, err := tr.Next()
 		if errors.Is(err, io.EOF) {
@@ -156,7 +184,7 @@ func readArchive(filename string) (bundleSource, error) {
 			return nil, &ArchiveError{File: filename, Err: fmt.Errorf("archive contains more than %d entries", maxArchiveEntries)}
 		}
 
-		name, err := archivePath(hdr.Name)
+		name, err := archivePath(hdr.Name, hdr.Typeflag == tar.TypeDir)
 		if err != nil {
 			return nil, &ArchiveError{File: filename, Err: err}
 		}
@@ -194,12 +222,23 @@ func readArchive(filename string) (bundleSource, error) {
 			if _, exists := source.files[parent]; exists {
 				return nil, &ArchiveError{File: filename, Err: fmt.Errorf("archive entry %q has file parent %q", hdr.Name, parent)}
 			}
-			source.dirs[parent] = struct{}{}
+			if _, exists := source.dirs[parent]; !exists {
+				implicitDirCount++
+				if entryCount+implicitDirCount > maxArchiveEntries {
+					return nil, &ArchiveError{File: filename, Err: fmt.Errorf("archive contains more than %d entries", maxArchiveEntries)}
+				}
+				source.dirs[parent] = struct{}{}
+			}
 		}
 	}
 	// tar.Reader stops at the archive's end markers. Drain the gzip member so
 	// its checksum and trailer are validated before the source is accepted.
-	if _, err := io.Copy(io.Discard, gz); err != nil {
+	// gzip's default multistream behavior also rejects a malformed following
+	// member or trailing bytes rather than silently ignoring them.
+	if _, err := io.Copy(io.Discard, limited); err != nil {
+		if errors.Is(err, errArchiveExpanded) {
+			return nil, &ArchiveError{File: filename, Err: fmt.Errorf("archive expands beyond %d bytes", maxArchiveBytes)}
+		}
 		return nil, &ArchiveError{File: filename, Err: fmt.Errorf("gzip trailer: %w", err)}
 	}
 	if err := gz.Close(); err != nil {
@@ -211,11 +250,17 @@ func readArchive(filename string) (bundleSource, error) {
 // archivePath accepts only canonical, relative slash-separated paths. This
 // rejects traversal, absolute paths, platform-specific separators, and two
 // spellings that could otherwise address the same in-memory file.
-func archivePath(name string) (string, error) {
+func archivePath(name string, isDir bool) (string, error) {
 	if len(name) > maxArchivePathBytes {
 		return "", fmt.Errorf("archive entry path exceeds %d bytes", maxArchivePathBytes)
 	}
-	trimmed := strings.TrimSuffix(name, "/")
+	if strings.HasSuffix(name, "/") && !isDir {
+		return "", fmt.Errorf("archive entry has invalid path %q", name)
+	}
+	trimmed := name
+	if isDir {
+		trimmed = strings.TrimSuffix(name, "/")
+	}
 	if trimmed == "" || strings.Contains(trimmed, "\\") || path.IsAbs(trimmed) {
 		return "", fmt.Errorf("archive entry has invalid path %q", name)
 	}
