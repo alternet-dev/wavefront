@@ -53,11 +53,11 @@ func Pack(bundleDir, output string) error {
 }
 
 func openDir(name string) (int, error) {
-	real, err := filepath.EvalSymlinks(name)
+	resolved, err := filepath.EvalSymlinks(name)
 	if err != nil {
 		return -1, err
 	}
-	return unix.Open(real, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	return unix.Open(resolved, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
 }
 
 func outputOutsideBundle(bundleDir, output string) error {
@@ -194,7 +194,7 @@ func installArchive(root int, source, output string) error {
 	syncErr := tmp.Sync()
 	closeErr := tmp.Close()
 	if copyErr != nil || syncErr != nil || closeErr != nil {
-		unix.Unlinkat(parent, name, 0)
+		_ = unix.Unlinkat(parent, name, 0)
 		if copyErr != nil {
 			return copyErr
 		}
@@ -204,7 +204,7 @@ func installArchive(root int, source, output string) error {
 		return closeErr
 	}
 	if err := unix.Renameat(parent, name, parent, base); err != nil {
-		unix.Unlinkat(parent, name, 0)
+		_ = unix.Unlinkat(parent, name, 0)
 		return fmt.Errorf("install archive: %w", err)
 	}
 	return nil
