@@ -163,9 +163,10 @@ func (j *JSONJSON) DecodeRequest(b Binding, in []byte) (UpstreamCall, *wireerror
 	// A zero-field message is the generator's synthetic Empty, bound to a
 	// bodyless operation (no requestBody). The upstream call then carries no
 	// body and no Content-Type. Any bytes the client did supply are still
-	// descriptor-validated: protojson rejects malformed JSON and unknown fields,
-	// so a body for a bodyless binding surfaces as decode_failed rather than
-	// being silently discarded.
+	// descriptor-validated: protojson rejects malformed JSON or unknown fields
+	// with decode_failed, so an invalid body is caught rather than silently
+	// discarded. A descriptor-valid body with no declared fields (`{}`) passes
+	// validation and is still dropped from the upstream call.
 	empty := md.Fields().Len() == 0
 	msg := dynamicpb.NewMessage(md)
 	if !empty || len(in) > 0 {

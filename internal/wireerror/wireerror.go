@@ -245,8 +245,11 @@ func UnknownRoute(msg string) *Error {
 	}
 }
 
-// UnsupportedMediaType — the inbound request declared a Content-Type that has
-// no registered decoder. Distinct from `decode_failed`: a wrong envelope is
+// UnsupportedMediaType — the inbound request body does not match any
+// registered decoder: either the client declared a Content-Type for which no
+// decoder is registered, or the request carried a body with no Content-Type at
+// all (a body-bearing request has not declared any envelope the codec contract
+// can honor). Distinct from `decode_failed`: a wrong or absent envelope is
 // rejected before the body is read, so this code is reserved for the envelope
 // mismatch and `decode_failed` is reserved for a valid envelope whose bytes
 // don't parse. 415 (RFC 9110 §15.5.16).

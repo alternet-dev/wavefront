@@ -160,8 +160,10 @@ Operational notes:
   `transform_failed` by chain side. `/health` and `/ready` are the probes.
 - **Codec.** Request `Content-Type` selects protobuf or JSON decoding; `Accept`
   independently selects protobuf or JSON response encoding. Those two headers
-  are rewritten for the internal JSON call; all other non-hop-by-hop client
-  headers are forwarded untouched.
+  are rewritten for the internal JSON call, and the framing fields (`Host`,
+  `Content-Length`, `Transfer-Encoding`) are owned by the proxy rather than
+  copied through; all other non-hop-by-hop client headers are forwarded
+  untouched.
 
 The bundle schema and transform vocabulary are detailed in
 [docs/protocol.md](docs/protocol.md); integrating a consumer is covered in

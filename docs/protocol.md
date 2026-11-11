@@ -388,14 +388,16 @@ source of truth. A CORS preflight (`OPTIONS` with `Origin` +
 response relayed, bypassing routing and the codec; it never 404s as an unbound
 route. On a proxied response, the upstream's `Access-Control-*` values are
 carried through verbatim and its `Vary` tokens are merged with wavefront's
-codec-negotiation `Accept` token. The one gap is deliberate: every
-wavefront-originated error is synthesized before any upstream call and so has
-no upstream CORS to mirror. Browsers therefore cannot read any of them
-cross-origin — including `unsupported_contract_version`, `not_acceptable`,
-`unknown_route`, `unsupported_media_type`, `decode_failed`,
-`request_body_too_large`, request-side `transform_failed`, and boot-time
-`unavailable`. These are all client-configuration or wavefront-configuration
-conditions, not the normal flow.
+codec-negotiation `Accept` token. The one gap is deliberate: a
+wavefront-originated error is written by wavefront, not the upstream, so
+there are no upstream CORS headers to mirror. Browsers therefore cannot read
+any of them cross-origin, whether synthesized before any upstream call
+(`unsupported_contract_version`, `not_acceptable`, `unknown_route`,
+`unsupported_media_type`, `decode_failed`, `request_body_too_large`,
+request-side `transform_failed`, boot-time `unavailable`) or produced during
+or after one (`upstream_timeout`, response-side `transform_failed`,
+reply-unencodable `upstream_error`). These are client-configuration,
+wavefront-configuration, or upstream-failure conditions, not the normal flow.
 
 ## Stability declaration
 
