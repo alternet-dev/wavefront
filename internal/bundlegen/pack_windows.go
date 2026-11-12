@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -116,6 +117,17 @@ func writePackedBundle(dst *os.File, bundleDir string) error {
 	err := filepath.WalkDir(bundleDir, func(name string, entry fs.DirEntry, err error) error {
 		if err != nil {
 			return err
+		}
+		if name != bundleDir {
+			rel, _ := filepath.Rel(bundleDir, name)
+			relSlash := filepath.ToSlash(rel)
+			// WalkDir visits bundleDir itself with rel "."; every other visit
+			// is at least depth 1, so the slash count plus one is the entry's
+			// depth from the bundle root.
+			depth := strings.Count(relSlash, "/") + 1
+			if depth > maxPackDepth {
+				return fmt.Errorf("bundle entry %s exceeds maximum depth of %d", relSlash, maxPackDepth)
+			}
 		}
 		entryCount++
 		if entryCount > maxPackEntries {

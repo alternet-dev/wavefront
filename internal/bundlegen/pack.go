@@ -16,8 +16,11 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// Pack writes a deterministic archive without reopening source pathnames or
-// installing through an unpinned destination directory.
+// Pack writes a deterministic archive. Source entries are opened through
+// openat relative to a pinned bundle directory file descriptor so the walk
+// cannot be redirected by a concurrent rename, and the archive is installed
+// through a destination parent descriptor it has already checked is outside
+// the bundle.
 func Pack(bundleDir, output string) error {
 	root, err := openDir(bundleDir)
 	if err != nil {
@@ -94,7 +97,7 @@ func writePackedBundle(dst *os.File, root int) error {
 	gz.ModTime, gz.OS = time.Time{}, 255
 	tw := tar.NewWriter(gz)
 	var state packState
-	if err := writeDir(tw, root, "", &state); err != nil {
+	if err := writeDir(tw, root, "", &state, 0); err != nil {
 		return err
 	}
 	if err := tw.Close(); err != nil {
@@ -106,7 +109,7 @@ func writePackedBundle(dst *os.File, root int) error {
 	return nil
 }
 
-func writeDir(tw *tar.Writer, dir int, prefix string, state *packState) error {
+func writeDir(tw *tar.Writer, dir int, prefix string, state *packState, depth int) error {
 	copyFD, err := unix.Dup(dir)
 	if err != nil {
 		return err
@@ -131,6 +134,10 @@ func writeDir(tw *tar.Writer, dir int, prefix string, state *packState) error {
 			return err
 		}
 		name := prefix + entry.Name()
+		if depth+1 > maxPackDepth {
+			unix.Close(fd)
+			return fmt.Errorf("bundle entry %s exceeds maximum depth of %d", name, maxPackDepth)
+		}
 		if len(name) > maxPackPathBytes {
 			unix.Close(fd)
 			return fmt.Errorf("bundle entry path %s exceeds %d bytes", name, maxPackPathBytes)
@@ -141,7 +148,7 @@ func writeDir(tw *tar.Writer, dir int, prefix string, state *packState) error {
 			return fmt.Errorf("bundle has more than %d entries", maxPackEntries)
 		}
 		if st.Mode&unix.S_IFMT == unix.S_IFDIR {
-			err = writeDir(tw, fd, name+"/", state)
+			err = writeDir(tw, fd, name+"/", state, depth+1)
 			unix.Close(fd)
 			if err != nil {
 				return err

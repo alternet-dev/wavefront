@@ -784,9 +784,10 @@ func resolveChains(contracts []*Contract, byVersion map[string][]*Contract) erro
 	return nil
 }
 
-// layerDirs returns the sorted names of the immediate subdirectories of dir,
-// each a bundle layer. An unreadable directory, or one with no subdirectory,
-// is a hard error.
+// layerDirs returns the sorted names of the top-level subdirectory entries
+// of source, each a bundle layer. A source whose root cannot be listed, or
+// one with no subdirectory, is a hard error; label names the bundle for the
+// resulting error.
 func layerDirs(source bundleSource, label string) ([]string, error) {
 	entries, err := source.readDir(".")
 	if err != nil {
