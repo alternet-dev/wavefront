@@ -3,6 +3,7 @@ package adapter
 import (
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -267,8 +268,9 @@ func TestEncodeErrorUnboundStatusIsUpstreamError(t *testing.T) {
 
 // discFiles builds a self-contained registry with a nested discriminator
 // wrapper: Env{PetVariant pet = 1} and Env.PetVariant{oneof variant {Cat cat; Dog dog}},
-// where Cat has fields petType + meow, Dog has petType + woof. This is the
-// shape bundlegen emits for a mapped discriminated union property (#132).
+// where Cat has fields petType + meow and Dog has only woof. The omitted
+// discriminator field on Dog covers valid member schemas that rely on the
+// wrapper transform to restore the property on the flattened wire (#132).
 func discFiles(t *testing.T) *protoregistry.Files {
 	t.Helper()
 	str := func(name string, n int32) *descriptorpb.FieldDescriptorProto {
@@ -290,7 +292,7 @@ func discFiles(t *testing.T) *protoregistry.Files {
 		}
 	}
 	cat := &descriptorpb.DescriptorProto{Name: proto.String("Cat"), Field: []*descriptorpb.FieldDescriptorProto{str("petType", 1), str("meow", 2)}}
-	dog := &descriptorpb.DescriptorProto{Name: proto.String("Dog"), Field: []*descriptorpb.FieldDescriptorProto{str("petType", 1), str("woof", 2)}}
+	dog := &descriptorpb.DescriptorProto{Name: proto.String("Dog"), Field: []*descriptorpb.FieldDescriptorProto{str("woof", 1)}}
 	petVariant := &descriptorpb.DescriptorProto{
 		Name:      proto.String("PetVariant"),
 		OneofDecl: []*descriptorpb.OneofDescriptorProto{{Name: proto.String("variant")}},
@@ -454,28 +456,53 @@ func TestDecodeRequestFlattensWrappedProtoToUpstream(t *testing.T) {
 	}
 }
 
-// TestEncodeResponseMissingDiscriminatorIsUpstreamError: an upstream body that
-// omits the discriminator property for a wrapper position is a contract
-// violation. The adapter reports upstream_error rather than fabricating a
-// variant.
-func TestEncodeResponseMissingDiscriminatorIsUpstreamError(t *testing.T) {
+// TestTransformFlatToWrappedOmitsUndeclaredDiscriminator verifies that a
+// variant need not duplicate the union's discriminator property in its own
+// message descriptor. Wrapping omits that property so protojson does not see
+// an unknown member field; flattening still restores it on the wire.
+func TestTransformFlatToWrappedOmitsUndeclaredDiscriminator(t *testing.T) {
 	r := newDiscResolver(t)
-	a := NewProtoJSON(r)
-	// pet is a wrapper position; no discriminator property.
-	_, _, werr := a.EncodeResponse(tb{method: "POST", route: "/x", req: "acme.v1.Env", resp: "acme.v1.Env"}, []byte(`{"pet":{"meow":"purr"}}`))
-	if werr == nil || werr.Code() != "upstream_error" {
-		t.Fatalf("want upstream_error, got %v", werr)
+	md := msgOf(t, r.files, "acme.v1.Env.PetVariant")
+
+	wrapped, err := transformFlatToWrapped(md, r, []byte(`{"petType":"dog","woof":"bark"}`))
+	if err != nil {
+		t.Fatalf("transformFlatToWrapped: %v", err)
+	}
+	if got, want := string(wrapped), `{"dog":{"woof":"bark"}}`; got != want {
+		t.Fatalf("wrapped = %s, want %s", got, want)
+	}
+	flat, err := transformWrappedToFlat(md, r, wrapped)
+	if err != nil {
+		t.Fatalf("transformWrappedToFlat: %v", err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(flat, &got); err != nil {
+		t.Fatalf("unmarshal flattened JSON: %v", err)
+	}
+	if got["petType"] != "dog" || got["woof"] != "bark" {
+		t.Fatalf("flattened = %v, want petType=dog and woof=bark", got)
 	}
 }
 
-// TestEncodeResponseUnknownDiscriminatorValueIsUpstreamError: a discriminator
-// value that is not in the mapping is a contract violation. The adapter
-// reports upstream_error.
-func TestEncodeResponseUnknownDiscriminatorValueIsUpstreamError(t *testing.T) {
+// TestTransformFlatToWrappedMissingDiscriminatorReturnsSpecificError proves
+// the discriminator walker itself rejects a missing property. This cannot
+// pass merely because ordinary protojson decoding rejected the same body.
+func TestTransformFlatToWrappedMissingDiscriminatorReturnsSpecificError(t *testing.T) {
 	r := newDiscResolver(t)
-	a := NewProtoJSON(r)
-	_, _, werr := a.EncodeResponse(tb{method: "POST", route: "/x", req: "acme.v1.Env", resp: "acme.v1.Env"}, []byte(`{"pet":{"petType":"bird","chirp":"tweet"}}`))
-	if werr == nil || werr.Code() != "upstream_error" {
-		t.Fatalf("want upstream_error, got %v", werr)
+	md := msgOf(t, r.files, "acme.v1.Env.PetVariant")
+	_, err := transformFlatToWrapped(md, r, []byte(`{"meow":"purr"}`))
+	if err == nil || !strings.Contains(err.Error(), `missing discriminator property "petType"`) {
+		t.Fatalf("want specific missing-discriminator error, got %v", err)
+	}
+}
+
+// TestTransformFlatToWrappedUnknownDiscriminatorReturnsSpecificError proves
+// the discriminator walker itself rejects a value absent from its mapping.
+func TestTransformFlatToWrappedUnknownDiscriminatorReturnsSpecificError(t *testing.T) {
+	r := newDiscResolver(t)
+	md := msgOf(t, r.files, "acme.v1.Env.PetVariant")
+	_, err := transformFlatToWrapped(md, r, []byte(`{"petType":"bird","chirp":"tweet"}`))
+	if err == nil || !strings.Contains(err.Error(), `discriminator value "bird" is not in the mapping`) {
+		t.Fatalf("want specific unknown-discriminator error, got %v", err)
 	}
 }

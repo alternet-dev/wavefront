@@ -626,7 +626,7 @@ const discriminatedUnionOpenAPI = `{
           "discriminator": {"propertyName": "petType", "mapping": {"cat": "#/components/schemas/Cat", "dog": "#/components/schemas/Dog"}}
         }}
       }},
-      "Cat": {"type": "object", "properties": {"petType": {"type": "string"}, "meow": {"type": "string"}}},
+      "Cat": {"type": "object", "properties": {"petType": {"type": "string"}, "meow": {"type": "string"}, "count": {"type": "integer", "format": "int64"}}},
       "Dog": {"type": "object", "properties": {"petType": {"type": "string"}, "woof": {"type": "string"}}}
     }
   }
@@ -795,6 +795,58 @@ func TestDiscriminatedUnionRoundTripsViaAdapter(t *testing.T) {
 	}
 }
 
+// TestAdapterPreservesLargeInt64AcrossBundleDiscriminatorCapability covers
+// loaded bundles both without and with discriminator entries. Bundle always
+// exposes the optional resolver capability, so neither path may decode JSON
+// integers through float64 before protojson sees them.
+func TestAdapterPreservesLargeInt64AcrossBundleDiscriminatorCapability(t *testing.T) {
+	const exact = "9007199254740993"
+	const rounded = "9007199254740992"
+	cases := []struct {
+		name, openapi, message, body string
+	}{
+		{
+			name:    "bundle without discriminator entries",
+			openapi: sampleOpenAPI,
+			message: "wavefront.gen.v2026_05_17.EchoRequest",
+			body:    `{"count":9007199254740993}`,
+		},
+		{
+			name:    "bundle with discriminator entries",
+			openapi: discriminatedUnionOpenAPI,
+			message: "wavefront.gen.v2026_05_17.PetEnvelope",
+			body:    `{"pet":{"petType":"cat","meow":"purr","count":9007199254740993}}`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			in := writeOpenAPI(t, tc.openapi)
+			out := t.TempDir()
+			if err := bundlegen.Add(in, out, false); err != nil {
+				t.Fatalf("Add: %v", err)
+			}
+			b, err := bundle.Load(out)
+			if err != nil {
+				t.Fatalf("generated bundle did not load: %v", err)
+			}
+			a := adapter.NewProtoJSON(b)
+			bind := discBinding{method: "POST", route: "/round-trip", req: tc.message, resp: tc.message}
+			protoOut, _, werr := a.EncodeResponse(bind, []byte(tc.body))
+			if werr != nil {
+				t.Fatalf("EncodeResponse: %v", werr)
+			}
+			call, werr := a.DecodeRequest(bind, protoOut)
+			if werr != nil {
+				t.Fatalf("DecodeRequest: %v", werr)
+			}
+			got := string(call.Body)
+			if !strings.Contains(got, exact) || strings.Contains(got, rounded) {
+				t.Fatalf("round-trip body = %s, want exact integer %s", got, exact)
+			}
+		})
+	}
+}
+
 type discBinding struct {
 	method, route, req, resp string
 }
@@ -899,6 +951,54 @@ func TestDiscriminatorWithoutMappingStaysAsStruct(t *testing.T) {
 	pet := env.Fields().ByName("pet")
 	if pet == nil || pet.Message() == nil || string(pet.Message().FullName()) != "google.protobuf.Struct" {
 		t.Errorf("Env.pet should remain google.protobuf.Struct without a mapping, got %v", fullName(pet))
+	}
+}
+
+// TestDiscriminatorMappingMustMatchUnionBranches keeps the Struct fallback
+// when an explicit mapping is only partial or introduces a schema outside the
+// union. A typed wrapper is safe only when both target sets are equal.
+func TestDiscriminatorMappingMustMatchUnionBranches(t *testing.T) {
+	const fullMapping = `{"cat": "#/components/schemas/Cat", "dog": "#/components/schemas/Dog"}`
+	const dogSchema = `"Dog": {"type": "object", "properties": {"petType": {"type": "string"}, "woof": {"type": "string"}}}`
+	cases := []struct {
+		name, mapping, extraSchema string
+	}{
+		{
+			name:    "partial mapping drops union branch",
+			mapping: `{"cat": "#/components/schemas/Cat"}`,
+		},
+		{
+			name:    "mapping adds target outside union",
+			mapping: `{"cat": "#/components/schemas/Cat", "dog": "#/components/schemas/Dog", "bird": "#/components/schemas/Bird"}`,
+			extraSchema: `,
+      "Bird": {"type": "object", "properties": {"petType": {"type": "string"}, "chirp": {"type": "string"}}}`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			doc := strings.ReplaceAll(discriminatedUnionOpenAPI, fullMapping, tc.mapping)
+			doc = strings.Replace(doc, dogSchema, dogSchema+tc.extraSchema, 1)
+			in := writeOpenAPI(t, doc)
+			out := t.TempDir()
+			if err := bundlegen.Add(in, out, false); err != nil {
+				t.Fatalf("Add: %v", err)
+			}
+			if _, err := os.Stat(filepath.Join(out, "2026-05-17", "discriminators.yaml")); !os.IsNotExist(err) {
+				t.Fatalf("discriminators.yaml should not exist for mismatched mapping: %v", err)
+			}
+			b, err := bundle.Load(out)
+			if err != nil {
+				t.Fatalf("generated bundle did not load: %v", err)
+			}
+			env, err := b.Message("wavefront.gen.v2026_05_17.PetEnvelope")
+			if err != nil {
+				t.Fatalf("resolve PetEnvelope: %v", err)
+			}
+			pet := env.Fields().ByName("pet")
+			if pet == nil || pet.Message() == nil || string(pet.Message().FullName()) != "google.protobuf.Struct" {
+				t.Fatalf("PetEnvelope.pet = %v, want google.protobuf.Struct fallback", fullName(pet))
+			}
+		})
 	}
 }
 

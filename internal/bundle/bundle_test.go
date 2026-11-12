@@ -50,6 +50,65 @@ func fdsBytesPkg(t *testing.T, fileName, pkg, msgA, msgB string) []byte {
 	return b
 }
 
+// discriminatorFDSBytes adds wrapper-shaped messages used to verify that a
+// discriminator sidecar still matches its descriptor relationship at load.
+func discriminatorFDSBytes(t *testing.T) []byte {
+	t.Helper()
+	var fds descriptorpb.FileDescriptorSet
+	if err := proto.Unmarshal(fdsBytes(t), &fds); err != nil {
+		t.Fatalf("unmarshal base descriptors: %v", err)
+	}
+	file := fds.File[0]
+	messageField := func(name string, number int32, typeName string, oneof *int32) *descriptorpb.FieldDescriptorProto {
+		return &descriptorpb.FieldDescriptorProto{
+			Name: proto.String(name), Number: proto.Int32(number),
+			Label:      descriptorpb.FieldDescriptorProto_LABEL_OPTIONAL.Enum(),
+			Type:       descriptorpb.FieldDescriptorProto_TYPE_MESSAGE.Enum(),
+			TypeName:   proto.String(typeName),
+			JsonName:   proto.String(name),
+			OneofIndex: oneof,
+		}
+	}
+	scalarOneofField := func(name string, number, oneof int32) *descriptorpb.FieldDescriptorProto {
+		return &descriptorpb.FieldDescriptorProto{
+			Name: proto.String(name), Number: proto.Int32(number),
+			Label:      descriptorpb.FieldDescriptorProto_LABEL_OPTIONAL.Enum(),
+			Type:       descriptorpb.FieldDescriptorProto_TYPE_STRING.Enum(),
+			JsonName:   proto.String(name),
+			OneofIndex: proto.Int32(oneof),
+		}
+	}
+	file.MessageType = append(file.MessageType,
+		&descriptorpb.DescriptorProto{Name: proto.String("Cat")},
+		&descriptorpb.DescriptorProto{Name: proto.String("Dog")},
+		&descriptorpb.DescriptorProto{
+			Name:      proto.String("Wrapper"),
+			OneofDecl: []*descriptorpb.OneofDescriptorProto{{Name: proto.String("variant")}},
+			Field: []*descriptorpb.FieldDescriptorProto{
+				messageField("cat", 1, ".acme.v1.Cat", proto.Int32(0)),
+				scalarOneofField("kind", 2, 0),
+				messageField("dog", 3, ".acme.v1.Dog", nil),
+			},
+		},
+		&descriptorpb.DescriptorProto{
+			Name: proto.String("MultiWrapper"),
+			OneofDecl: []*descriptorpb.OneofDescriptorProto{
+				{Name: proto.String("first")},
+				{Name: proto.String("second")},
+			},
+			Field: []*descriptorpb.FieldDescriptorProto{
+				messageField("cat", 1, ".acme.v1.Cat", proto.Int32(0)),
+				messageField("dog", 2, ".acme.v1.Dog", proto.Int32(1)),
+			},
+		},
+	)
+	b, err := proto.Marshal(&fds)
+	if err != nil {
+		t.Fatalf("marshal discriminator descriptors: %v", err)
+	}
+	return b
+}
+
 const validOpenAPI = `{"openapi":"3.0.0","info":{"title":"t","version":"1"},"paths":{}}`
 
 const validVersions = `version: 1
@@ -113,6 +172,32 @@ func TestLoadValidBundle(t *testing.T) {
 	}
 	if _, err := b.Message("acme.v1.Ping"); err != nil {
 		t.Errorf("resolve acme.v1.Ping: %v", err)
+	}
+}
+
+func TestLoadRejectsDriftedDiscriminatorSidecar(t *testing.T) {
+	cases := []struct {
+		name, message, field string
+	}{
+		{name: "named descriptor is not a message", message: "acme.v1.Ping.text", field: "text"},
+		{name: "message has no oneof", message: "acme.v1.Ping", field: "text"},
+		{name: "message has multiple oneofs", message: "acme.v1.MultiWrapper", field: "cat"},
+		{name: "mapped field is missing", message: "acme.v1.Wrapper", field: "missing"},
+		{name: "mapped field is outside oneof", message: "acme.v1.Wrapper", field: "dog"},
+		{name: "mapped field is not a message", message: "acme.v1.Wrapper", field: "kind"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := writeBundle(t, discriminatorFDSBytes(t), validOpenAPI, validVersions)
+			sidecar := "version: 1\noneofs:\n  - message: " + tc.message + "\n" +
+				"    property_name: kind\n    mapping:\n      cat: " + tc.field + "\n"
+			mustWrite(t, filepath.Join(dir, "layer", fileDiscriminators), []byte(sidecar))
+			_, err := Load(dir)
+			var ve *ValidationError
+			if !errors.As(err, &ve) {
+				t.Fatalf("Load error = %v, want ValidationError", err)
+			}
+		})
 	}
 }
 
