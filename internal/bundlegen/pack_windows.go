@@ -11,7 +11,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strings"
 	"time"
 )
 
@@ -118,39 +117,30 @@ func writePackedBundle(dst *os.File, bundleDir string) error {
 		if err != nil {
 			return err
 		}
-		if name != bundleDir {
-			rel, _ := filepath.Rel(bundleDir, name)
-			relSlash := filepath.ToSlash(rel)
-			// WalkDir visits bundleDir itself with rel "."; every other visit
-			// is at least depth 1, so the slash count plus one is the entry's
-			// depth from the bundle root.
-			depth := strings.Count(relSlash, "/") + 1
-			if depth > maxPackDepth {
-				return fmt.Errorf("bundle entry %s exceeds maximum depth of %d", relSlash, maxPackDepth)
-			}
-		}
 		entryCount++
 		if entryCount > maxPackEntries {
 			return fmt.Errorf("bundle has more than %d entries", maxPackEntries)
 		}
-		if name != bundleDir && !entry.IsDir() {
-			info, e := entry.Info()
-			if e != nil {
-				return e
-			}
-			if !info.Mode().IsRegular() {
-				return fmt.Errorf("bundle entry %s is not a regular file", name)
-			}
+		if name != bundleDir {
 			rel, _ := filepath.Rel(bundleDir, name)
 			relSlash := filepath.ToSlash(rel)
 			if len(relSlash) > maxPackPathBytes {
 				return fmt.Errorf("bundle entry path %s exceeds %d bytes", relSlash, maxPackPathBytes)
 			}
-			if info.Size() > maxPackBytes || totalBytes > maxPackBytes-info.Size() {
-				return fmt.Errorf("bundle exceeds %d bytes", maxPackBytes)
+			if !entry.IsDir() {
+				info, e := entry.Info()
+				if e != nil {
+					return e
+				}
+				if !info.Mode().IsRegular() {
+					return fmt.Errorf("bundle entry %s is not a regular file", name)
+				}
+				if info.Size() > maxPackBytes || totalBytes > maxPackBytes-info.Size() {
+					return fmt.Errorf("bundle exceeds %d bytes", maxPackBytes)
+				}
+				totalBytes += info.Size()
+				files = append(files, packedFile{name: name, info: info})
 			}
-			totalBytes += info.Size()
-			files = append(files, packedFile{name: name, info: info})
 		}
 		return nil
 	})

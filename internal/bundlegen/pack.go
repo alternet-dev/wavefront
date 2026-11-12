@@ -97,7 +97,7 @@ func writePackedBundle(dst *os.File, root int) error {
 	gz.ModTime, gz.OS = time.Time{}, 255
 	tw := tar.NewWriter(gz)
 	var state packState
-	if err := writeDir(tw, root, "", &state, 0); err != nil {
+	if err := writeDir(tw, root, "", &state); err != nil {
 		return err
 	}
 	if err := tw.Close(); err != nil {
@@ -109,7 +109,7 @@ func writePackedBundle(dst *os.File, root int) error {
 	return nil
 }
 
-func writeDir(tw *tar.Writer, dir int, prefix string, state *packState, depth int) error {
+func writeDir(tw *tar.Writer, dir int, prefix string, state *packState) error {
 	copyFD, err := unix.Dup(dir)
 	if err != nil {
 		return err
@@ -134,10 +134,6 @@ func writeDir(tw *tar.Writer, dir int, prefix string, state *packState, depth in
 			return err
 		}
 		name := prefix + entry.Name()
-		if depth+1 > maxPackDepth {
-			unix.Close(fd)
-			return fmt.Errorf("bundle entry %s exceeds maximum depth of %d", name, maxPackDepth)
-		}
 		if len(name) > maxPackPathBytes {
 			unix.Close(fd)
 			return fmt.Errorf("bundle entry path %s exceeds %d bytes", name, maxPackPathBytes)
@@ -148,7 +144,7 @@ func writeDir(tw *tar.Writer, dir int, prefix string, state *packState, depth in
 			return fmt.Errorf("bundle has more than %d entries", maxPackEntries)
 		}
 		if st.Mode&unix.S_IFMT == unix.S_IFDIR {
-			err = writeDir(tw, fd, name+"/", state, depth+1)
+			err = writeDir(tw, fd, name+"/", state)
 			unix.Close(fd)
 			if err != nil {
 				return err

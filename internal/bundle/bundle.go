@@ -786,8 +786,9 @@ func resolveChains(contracts []*Contract, byVersion map[string][]*Contract) erro
 
 // layerDirs returns the sorted names of the top-level subdirectory entries
 // of source, each a bundle layer. A source whose root cannot be listed, or
-// one with no subdirectory, is a hard error; label names the bundle for the
-// resulting error.
+// one with no subdirectory, is a hard error; label names the bundle in the
+// root-listing read error, and the no-layer validation error does not
+// carry it.
 func layerDirs(source bundleSource, label string) ([]string, error) {
 	entries, err := source.readDir(".")
 	if err != nil {
