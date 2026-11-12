@@ -330,22 +330,45 @@ func DraftShimWithOptions(fromOpenAPI, toOpenAPI []byte, opts DraftOptions) (*Sh
 // validateRenameIntents checks the old-to-new mapping in its natural request
 // direction and its reversed response direction. An entry may apply to one
 // direction only, but it may not silently name a field on only one side of a
-// direction or bridge different primitive types.
+// direction or bridge different primitive types, and it must describe a
+// removed-and-added pair in at least one direction so that it actually
+// produces a rename stanza.
 func validateRenameIntents(fromReq, toReq, fromResp, toResp *schema, intents []RenameIntent) error {
+	fromReqFields := topLevelProperties(fromReq)
+	toReqFields := topLevelProperties(toReq)
+	fromRespFields := topLevelProperties(fromResp)
+	toRespFields := topLevelProperties(toResp)
 	for _, intent := range intents {
-		requestApplies, err := validateRenameIntentDirection("request", intent.From, intent.To, topLevelProperties(fromReq), topLevelProperties(toReq))
+		requestApplies, err := validateRenameIntentDirection("request", intent.From, intent.To, fromReqFields, toReqFields)
 		if err != nil {
 			return err
 		}
-		responseApplies, err := validateRenameIntentDirection("response", intent.To, intent.From, topLevelProperties(toResp), topLevelProperties(fromResp))
+		responseApplies, err := validateRenameIntentDirection("response", intent.To, intent.From, toRespFields, fromRespFields)
 		if err != nil {
 			return err
 		}
 		if !requestApplies && !responseApplies {
 			return fmt.Errorf("rename intent %q -> %q does not match a request or response direction", intent.From, intent.To)
 		}
+		requestRenames := describesRemovedAddedPair(intent.From, intent.To, fromReqFields, toReqFields)
+		responseRenames := describesRemovedAddedPair(intent.To, intent.From, toRespFields, fromRespFields)
+		if !requestRenames && !responseRenames {
+			return fmt.Errorf("rename intent %q -> %q does not describe a removed/added pair in either direction", intent.From, intent.To)
+		}
 	}
 	return nil
+}
+
+// describesRemovedAddedPair reports whether the mapping names a field that is
+// removed on the from side and one that is added on the to side of a given
+// direction. Presence on both sides is not enough: without this shape the
+// intent would rename nothing on that direction.
+func describesRemovedAddedPair(fromName, toName string, fromFields, toFields map[string]*schema) bool {
+	_, fromHasFrom := fromFields[fromName]
+	_, toHasFrom := toFields[fromName]
+	_, fromHasTo := fromFields[toName]
+	_, toHasTo := toFields[toName]
+	return fromHasFrom && !toHasFrom && toHasTo && !fromHasTo
 }
 
 func validateRenameIntentDirection(side, fromName, toName string, fromFields, toFields map[string]*schema) (bool, error) {
