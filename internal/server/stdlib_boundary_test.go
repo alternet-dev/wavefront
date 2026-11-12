@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/alternet-dev/wavefront/internal/server"
+	"google.golang.org/protobuf/encoding/protowire"
 )
 
 // scrapeBoundaryCount asks the ops /metrics endpoint for the value of
@@ -50,6 +51,69 @@ func scrapeBoundaryCount(t *testing.T, opsURL, status string) float64 {
 	return 0
 }
 
+// scrapeErrorCount asks the ops /metrics endpoint for wavefront's error
+// counter for a boundary error code. Boundary responses always have an
+// unknown contract version and no transform outcome.
+func scrapeErrorCount(t *testing.T, opsURL, code string) float64 {
+	t.Helper()
+	resp, err := http.Get(opsURL + "/metrics")
+	if err != nil {
+		t.Fatalf("scrape /metrics: %v", err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read /metrics body: %v", err)
+	}
+	for _, line := range strings.Split(string(body), "\n") {
+		if !strings.HasPrefix(line, "wavefront_errors_total{") ||
+			!strings.Contains(line, fmt.Sprintf(`code=%q`, code)) ||
+			!strings.Contains(line, `contract_version="unknown"`) ||
+			!strings.Contains(line, `transform_outcome=""`) {
+			continue
+		}
+		closeIdx := strings.LastIndex(line, "} ")
+		if closeIdx < 0 {
+			t.Fatalf("malformed wavefront_errors_total line %q", line)
+		}
+		v, err := strconv.ParseFloat(strings.TrimSpace(line[closeIdx+2:]), 64)
+		if err != nil {
+			t.Fatalf("parse errors value from %q: %v", line, err)
+		}
+		return v
+	}
+	return 0
+}
+
+// notifyOnConnClosed wraps the data-plane ConnState callback and reports when
+// its StateClosed work has completed. Tests use it to observe asynchronous
+// metric updates without relying on a scheduling-dependent sleep.
+func notifyOnConnClosed(stateClosed chan<- struct{}) func(*http.Server) {
+	return func(srv *http.Server) {
+		connState := srv.ConnState
+		srv.ConnState = func(c net.Conn, state http.ConnState) {
+			if connState != nil {
+				connState(c, state)
+			}
+			if state == http.StateClosed {
+				select {
+				case stateClosed <- struct{}{}:
+				default:
+				}
+			}
+		}
+	}
+}
+
+func waitForConnClosed(t *testing.T, stateClosed <-chan struct{}) {
+	t.Helper()
+	select {
+	case <-stateClosed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for the data-plane StateClosed callback")
+	}
+}
+
 // waitForBoundaryCount polls the metric for up to d for the labelled counter
 // to reach want. StateClosed fires from net/http's serve goroutine after the
 // client observes the conn close, so the test has to give it a brief moment.
@@ -59,6 +123,24 @@ func waitForBoundaryCount(t *testing.T, opsURL, status string, want float64, d t
 	var got float64
 	for time.Now().Before(deadline) {
 		got = scrapeBoundaryCount(t, opsURL, status)
+		if got >= want {
+			return got
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	return got
+}
+
+// waitForErrorCount waits for the error counter to reflect an emitted boundary
+// envelope. The listener increments this counter before returning control to
+// net/http, but the polling keeps this assertion independent of serve-loop
+// scheduling.
+func waitForErrorCount(t *testing.T, opsURL, code string, want float64, d time.Duration) float64 {
+	t.Helper()
+	deadline := time.Now().Add(d)
+	var got float64
+	for time.Now().Before(deadline) {
+		got = scrapeErrorCount(t, opsURL, code)
 		if got >= want {
 			return got
 		}
@@ -96,21 +178,72 @@ func newBoundaryTestServer(t *testing.T, headerTimeout time.Duration, opts ...fu
 	return dataSrv, opsSrv, s
 }
 
-// TestStdlibBoundarySlowHeaderIncrementsUnknown — the slow-header path
-// closes the connection without writing a response line: net/http's read
-// returns an i/o error past ReadHeaderTimeout, the server's request-reader
-// switch classifies it as `isCommonNetReadError` and `return // don't reply`
-// (net/http/server.go, in the `for { ... readRequest(...) }` loop on the
-// serve goroutine). Because no bytes hit the wire, the sniffing conn never
-// captures a status, and the counter is incremented with the literal
-// `status="unknown"`. This pins that behaviour so a future net/http change
-// (e.g. starting to emit a 408 here) would surface as a test failure rather
-// than a silent shift in the label distribution.
-func TestStdlibBoundarySlowHeaderIncrementsUnknown(t *testing.T) {
+func assertBoundaryEnvelope(t *testing.T, br *bufio.Reader, wantStatus int, wantCode string) {
+	t.Helper()
+	resp, err := http.ReadResponse(br, nil)
+	if err != nil {
+		t.Fatalf("read boundary response: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != wantStatus {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, wantStatus)
+	}
+	if got := resp.Header.Get("Content-Type"); got != "application/protobuf" {
+		t.Errorf("Content-Type = %q, want application/protobuf", got)
+	}
+	if got := resp.Header.Get("X-Wavefront-Error"); got != wantCode {
+		t.Errorf("X-Wavefront-Error = %q, want %q", got, wantCode)
+	}
+	if got := resp.Header.Get("X-Wavefront-Contract-Version"); got != "unknown" {
+		t.Errorf("X-Wavefront-Contract-Version = %q, want unknown", got)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read wire-error body: %v", err)
+	}
+	if got := wireErrorCode(t, body); got != wantCode {
+		t.Errorf("wire-error body code = %q, want %q", got, wantCode)
+	}
+}
+
+func wireErrorCode(t *testing.T, body []byte) string {
+	t.Helper()
+	for len(body) > 0 {
+		num, typ, n := protowire.ConsumeTag(body)
+		if n < 0 {
+			t.Fatalf("consume wire-error tag: %v", protowire.ParseError(n))
+		}
+		body = body[n:]
+		if typ != protowire.BytesType {
+			n = protowire.ConsumeFieldValue(num, typ, body)
+			if n < 0 {
+				t.Fatalf("consume wire-error field: %v", protowire.ParseError(n))
+			}
+			body = body[n:]
+			continue
+		}
+		value, n := protowire.ConsumeBytes(body)
+		if n < 0 {
+			t.Fatalf("consume wire-error bytes: %v", protowire.ParseError(n))
+		}
+		body = body[n:]
+		if num == 1 {
+			return string(value)
+		}
+	}
+	t.Fatal("wire-error body has no code field")
+	return ""
+}
+
+// TestStdlibBoundarySlowHeaderReturns408Envelope verifies the listener emits
+// a wire-error envelope even though net/http ordinarily closes this path
+// without writing a response.
+func TestStdlibBoundarySlowHeaderReturns408Envelope(t *testing.T) {
 	const headerTimeout = 50 * time.Millisecond
 	dataSrv, opsSrv, _ := newBoundaryTestServer(t, headerTimeout)
 
-	before := scrapeBoundaryCount(t, opsSrv.URL, "unknown")
+	before := scrapeBoundaryCount(t, opsSrv.URL, "408")
+	beforeErrors := scrapeErrorCount(t, opsSrv.URL, "request_header_timeout")
 
 	u, err := url.Parse(dataSrv.URL)
 	if err != nil {
@@ -123,35 +256,28 @@ func TestStdlibBoundarySlowHeaderIncrementsUnknown(t *testing.T) {
 	t.Cleanup(func() { _ = conn.Close() })
 	_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
 
-	// Send a partial request line and no terminating headers — net/http's
-	// request reader will wait up to ReadHeaderTimeout and then close the
-	// conn without writing.
+	// Send a partial request line and no terminating headers. net/http's
+	// request reader will time out; the listener replaces its silent close.
 	if _, err := conn.Write([]byte("GET /v3/echo HTTP/1.1\r\n")); err != nil {
 		t.Fatalf("write partial request: %v", err)
 	}
 
-	// Drain whatever comes back. On the slow-header path net/http does
-	// NOT write a response, so this returns EOF (or the deadline fires
-	// if the server is unexpectedly slow to close). Both are fine — what
-	// matters is that the read side observes the conn close.
-	b, _ := io.ReadAll(conn)
-	if len(b) != 0 {
-		t.Logf("unexpected slow-header response bytes (net/http may have changed behaviour): %q", b)
-	}
+	assertBoundaryEnvelope(t, bufio.NewReader(conn), http.StatusRequestTimeout, "request_header_timeout")
 
 	// StateClosed fires from a goroutine after the conn close completes.
 	// Poll briefly for the labelled counter to advance.
-	got := waitForBoundaryCount(t, opsSrv.URL, "unknown", before+1, 2*time.Second)
+	got := waitForBoundaryCount(t, opsSrv.URL, "408", before+1, 2*time.Second)
 	if got != before+1 {
-		t.Fatalf(`wavefront_stdlib_boundary_total{status="unknown"} = %v, want %v (before=%v)`,
+		t.Fatalf(`wavefront_stdlib_boundary_total{status="408"} = %v, want %v (before=%v)`,
 			got, before+1, before)
 	}
+	if got := waitForErrorCount(t, opsSrv.URL, "request_header_timeout", beforeErrors+1, 2*time.Second); got != beforeErrors+1 {
+		t.Fatalf(`wavefront_errors_total{code="request_header_timeout"} = %v, want %v (before=%v)`, got, beforeErrors+1, beforeErrors)
+	}
 
-	// And sanity-check: the slow-header path must not be mislabelled as
-	// any of the captured statuses.
-	for _, status := range []string{"408", "431", "417", "400"} {
+	for _, status := range []string{"unknown", "431", "417", "400"} {
 		if v := scrapeBoundaryCount(t, opsSrv.URL, status); v != 0 {
-			t.Errorf(`wavefront_stdlib_boundary_total{status=%q} = %v, want 0 (slow-header should land on "unknown")`, status, v)
+			t.Errorf(`wavefront_stdlib_boundary_total{status=%q} = %v, want 0 (slow-header should land on 408)`, status, v)
 		}
 	}
 }
@@ -175,6 +301,7 @@ func TestStdlibBoundaryOversizedHeadersIncrements431(t *testing.T) {
 	})
 
 	before := scrapeBoundaryCount(t, opsSrv.URL, "431")
+	beforeErrors := scrapeErrorCount(t, opsSrv.URL, "request_header_too_large")
 
 	u, err := url.Parse(dataSrv.URL)
 	if err != nil {
@@ -203,23 +330,265 @@ func TestStdlibBoundaryOversizedHeadersIncrements431(t *testing.T) {
 		t.Fatalf("write fat request: %v", err)
 	}
 
-	// Drain the response — net/http does write a status line here, so we
-	// expect a real "HTTP/1.1 431 ..." to come back. We do not assert the
-	// body, only the status code visible in the response line.
-	br := bufio.NewReader(conn)
-	statusLine, err := br.ReadString('\n')
-	if err != nil {
-		t.Fatalf("read response status line: %v", err)
-	}
-	if !strings.HasPrefix(statusLine, "HTTP/1.1 431 ") {
-		t.Fatalf("expected status line starting with %q; got %q", "HTTP/1.1 431 ", statusLine)
-	}
-	_, _ = io.ReadAll(br)
+	assertBoundaryEnvelope(t, bufio.NewReader(conn), http.StatusRequestHeaderFieldsTooLarge, "request_header_too_large")
 
 	got := waitForBoundaryCount(t, opsSrv.URL, "431", before+1, 2*time.Second)
 	if got != before+1 {
 		t.Fatalf(`wavefront_stdlib_boundary_total{status="431"} = %v, want %v (before=%v)`,
 			got, before+1, before)
+	}
+	if got := waitForErrorCount(t, opsSrv.URL, "request_header_too_large", beforeErrors+1, 2*time.Second); got != beforeErrors+1 {
+		t.Fatalf(`wavefront_errors_total{code="request_header_too_large"} = %v, want %v (before=%v)`, got, beforeErrors+1, beforeErrors)
+	}
+}
+
+func TestStdlibBoundaryUnexpectedExpectReturns417Envelope(t *testing.T) {
+	dataSrv, opsSrv, _ := newBoundaryTestServer(t, 5*time.Second)
+	before := scrapeBoundaryCount(t, opsSrv.URL, "417")
+	beforeErrors := scrapeErrorCount(t, opsSrv.URL, "expectation_failed")
+
+	u, err := url.Parse(dataSrv.URL)
+	if err != nil {
+		t.Fatalf("parse url: %v", err)
+	}
+	conn, err := net.Dial("tcp", u.Host)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
+	req := fmt.Sprintf(
+		"POST /v3/echo HTTP/1.1\r\n"+
+			"Host: %s\r\n"+
+			"Content-Length: 1\r\n"+
+			"Expect: no-thanks\r\n"+
+			"Connection: close\r\n\r\n",
+		u.Host,
+	)
+	if _, err := conn.Write([]byte(req)); err != nil {
+		t.Fatalf("write request: %v", err)
+	}
+	assertBoundaryEnvelope(t, bufio.NewReader(conn), http.StatusExpectationFailed, "expectation_failed")
+
+	got := waitForBoundaryCount(t, opsSrv.URL, "417", before+1, 2*time.Second)
+	if got != before+1 {
+		t.Fatalf(`wavefront_stdlib_boundary_total{status="417"} = %v, want %v (before=%v)`,
+			got, before+1, before)
+	}
+	if got := waitForErrorCount(t, opsSrv.URL, "expectation_failed", beforeErrors+1, 2*time.Second); got != beforeErrors+1 {
+		t.Fatalf(`wavefront_errors_total{code="expectation_failed"} = %v, want %v (before=%v)`, got, beforeErrors+1, beforeErrors)
+	}
+}
+
+// TestStdlibBoundaryKeepaliveSlowHeaderReturns408Envelope verifies the
+// connection-local handler marker resets after a completed keepalive request.
+func TestStdlibBoundaryKeepaliveSlowHeaderReturns408Envelope(t *testing.T) {
+	const headerTimeout = 50 * time.Millisecond
+	dataSrv, opsSrv, _ := newBoundaryTestServer(t, headerTimeout)
+	before := scrapeBoundaryCount(t, opsSrv.URL, "408")
+
+	u, err := url.Parse(dataSrv.URL)
+	if err != nil {
+		t.Fatalf("parse url: %v", err)
+	}
+	conn, err := net.Dial("tcp", u.Host)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
+	if _, err := fmt.Fprintf(conn, "GET /not-in-the-bundle HTTP/1.1\r\nHost: %s\r\n\r\n", u.Host); err != nil {
+		t.Fatalf("write handled request: %v", err)
+	}
+	br := bufio.NewReader(conn)
+	resp, err := http.ReadResponse(br, nil)
+	if err != nil {
+		t.Fatalf("read handled response: %v", err)
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("handled response status = %d, want 404", resp.StatusCode)
+	}
+
+	if _, err := conn.Write([]byte("GET /v3/echo HTTP/1.1\r\n")); err != nil {
+		t.Fatalf("write partial keepalive request: %v", err)
+	}
+	assertBoundaryEnvelope(t, br, http.StatusRequestTimeout, "request_header_timeout")
+
+	got := waitForBoundaryCount(t, opsSrv.URL, "408", before+1, 2*time.Second)
+	if got != before+1 {
+		t.Fatalf(`wavefront_stdlib_boundary_total{status="408"} = %v, want %v (before=%v)`,
+			got, before+1, before)
+	}
+}
+
+// TestStdlibBoundaryKeepalivePipelinedSlowHeaderReturns408Envelope covers
+// the pipelined-buffered-prefix case: the client sends a handled request
+// AND the next request's prefix in one write. The server has no non-zero
+// idle deadline (IdleTimeout and ReadTimeout are both zero in this setup),
+// so after StateIdle net/http reads the prefix of the next request from
+// bufio without any Read reaching sniffingConn. The following header
+// deadline then times out on a wire Read; the listener must still emit a
+// 408 envelope and count the boundary, because the handler never ran for
+// that pipelined request.
+func TestStdlibBoundaryKeepalivePipelinedSlowHeaderReturns408Envelope(t *testing.T) {
+	const headerTimeout = 50 * time.Millisecond
+	dataSrv, opsSrv, _ := newBoundaryTestServer(t, headerTimeout)
+	before := scrapeBoundaryCount(t, opsSrv.URL, "408")
+
+	u, err := url.Parse(dataSrv.URL)
+	if err != nil {
+		t.Fatalf("parse url: %v", err)
+	}
+	conn, err := net.Dial("tcp", u.Host)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
+
+	// Pipeline the handled request AND only the three-byte "GET" prefix of
+	// the next request in one write. On localhost the server's bufio buffers
+	// the prefix before the first handler completes. net/http's keepalive
+	// Peek(4) must then wait for a fourth byte, so the listener needs to keep
+	// the header deadline rather than treating the prefix as an idle socket.
+	pipelined := fmt.Sprintf(
+		"GET /not-in-the-bundle HTTP/1.1\r\nHost: %s\r\n\r\n"+
+			"GET",
+		u.Host,
+	)
+	if _, err := conn.Write([]byte(pipelined)); err != nil {
+		t.Fatalf("write pipelined requests: %v", err)
+	}
+
+	br := bufio.NewReader(conn)
+	resp, err := http.ReadResponse(br, nil)
+	if err != nil {
+		t.Fatalf("read handled response: %v", err)
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("handled response status = %d, want 404", resp.StatusCode)
+	}
+
+	assertBoundaryEnvelope(t, br, http.StatusRequestTimeout, "request_header_timeout")
+
+	got := waitForBoundaryCount(t, opsSrv.URL, "408", before+1, 2*time.Second)
+	if got != before+1 {
+		t.Fatalf(`wavefront_stdlib_boundary_total{status="408"} = %v, want %v (before=%v)`,
+			got, before+1, before)
+	}
+}
+
+// TestStdlibBoundaryKeepaliveIdleTimeoutClosesSilently verifies that an idle
+// keepalive close is not confused with a request-header timeout. net/http
+// probes an idle connection before it starts reading another request, so no
+// wire-error envelope or boundary metric belongs to that normal close.
+func TestStdlibBoundaryKeepaliveIdleTimeoutClosesSilently(t *testing.T) {
+	stateClosed := make(chan struct{}, 1)
+	dataSrv, opsSrv, _ := newBoundaryTestServer(t, 5*time.Second,
+		func(srv *http.Server) { srv.IdleTimeout = 50 * time.Millisecond },
+		notifyOnConnClosed(stateClosed),
+	)
+	beforeBoundary := scrapeBoundaryCount(t, opsSrv.URL, "408")
+	beforeErrors := scrapeErrorCount(t, opsSrv.URL, "request_header_timeout")
+
+	u, err := url.Parse(dataSrv.URL)
+	if err != nil {
+		t.Fatalf("parse url: %v", err)
+	}
+	conn, err := net.Dial("tcp", u.Host)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
+	if _, err := fmt.Fprintf(conn, "GET /not-in-the-bundle HTTP/1.1\r\nHost: %s\r\n\r\n", u.Host); err != nil {
+		t.Fatalf("write handled request: %v", err)
+	}
+
+	br := bufio.NewReader(conn)
+	resp, err := http.ReadResponse(br, nil)
+	if err != nil {
+		t.Fatalf("read handled response: %v", err)
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("handled response status = %d, want 404", resp.StatusCode)
+	}
+
+	// A normal keepalive expiry closes the socket without an HTTP response.
+	if resp, err := http.ReadResponse(br, nil); err == nil {
+		resp.Body.Close()
+		t.Fatalf("idle close produced unsolicited response status %d, want connection close", resp.StatusCode)
+	}
+	waitForConnClosed(t, stateClosed)
+
+	if got := scrapeBoundaryCount(t, opsSrv.URL, "408"); got != beforeBoundary {
+		t.Errorf(`wavefront_stdlib_boundary_total{status="408"} = %v, want %v (idle close must not count as a header timeout)`, got, beforeBoundary)
+	}
+	if got := scrapeErrorCount(t, opsSrv.URL, "request_header_timeout"); got != beforeErrors {
+		t.Errorf(`wavefront_errors_total{code="request_header_timeout"} = %v, want %v (idle close must not emit a 408 envelope)`, got, beforeErrors)
+	}
+}
+
+// TestStdlibBoundaryKeepaliveParserFailureUsesCurrentStatus verifies that a
+// parser failure after a handled keepalive request is labelled with the
+// failure's response, rather than the previous request's status.
+func TestStdlibBoundaryKeepaliveParserFailureUsesCurrentStatus(t *testing.T) {
+	stateClosed := make(chan struct{}, 1)
+	dataSrv, opsSrv, _ := newBoundaryTestServer(t, 5*time.Second, notifyOnConnClosed(stateClosed))
+	before400 := scrapeBoundaryCount(t, opsSrv.URL, "400")
+	before404 := scrapeBoundaryCount(t, opsSrv.URL, "404")
+
+	u, err := url.Parse(dataSrv.URL)
+	if err != nil {
+		t.Fatalf("parse url: %v", err)
+	}
+	conn, err := net.Dial("tcp", u.Host)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
+	if _, err := fmt.Fprintf(conn, "GET /not-in-the-bundle HTTP/1.1\r\nHost: %s\r\n\r\n", u.Host); err != nil {
+		t.Fatalf("write handled request: %v", err)
+	}
+
+	br := bufio.NewReader(conn)
+	resp, err := http.ReadResponse(br, nil)
+	if err != nil {
+		t.Fatalf("read handled response: %v", err)
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("handled response status = %d, want 404", resp.StatusCode)
+	}
+
+	// The malformed header is rejected by net/http before wavefront's handler.
+	if _, err := fmt.Fprintf(conn, "GET /v3/echo HTTP/1.1\r\nHost: %s\r\nBad Header\r\n\r\n", u.Host); err != nil {
+		t.Fatalf("write malformed request: %v", err)
+	}
+	resp, err = http.ReadResponse(br, nil)
+	if err != nil {
+		t.Fatalf("read parser failure response: %v", err)
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("parser failure status = %d, want 400", resp.StatusCode)
+	}
+	waitForConnClosed(t, stateClosed)
+
+	if got := scrapeBoundaryCount(t, opsSrv.URL, "400"); got != before400+1 {
+		t.Errorf(`wavefront_stdlib_boundary_total{status="400"} = %v, want %v (parser failure status)`, got, before400+1)
+	}
+	if got := scrapeBoundaryCount(t, opsSrv.URL, "404"); got != before404 {
+		t.Errorf(`wavefront_stdlib_boundary_total{status="404"} = %v, want %v (previous response status must not leak)`, got, before404)
 	}
 }
 
@@ -285,6 +654,47 @@ func TestStdlibBoundaryNormalRequestDoesNotIncrement(t *testing.T) {
 	for _, s := range statuses {
 		if got := scrapeBoundaryCount(t, opsSrv.URL, s); got != before[s] {
 			t.Fatalf(`wavefront_stdlib_boundary_total{status=%q} = %v, want %v (normal request must not bump any label)`,
+				s, got, before[s])
+		}
+	}
+}
+
+// TestStdlibBoundaryDialAndDropDoesNotIncrement exercises the StateNew →
+// StateClosed path where the client dials but sends no bytes at all. Because
+// the entry is never marked active and no status was captured, the counter
+// must remain unchanged — a silent drop does not qualify as a stdlib-boundary
+// event.
+func TestStdlibBoundaryDialAndDropDoesNotIncrement(t *testing.T) {
+	// Short header timeout so the test completes quickly even if net/http
+	// decides to wait on a header that never arrives.
+	stateClosed := make(chan struct{}, 1)
+	dataSrv, opsSrv, _ := newBoundaryTestServer(t, 100*time.Millisecond, notifyOnConnClosed(stateClosed))
+
+	statuses := []string{"unknown", "408", "431", "417"}
+	before := make(map[string]float64, len(statuses))
+	for _, s := range statuses {
+		before[s] = scrapeBoundaryCount(t, opsSrv.URL, s)
+	}
+
+	u, err := url.Parse(dataSrv.URL)
+	if err != nil {
+		t.Fatalf("parse url: %v", err)
+	}
+	conn, err := net.Dial("tcp", u.Host)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	// Close without writing a single byte. The server sees StateNew → StateClosed
+	// with active=false and no captured status.
+	conn.Close()
+
+	// ConnState completes before the notification is sent, so the metric check
+	// observes the terminal callback rather than an arbitrary point in time.
+	waitForConnClosed(t, stateClosed)
+
+	for _, s := range statuses {
+		if got := scrapeBoundaryCount(t, opsSrv.URL, s); got != before[s] {
+			t.Errorf(`wavefront_stdlib_boundary_total{status=%q} = %v, want %v (dial-and-drop must not increment any label)`,
 				s, got, before[s])
 		}
 	}
