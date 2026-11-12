@@ -1,7 +1,10 @@
 package server
 
 import (
+	"bytes"
+	"errors"
 	"net"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
@@ -30,10 +33,9 @@ func (nullAddr) String() string  { return "null" }
 // TestParseStatusLine pins parseStatusLine's behaviour on the kinds of byte
 // prefixes net/http actually writes (real status lines) and on the kinds of
 // follow-on writes the function must NOT misinterpret as a new status line.
-// The function is invoked under sync.Once on the FIRST non-empty write — so
-// for status lines the input is always a fresh response prefix, and for
-// "should not match" cases we cover what a future, racy double-call would
-// see (defensive: it should still return 0).
+// The connection wrapper parses each write, so status-line inputs are fresh
+// response prefixes and negative cases cover follow-on bytes that must not be
+// mistaken for a response line.
 func TestParseStatusLine(t *testing.T) {
 	cases := []struct {
 		name string
@@ -67,12 +69,9 @@ func TestParseStatusLine(t *testing.T) {
 	}
 }
 
-// TestSniffingConnWriteCapturesOnce confirms that the first Write captures the
-// status and subsequent Writes do NOT overwrite it. The sync.Once guard is the
-// reason a body-bytes follow-on cannot wipe the captured status; this is
-// belt-and-suspenders because net/http writes the status line in a single
-// fmt.Fprintf call, but the property is what makes the metric labelling
-// robust against any future net/http refactor that splits the response into
+// TestSniffingConnWriteCapturesOnce confirms that the first response status is
+// retained and subsequent response lines cannot overwrite it. This keeps the
+// metric label stable if a future net/http refactor splits a response across
 // multiple writes.
 func TestSniffingConnWriteCapturesOnce(t *testing.T) {
 	c := &sniffingConn{Conn: &nullConn{}}
@@ -88,7 +87,7 @@ func TestSniffingConnWriteCapturesOnce(t *testing.T) {
 		t.Fatalf("second write: %v", err)
 	}
 	if got := c.capturedStatus(); got != 418 {
-		t.Fatalf("after second write: capturedStatus = %d, want 418 (sync.Once must guard)", got)
+		t.Fatalf("after second write: capturedStatus = %d, want 418 (first status must remain)", got)
 	}
 	// A non-status follow-on (body bytes) similarly must not reset to 0.
 	if _, err := c.Write([]byte("teapot body bytes")); err != nil {
@@ -99,11 +98,9 @@ func TestSniffingConnWriteCapturesOnce(t *testing.T) {
 	}
 }
 
-// TestSniffingConnWriteEmptyDoesNotFireOnce confirms a zero-length Write does
-// not consume the sync.Once. Some net/http internals call Write([]byte{})
-// (e.g. flushing an empty buffered chunk); that must not lock out a
-// subsequent real status-line write.
-func TestSniffingConnWriteEmptyDoesNotFireOnce(t *testing.T) {
+// TestSniffingConnWriteEmptyDoesNotCaptureStatus confirms a zero-length Write
+// does not lock out a subsequent real status-line write.
+func TestSniffingConnWriteEmptyDoesNotCaptureStatus(t *testing.T) {
 	c := &sniffingConn{Conn: &nullConn{}}
 	if _, err := c.Write(nil); err != nil {
 		t.Fatalf("nil write: %v", err)
@@ -118,6 +115,293 @@ func TestSniffingConnWriteEmptyDoesNotFireOnce(t *testing.T) {
 		t.Fatalf("real write: %v", err)
 	}
 	if got := c.capturedStatus(); got != 200 {
-		t.Fatalf("after real write: capturedStatus = %d, want 200 (empty writes must not consume the Once)", got)
+		t.Fatalf("after real write: capturedStatus = %d, want 200", got)
+	}
+}
+
+// TestIsInterceptedBoundaryStatus confirms that exactly 408, 417, and 431 are
+// classified as stdlib-boundary statuses and that no other code is.
+func TestIsInterceptedBoundaryStatus(t *testing.T) {
+	cases := []struct {
+		status int
+		want   bool
+	}{
+		{http.StatusRequestTimeout, true},              // 408
+		{http.StatusExpectationFailed, true},           // 417
+		{http.StatusRequestHeaderFieldsTooLarge, true}, // 431
+		// Non-boundary codes that must not be intercepted.
+		{http.StatusOK, false},
+		{http.StatusBadRequest, false},
+		{http.StatusNotFound, false},
+		{http.StatusInternalServerError, false},
+		{0, false},
+	}
+	for _, tc := range cases {
+		if got := isInterceptedBoundaryStatus(tc.status); got != tc.want {
+			t.Errorf("isInterceptedBoundaryStatus(%d) = %v, want %v", tc.status, got, tc.want)
+		}
+	}
+}
+
+// TestBoundaryError confirms boundaryError returns the right wire-error shape
+// for each intercepted status and nil for any status that is not a known
+// stdlib boundary.
+func TestBoundaryError(t *testing.T) {
+	cases := []struct {
+		status   int
+		wantCode string
+		wantNil  bool
+	}{
+		{http.StatusRequestTimeout, "request_header_timeout", false},
+		{http.StatusExpectationFailed, "expectation_failed", false},
+		{http.StatusRequestHeaderFieldsTooLarge, "request_header_too_large", false},
+		// Non-boundary statuses must return nil so emitBoundary is a no-op.
+		{http.StatusBadRequest, "", true},
+		{http.StatusInternalServerError, "", true},
+		{0, "", true},
+	}
+	for _, tc := range cases {
+		got := boundaryError(tc.status)
+		if tc.wantNil {
+			if got != nil {
+				t.Errorf("boundaryError(%d) = %v, want nil", tc.status, got)
+			}
+			continue
+		}
+		if got == nil {
+			t.Errorf("boundaryError(%d) = nil, want code %q", tc.status, tc.wantCode)
+			continue
+		}
+		if got.Code() != tc.wantCode {
+			t.Errorf("boundaryError(%d).Code() = %q, want %q", tc.status, got.Code(), tc.wantCode)
+		}
+		if got.HTTPStatus() != tc.status {
+			t.Errorf("boundaryError(%d).HTTPStatus() = %d, want %d", tc.status, got.HTTPStatus(), tc.status)
+		}
+	}
+}
+
+// bufConn is a net.Conn whose Write goes to a bytes.Buffer so emitBoundary
+// can be tested without a real network connection.
+type bufConn struct {
+	nullConn
+	buf bytes.Buffer
+}
+
+func (c *bufConn) Write(p []byte) (int, error) { return c.buf.Write(p) }
+
+// TestSniffingConnEmitBoundaryIdempotent verifies that the emitted flag
+// prevents a second emitBoundary call from writing a second envelope, even
+// when both calls reference the same boundary status.
+func TestSniffingConnEmitBoundaryIdempotent(t *testing.T) {
+	bc := &bufConn{}
+	c := &sniffingConn{Conn: bc}
+	if err := c.emitBoundary(http.StatusRequestTimeout); err != nil {
+		t.Fatalf("first emitBoundary: %v", err)
+	}
+	firstLen := bc.buf.Len()
+	if firstLen == 0 {
+		t.Fatal("first emitBoundary wrote nothing to the connection")
+	}
+	// Second call with the same status must be a no-op.
+	if err := c.emitBoundary(http.StatusRequestTimeout); err != nil {
+		t.Fatalf("second emitBoundary: %v", err)
+	}
+	if bc.buf.Len() != firstLen {
+		t.Fatalf("second emitBoundary wrote %d extra bytes, want 0 (must be idempotent)",
+			bc.buf.Len()-firstLen)
+	}
+}
+
+// TestSniffingConnEmitBoundaryUnknownStatusIsNoop confirms that emitBoundary
+// for a status that boundaryError does not recognize writes nothing and returns
+// nil — not a half-formed envelope.
+func TestSniffingConnEmitBoundaryUnknownStatusIsNoop(t *testing.T) {
+	bc := &bufConn{}
+	c := &sniffingConn{Conn: bc}
+	if err := c.emitBoundary(http.StatusBadRequest); err != nil {
+		t.Fatalf("emitBoundary(400): %v", err)
+	}
+	if bc.buf.Len() != 0 {
+		t.Fatalf("emitBoundary(400) wrote %d bytes, want 0", bc.buf.Len())
+	}
+	if err := c.emitBoundary(http.StatusRequestTimeout); err != nil {
+		t.Fatalf("emitBoundary(408) after unknown status: %v", err)
+	}
+	if bc.buf.Len() == 0 {
+		t.Fatal("emitBoundary(408) after unknown status wrote nothing")
+	}
+}
+
+func TestRequestBytesTrackerDetectsBufferedNextRequest(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want bool
+	}{
+		{
+			name: "complete request only",
+			in:   "GET / HTTP/1.1\r\nHost: example.test\r\n\r\n",
+		},
+		{
+			name: "three byte next prefix",
+			in: "GET / HTTP/1.1\r\nHost: example.test\r\n\r\n" +
+				"GET",
+			want: true,
+		},
+		{
+			name: "body is not a next request",
+			in: "POST / HTTP/1.1\r\nHost: example.test\r\nContent-Length: 3\r\n\r\n" +
+				"GET",
+		},
+		{
+			name: "next prefix after body",
+			in: "POST / HTTP/1.1\r\nHost: example.test\r\nContent-Length: 3\r\n\r\n" +
+				"abcGET",
+			want: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var tracker requestBytesTracker
+			tracker.observe([]byte(tc.in))
+			if got := tracker.resetAndHasNextRequest(); got != tc.want {
+				t.Fatalf("resetAndHasNextRequest() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestSniffingConnWriteInterceptsBoundaryStatusBeforeHandler verifies that
+// Write emits a wire-error envelope — not the raw stdlib text — when the
+// handler has not yet claimed the connection and the status is an intercepted
+// boundary code. The underlying conn must receive the envelope bytes, the
+// original p bytes must not appear there, and the method must return
+// len(p), nil so net/http's error path continues normally.
+func TestSniffingConnWriteInterceptsBoundaryStatusBeforeHandler(t *testing.T) {
+	bc := &bufConn{}
+	c := &sniffingConn{Conn: bc}
+
+	raw := []byte("HTTP/1.1 431 Request Header Fields Too Large\r\nContent-Type: text/plain; charset=utf-8\r\nConnection: close\r\n\r\n431\n")
+	n, err := c.Write(raw)
+	if err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if n != len(raw) {
+		t.Fatalf("Write n = %d, want %d", n, len(raw))
+	}
+
+	written := bc.buf.Bytes()
+	if len(written) == 0 {
+		t.Fatal("underlying conn received nothing; expected a wire-error envelope")
+	}
+	// The envelope carries application/protobuf, not text/plain.
+	if !bytes.Contains(written, []byte("application/protobuf")) {
+		t.Errorf("envelope missing application/protobuf Content-Type; got:\n%s", written)
+	}
+	// The raw stdlib body must not have leaked through.
+	if bytes.Contains(written, []byte("text/plain")) {
+		t.Errorf("stdlib Content-Type leaked to underlying conn; raw bytes must not pass through")
+	}
+	if c.capturedStatus() != http.StatusRequestHeaderFieldsTooLarge {
+		t.Fatalf("capturedStatus = %d, want 431", c.capturedStatus())
+	}
+}
+
+// TestSniffingConnWritePassthroughAfterHandlerSeen confirms that Write does
+// not intercept boundary status bytes once the handler has claimed the
+// connection. The original bytes must reach the underlying conn unchanged.
+func TestSniffingConnWritePassthroughAfterHandlerSeen(t *testing.T) {
+	bc := &bufConn{}
+	c := &sniffingConn{Conn: bc}
+	c.handlerSeen.Store(true)
+
+	raw := []byte("HTTP/1.1 431 Request Header Fields Too Large\r\nContent-Type: text/plain\r\n\r\n")
+	n, err := c.Write(raw)
+	if err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if n != len(raw) {
+		t.Fatalf("Write n = %d, want %d", n, len(raw))
+	}
+	if !bytes.Equal(bc.buf.Bytes(), raw) {
+		t.Fatalf("passthrough mismatch:\n got %q\nwant %q", bc.buf.Bytes(), raw)
+	}
+	// Status is still captured even when passing through.
+	if c.capturedStatus() != http.StatusRequestHeaderFieldsTooLarge {
+		t.Fatalf("capturedStatus = %d, want 431", c.capturedStatus())
+	}
+}
+
+// timeoutErr is a net.Error that reports Timeout() == true.
+type timeoutErr struct{}
+
+func (timeoutErr) Error() string   { return "i/o timeout" }
+func (timeoutErr) Timeout() bool   { return true }
+func (timeoutErr) Temporary() bool { return false }
+
+// timeoutConn wraps nullConn and returns a timeoutErr on the first Read.
+type timeoutConn struct {
+	nullConn
+	buf bufConn
+}
+
+func (c *timeoutConn) Read(_ []byte) (int, error)  { return 0, timeoutErr{} }
+func (c *timeoutConn) Write(p []byte) (int, error) { return c.buf.buf.Write(p) }
+
+// TestSniffingConnReadEmitsBoundaryOnTimeout verifies that Read calls
+// emitBoundary(408) when the underlying conn returns a timeout error and the
+// handler has not yet been seen. The 408 wire-error envelope must be written
+// to the underlying conn; the timeout error must still be returned to the
+// caller so net/http can close the connection normally.
+func TestSniffingConnReadEmitsBoundaryOnTimeout(t *testing.T) {
+	tc := &timeoutConn{}
+	c := &sniffingConn{Conn: tc}
+
+	buf := make([]byte, 64)
+	n, err := c.Read(buf)
+	if n != 0 {
+		t.Fatalf("Read n = %d, want 0", n)
+	}
+	var netErr net.Error
+	if !errors.As(err, &netErr) || !netErr.Timeout() {
+		t.Fatalf("Read err = %v, want a timeout net.Error", err)
+	}
+
+	written := tc.buf.buf.Bytes()
+	if len(written) == 0 {
+		t.Fatal("underlying conn received nothing; expected a 408 wire-error envelope")
+	}
+	if !bytes.Contains(written, []byte("408")) {
+		t.Errorf("408 status missing from emitted envelope:\n%s", written)
+	}
+	if !bytes.Contains(written, []byte("application/protobuf")) {
+		t.Errorf("application/protobuf Content-Type missing from emitted envelope:\n%s", written)
+	}
+	if c.capturedStatus() != http.StatusRequestTimeout {
+		t.Fatalf("capturedStatus = %d, want 408", c.capturedStatus())
+	}
+}
+
+// TestSniffingConnReadNoEmitWhenHandlerSeen confirms that Read does NOT call
+// emitBoundary when the handler has already been seen, even on a timeout.
+func TestSniffingConnReadNoEmitWhenHandlerSeen(t *testing.T) {
+	tc := &timeoutConn{}
+	c := &sniffingConn{Conn: tc}
+	c.handlerSeen.Store(true)
+
+	buf := make([]byte, 64)
+	_, err := c.Read(buf)
+	var netErr net.Error
+	if !errors.As(err, &netErr) || !netErr.Timeout() {
+		t.Fatalf("Read err = %v, want a timeout net.Error", err)
+	}
+
+	if tc.buf.buf.Len() != 0 {
+		t.Fatalf("unexpected envelope written to underlying conn after handler-seen timeout: %d bytes", tc.buf.buf.Len())
+	}
+	// No status should be captured on the Read path.
+	if c.capturedStatus() != 0 {
+		t.Fatalf("capturedStatus = %d, want 0 (read path does not capture status)", c.capturedStatus())
 	}
 }
