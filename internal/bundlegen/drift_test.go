@@ -358,6 +358,59 @@ func TestDraftShimRenameIntentRejectsTypeMismatch(t *testing.T) {
 	}
 }
 
+// TestDraftShimRenameIntentRefusedWhenNoRemovedAddedPair proves that an intent
+// whose two names both persist in every direction is refused. Without the
+// guard, validation treats presence as "applies" and matchIntentRenames then
+// skips the mapping because neither field is removed or added, so draft-shim
+// silently succeeds without emitting the requested rename.
+func TestDraftShimRenameIntentRefusedWhenNoRemovedAddedPair(t *testing.T) {
+	bothProps := `"text":{"type":"string"},"message":{"type":"string"}`
+	from := openAPIDoc(t, "2024-01", bothProps, bothProps)
+	to := openAPIDoc(t, "2024-06", bothProps, bothProps)
+	_, err := DraftShimWithOptions(from, to, DraftOptions{
+		RenameConfidence: 1,
+		RenameIntents:    []RenameIntent{{From: "text", To: "message"}},
+	})
+	if err == nil {
+		t.Fatal("DraftShimWithOptions: want error naming the intent")
+	}
+	if !strings.Contains(err.Error(), `"text"`) || !strings.Contains(err.Error(), `"message"`) {
+		t.Errorf("error %q does not name the intent fields", err)
+	}
+	if !strings.Contains(err.Error(), "removed/added pair") {
+		t.Errorf("error %q does not say it describes no removed/added pair", err)
+	}
+}
+
+// TestDraftShimRenameIntentOneDirectionOnly proves that an intent which
+// renames in one direction and persists in the other is still accepted. The
+// persistent direction need not consume the intent so long as the other
+// direction does.
+func TestDraftShimRenameIntentOneDirectionOnly(t *testing.T) {
+	bothProps := `"text":{"type":"string"},"message":{"type":"string"}`
+	from := openAPIDoc(t, "2024-01", `"text":{"type":"string"}`, bothProps)
+	to := openAPIDoc(t, "2024-06", `"message":{"type":"string"}`, bothProps)
+	p, err := DraftShimWithOptions(from, to, DraftOptions{
+		RenameConfidence: 1,
+		RenameIntents:    []RenameIntent{{From: "text", To: "message"}},
+	})
+	if err != nil {
+		t.Fatalf("DraftShimWithOptions: %v", err)
+	}
+	want := []StanzaProposal{{
+		Verb:       transform.KindRename,
+		Args:       RenameArgs{From: "text", To: "message"},
+		Confidence: Confident,
+		Signals:    []Signal{OperatorIntentSignal(), SameTypeSignal("string")},
+	}}
+	if !reflect.DeepEqual(p.Request, want) {
+		t.Errorf("request proposals = %+v, want %+v", p.Request, want)
+	}
+	if len(p.Response) != 0 {
+		t.Errorf("response proposals = %+v, want empty when both names persist", p.Response)
+	}
+}
+
 func TestRenderYAMLIncludesConfidentStanzas(t *testing.T) {
 	from := openAPIDoc(t, "2024-01", `"userName":{"type":"string"}`, `"ok":{"type":"boolean"}`)
 	to := openAPIDoc(t, "2024-06", `"user_name":{"type":"string"},"locale":{"type":"string"}`, `"ok":{"type":"boolean"}`)
