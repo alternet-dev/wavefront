@@ -479,16 +479,29 @@ func TestRunDraftShimMissingLayer(t *testing.T) {
 }
 
 // TestRunDraftShimRoutesThroughDispatcher confirms that the top-level run()
-// dispatcher forwards the draft-shim subcommand to runDraftShim. All other
-// draft-shim tests call runDraftShim directly; this one exercises the routing
-// branch in run() so a regression there is caught.
+// dispatcher forwards the draft-shim subcommand to runDraftShim and that
+// runDraftShim's work product actually arrives on disk. Exit code zero alone
+// would pass even if the dispatcher branch returned immediately without
+// calling runDraftShim, so the test also opens the --out file and looks for
+// the expected target contract version and rename stanza.
 func TestRunDraftShimRoutesThroughDispatcher(t *testing.T) {
 	bundleDir, fromVer, toVer := writeDriftPair(t)
-	// exit 0 confirms the full dispatch path reached runDraftShim successfully;
-	// --out directs the shim proposal to a temp file rather than os.Stdout.
-	code := run([]string{"draft-shim", "--bundle", bundleDir, "--from", fromVer, "--to", toVer, "--out", filepath.Join(t.TempDir(), "out.yaml")}, io.Discard)
+	outPath := filepath.Join(t.TempDir(), "out.yaml")
+	code := run([]string{"draft-shim", "--bundle", bundleDir, "--from", fromVer, "--to", toVer, "--out", outPath}, io.Discard)
 	if code != 0 {
 		t.Fatalf("run draft-shim via dispatcher: exit %d, want 0", code)
+	}
+	body, err := os.ReadFile(outPath)
+	if err != nil {
+		t.Fatalf("read dispatcher --out file: %v", err)
+	}
+	for _, want := range []string{
+		`target: "` + toVer + `"`,
+		`- rename: { from: "userName", to: "user_name" }`,
+	} {
+		if !strings.Contains(string(body), want) {
+			t.Errorf("dispatcher --out file missing %q\n--- output ---\n%s", want, body)
+		}
 	}
 }
 
