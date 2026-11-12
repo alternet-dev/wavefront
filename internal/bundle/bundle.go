@@ -163,6 +163,7 @@ type Bundle struct {
 	byVersion        map[string][]*Contract
 	selectorVariants map[contractKey][]selectorVariant
 	files            *protoregistry.Files
+	discriminators   map[string]discriminatorInfo // wrapper message FQN → info (#132)
 }
 
 // Selectors are the optional, opaque request attributes that further narrow
@@ -486,6 +487,7 @@ func Load(bundlePath string) (*Bundle, error) {
 		yb   *yamlBundle
 	}
 	loaded := make([]layer, 0, len(layerNames))
+	discriminators := map[string]discriminatorInfo{}
 
 	for _, name := range layerNames {
 		lp := name
@@ -502,6 +504,16 @@ func Load(bundlePath string) (*Bundle, error) {
 		}
 		if yb.Version != 1 {
 			return nil, &UnsupportedVersionError{Version: yb.Version}
+		}
+		disc, derr2 := loadDiscriminators(source, lp)
+		if derr2 != nil {
+			return nil, derr2
+		}
+		for k, v := range disc {
+			if _, dup := discriminators[k]; dup {
+				return nil, &ValidationError{Field: "discriminators", Reason: "wrapper message " + k + " declared in more than one layer"}
+			}
+			discriminators[k] = v
 		}
 		loaded = append(loaded, layer{name: name, fdps: fdps, yb: yb})
 	}
@@ -619,7 +631,42 @@ func Load(bundlePath string) (*Bundle, error) {
 		return nil, cerr
 	}
 
-	return &Bundle{contracts: contracts, byVersion: byVersion, selectorVariants: selectorVariants, files: files}, nil
+	// Validate each discriminator sidecar entry against the complete wrapper
+	// relationship in the merged descriptor set. Any mismatch means the
+	// sidecar drifted from descriptors.binpb, so fail fast at boot.
+	for name, info := range discriminators {
+		d, ferr := files.FindDescriptorByName(protoreflect.FullName(name))
+		if ferr != nil {
+			return nil, &MessageNotFoundError{Message: name}
+		}
+		md, ok := d.(protoreflect.MessageDescriptor)
+		if !ok {
+			return nil, &ValidationError{Field: "discriminators", Reason: "wrapper " + name + " is not a message"}
+		}
+		if md.Oneofs().Len() != 1 {
+			return nil, &ValidationError{Field: "discriminators", Reason: "wrapper " + name + " must declare exactly one oneof"}
+		}
+		oneof := md.Oneofs().Get(0)
+		for value, fieldName := range info.mapping {
+			field := md.Fields().ByName(protoreflect.Name(fieldName))
+			switch {
+			case field == nil:
+				return nil, &ValidationError{Field: "discriminators", Reason: "mapping value " + value + " names missing field " + fieldName + " on wrapper " + name}
+			case field.ContainingOneof() != oneof:
+				return nil, &ValidationError{Field: "discriminators", Reason: "mapping value " + value + " names field " + fieldName + " outside the wrapper oneof on " + name}
+			case field.Message() == nil:
+				return nil, &ValidationError{Field: "discriminators", Reason: "mapping value " + value + " names non-message field " + fieldName + " on wrapper " + name}
+			}
+		}
+	}
+
+	return &Bundle{
+		contracts:        contracts,
+		byVersion:        byVersion,
+		selectorVariants: selectorVariants,
+		files:            files,
+		discriminators:   discriminators,
+	}, nil
 }
 
 // applyResolution validates and installs one resolution rule on c. It is used

@@ -308,6 +308,11 @@ func TestRunVerifyUsageAdvertisesArchiveForm(t *testing.T) {
 
 func writeDriftPair(t *testing.T) (bundleDir, fromVer, toVer string) {
 	t.Helper()
+	return writeDriftPairWithRequestFields(t, "userName", "user_name")
+}
+
+func writeDriftPairWithRequestFields(t *testing.T, fromField, toField string) (bundleDir, fromVer, toVer string) {
+	t.Helper()
 	bundleDir = t.TempDir()
 	fromVer = "2024-01"
 	toVer = "2024-06"
@@ -317,14 +322,14 @@ func writeDriftPair(t *testing.T) (bundleDir, fromVer, toVer string) {
 "requestBody":{"content":{"application/json":{"schema":{"$ref":"#/components/schemas/Req"}}}},
 "responses":{"200":{"content":{"application/json":{"schema":{"$ref":"#/components/schemas/Resp"}}}}}}}},
 "components":{"schemas":{
-"Req":{"type":"object","properties":{"userName":{"type":"string"}}},
+"Req":{"type":"object","properties":{"` + fromField + `":{"type":"string"}}},
 "Resp":{"type":"object","properties":{"ok":{"type":"boolean"}}}}}}`},
 		{toVer, `{"openapi":"3.0.0","info":{"title":"t","version":"` + toVer + `"},
 "paths":{"/v/echo":{"post":{
 "requestBody":{"content":{"application/json":{"schema":{"$ref":"#/components/schemas/Req"}}}},
 "responses":{"200":{"content":{"application/json":{"schema":{"$ref":"#/components/schemas/Resp"}}}}}}}},
 "components":{"schemas":{
-"Req":{"type":"object","properties":{"user_name":{"type":"string"}}},
+"Req":{"type":"object","properties":{"` + toField + `":{"type":"string"}}},
 "Resp":{"type":"object","properties":{"ok":{"type":"boolean"}}}}}}`},
 	} {
 		dir := filepath.Join(bundleDir, layer.name)
@@ -392,6 +397,111 @@ func TestRunDraftShimStrictSurfacesCandidate(t *testing.T) {
 	}
 }
 
+func TestRunDraftShimRenameIntentWinsOverStrict(t *testing.T) {
+	bundleDir, fromVer, toVer := writeDriftPair(t)
+	intentPath := filepath.Join(t.TempDir(), "renames.yaml")
+	intent := []byte("version: 1\nrenames:\n  - from: userName\n    to: user_name\n")
+	if err := os.WriteFile(intentPath, intent, 0o600); err != nil {
+		t.Fatalf("write rename intent: %v", err)
+	}
+	var out bytes.Buffer
+	code := runDraftShim(
+		[]string{"--bundle", bundleDir, "--from", fromVer, "--to", toVer, "--strict", "--rename-intent", intentPath},
+		io.Discard, &out)
+	if code != 0 {
+		t.Fatalf("draft-shim --strict --rename-intent: exit %d", code)
+	}
+	if !strings.Contains(out.String(), `      - rename: { from: "userName", to: "user_name" }`) {
+		t.Errorf("rendered YAML missing intent-selected rename:\n%s", out.String())
+	}
+	if strings.Contains(out.String(), "# AMBIGUOUS pair") {
+		t.Errorf("intent-selected rename must not leave a candidates block:\n%s", out.String())
+	}
+}
+
+func TestRunDraftShimRejectsOutOfRangeRenameConfidence(t *testing.T) {
+	bundleDir, fromVer, toVer := writeDriftPair(t)
+	if code := runDraftShim(
+		[]string{"--bundle", bundleDir, "--from", fromVer, "--to", toVer, "--rename-confidence", "1.1"},
+		io.Discard, io.Discard); code != 1 {
+		t.Fatalf("draft-shim out-of-range confidence: exit %d, want 1", code)
+	}
+}
+
+func TestRunDraftShimRenameConfidenceAcceptsSimilarNames(t *testing.T) {
+	bundleDir, fromVer, toVer := writeDriftPairWithRequestFields(t, "deliveryState", "deliveryStatus")
+	var out bytes.Buffer
+	code := runDraftShim(
+		[]string{"--bundle", bundleDir, "--from", fromVer, "--to", toVer, "--rename-confidence", "0.8"},
+		io.Discard, &out)
+	if code != 0 {
+		t.Fatalf("draft-shim --rename-confidence: exit %d, want 0", code)
+	}
+	for _, want := range []string{
+		"# CONFIDENT: name-similarity:",
+		`- rename: { from: "deliveryState", to: "deliveryStatus" }`,
+	} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("draft-shim --rename-confidence output missing %q:\n%s", want, out.String())
+		}
+	}
+}
+
+// TestRunDraftShimRenameConfidenceZeroAcceptsAnyNameChange confirms the lower
+// boundary: at --rename-confidence 0 the threshold accepts any same-type pair
+// regardless of normalized name distance, producing a confident rename where
+// the default threshold would emit an ambiguous candidate block.
+func TestRunDraftShimRenameConfidenceZeroAcceptsAnyNameChange(t *testing.T) {
+	// "alpha" and "zeta" have low Levenshtein similarity; the default
+	// threshold (1.0) would not auto-match them as a rename.
+	bundleDir, fromVer, toVer := writeDriftPairWithRequestFields(t, "alpha", "zeta")
+	var out bytes.Buffer
+	code := runDraftShim(
+		[]string{"--bundle", bundleDir, "--from", fromVer, "--to", toVer, "--rename-confidence", "0"},
+		io.Discard, &out)
+	if code != 0 {
+		t.Fatalf("draft-shim --rename-confidence 0: exit %d, want 0", code)
+	}
+	if !strings.Contains(out.String(), `- rename: { from: "alpha", to: "zeta" }`) {
+		t.Errorf("confidence=0 should emit a confident rename for any same-type pair:\n%s", out.String())
+	}
+	if strings.Contains(out.String(), "# AMBIGUOUS pair") {
+		t.Errorf("confidence=0 should not leave a candidates block:\n%s", out.String())
+	}
+}
+
+// TestRunDraftShimRenameIntentRejectsMalformedYAML confirms that an intent
+// file that is not valid YAML causes exit 1, not exit 2 from an unknown flag.
+func TestRunDraftShimRenameIntentRejectsMalformedYAML(t *testing.T) {
+	bundleDir, fromVer, toVer := writeDriftPair(t)
+	intentPath := filepath.Join(t.TempDir(), "bad.yaml")
+	if err := os.WriteFile(intentPath, []byte("not: [valid: yaml"), 0o600); err != nil {
+		t.Fatalf("write intent file: %v", err)
+	}
+	code := runDraftShim(
+		[]string{"--bundle", bundleDir, "--from", fromVer, "--to", toVer, "--rename-intent", intentPath},
+		io.Discard, io.Discard)
+	if code != 1 {
+		t.Fatalf("draft-shim with malformed intent YAML: exit %d, want 1", code)
+	}
+}
+
+// TestRunDraftShimRenameIntentRejectsUnsupportedVersion confirms that an
+// intent file whose version field is not 1 causes exit 1.
+func TestRunDraftShimRenameIntentRejectsUnsupportedVersion(t *testing.T) {
+	bundleDir, fromVer, toVer := writeDriftPair(t)
+	intentPath := filepath.Join(t.TempDir(), "v2.yaml")
+	if err := os.WriteFile(intentPath, []byte("version: 2\nrenames:\n  - from: userName\n    to: user_name\n"), 0o600); err != nil {
+		t.Fatalf("write intent file: %v", err)
+	}
+	code := runDraftShim(
+		[]string{"--bundle", bundleDir, "--from", fromVer, "--to", toVer, "--rename-intent", intentPath},
+		io.Discard, io.Discard)
+	if code != 1 {
+		t.Fatalf("draft-shim with unsupported intent version: exit %d, want 1", code)
+	}
+}
+
 func TestRunDraftShimMissingFlags(t *testing.T) {
 	if code := runDraftShim([]string{"--bundle", t.TempDir()}, io.Discard, io.Discard); code != 2 {
 		t.Fatalf("missing --from/--to: exit %d, want 2", code)
@@ -417,6 +527,45 @@ func TestRunDraftShimMissingLayer(t *testing.T) {
 		[]string{"--bundle", bundleDir, "--from", "9999-99", "--to", toVer},
 		io.Discard, io.Discard); code != 1 {
 		t.Fatalf("missing from-layer: exit %d, want 1", code)
+	}
+}
+
+// TestRunDraftShimRoutesThroughDispatcher confirms that the top-level run()
+// dispatcher forwards the draft-shim subcommand to runDraftShim and that
+// runDraftShim's work product actually arrives on disk. Exit code zero alone
+// would pass even if the dispatcher branch returned immediately without
+// calling runDraftShim, so the test also opens the --out file and looks for
+// the expected target contract version and rename stanza.
+func TestRunDraftShimRoutesThroughDispatcher(t *testing.T) {
+	bundleDir, fromVer, toVer := writeDriftPair(t)
+	outPath := filepath.Join(t.TempDir(), "out.yaml")
+	code := run([]string{"draft-shim", "--bundle", bundleDir, "--from", fromVer, "--to", toVer, "--out", outPath}, io.Discard)
+	if code != 0 {
+		t.Fatalf("run draft-shim via dispatcher: exit %d, want 0", code)
+	}
+	body, err := os.ReadFile(outPath)
+	if err != nil {
+		t.Fatalf("read dispatcher --out file: %v", err)
+	}
+	for _, want := range []string{
+		`target: "` + toVer + `"`,
+		`- rename: { from: "userName", to: "user_name" }`,
+	} {
+		if !strings.Contains(string(body), want) {
+			t.Errorf("dispatcher --out file missing %q\n--- output ---\n%s", want, body)
+		}
+	}
+}
+
+// TestRunDraftShimRejectsNegativeRenameConfidence confirms the lower bound of
+// the --rename-confidence range: a value below 0 must return exit 1, mirroring
+// the rejection already tested for values above 1.
+func TestRunDraftShimRejectsNegativeRenameConfidence(t *testing.T) {
+	bundleDir, fromVer, toVer := writeDriftPair(t)
+	if code := runDraftShim(
+		[]string{"--bundle", bundleDir, "--from", fromVer, "--to", toVer, "--rename-confidence", "-0.1"},
+		io.Discard, io.Discard); code != 1 {
+		t.Fatalf("draft-shim negative confidence: exit %d, want 1", code)
 	}
 }
 

@@ -20,6 +20,7 @@ bundle/
     descriptors.binpb        #   proto FileDescriptorSet — this version's message shapes
     openapi.json             #   the frozen OpenAPI surface the version was cut from
     versions.yaml            #   the route bindings (one or more contracts)
+    discriminators.yaml      #   OPTIONAL: discriminator wire-transform metadata (#132)
 ```
 
 A layer is emitted once and never rewritten — that immutability is the
@@ -102,6 +103,60 @@ applies each link's stanzas in turn, out to the version that terminates the
 chain at a backend. A `route.target` names a backend from the deployment's
 target table (`WAVEFRONT_TARGETS`); `WAVEFRONT_UPSTREAM_BASE_URL` is the
 default target a version uses with no override.
+
+### Typed discriminated unions
+
+A discriminated `anyOf` / `oneOf` whose sibling `discriminator` carries an
+explicit `mapping` of values to local `#/components/schemas/` references lowers
+to a generated wrapper message holding a proto3 `oneof` — the client decodes a
+typed variant instead of the opaque `google.protobuf.Struct` fallback. The
+wrapper is nested in the containing message, named `<FieldNameCamelCase>Variant`,
+and its single `oneof variant` carries one field per mapped member.
+
+```yaml
+# OpenAPI
+PetEnvelope:
+  type: object
+  properties:
+    pet:
+      anyOf: [{ $ref: '#/components/schemas/Cat' }, { $ref: '#/components/schemas/Dog' }]
+      discriminator:
+        propertyName: petType
+        mapping:
+          cat: '#/components/schemas/Cat'
+          dog: '#/components/schemas/Dog'
+```
+
+```proto
+// generated
+message PetEnvelope {
+  PetVariant pet = 1;
+  message PetVariant { oneof variant { Cat cat = 1; Dog dog = 2; } }
+}
+```
+
+The two wire shapes differ: OpenAPI flattens the discriminator alongside the
+member's fields (`{"petType":"cat","meow":"purr"}`), protojson wraps them
+under the member key (`{"cat":{"petType":"cat","meow":"purr"}}`). Each layer that uses a
+mapped discriminated union emits a `discriminators.yaml` sidecar; the proxy's
+adapter reads it to transform between the two shapes on request decode
+(protobuf → upstream) and response encode (upstream → protobuf).
+
+```yaml
+# <layer>/discriminators.yaml
+version: 1
+oneofs:
+  - message: wavefront.gen.v2024_11.PetEnvelope.PetVariant
+    property_name: "petType"
+    mapping:
+      "cat": cat
+      "dog": dog
+```
+
+A discriminator with no `mapping` keeps the pre-#132 `Struct` lowering (the
+implicit name-based mapping is ambiguous across the per-version proto
+packages). Layers with no mapped discriminated unions emit no sidecar, so
+bundles that don't need the construct stay byte-identical.
 
 ## Transform vocabulary
 
@@ -210,6 +265,9 @@ error — return:
 | `transform_failed` | 502 | `Content-Type` | a response transform verb can't apply — live internal shape drifted from the bundle's response stanzas |
 | `internal_error` | 500 | `Content-Type` | a panic in the request path or other unrecoverable fault inside wavefront itself; the recovered panic value and stack are logged, never sent on the wire |
 | `unknown_route` | 404 | `Content-Type` | no contract binds the inbound request's `(path, method)`; wrong-method folds in (no 405, no `Allow` header) because each contract names exactly one method |
+| `request_header_timeout` | 408 | `Content-Type` | the client did not finish request headers within `WAVEFRONT_READ_HEADER_TIMEOUT_MS` |
+| `expectation_failed` | 417 | `Content-Type` | the client sent an `Expect` value other than `100-continue` |
+| `request_header_too_large` | 431 | `Content-Type` | request headers exceeded the server header limit |
 | `unavailable` | 503 | `Content-Type`, `Retry-After` | the proxy path received a request before the bundle finished loading at boot; a short `Retry-After` hint is attached so clients back off briefly |
 
 No client library is shipped: a client checks the HTTP status; structured
@@ -315,23 +373,24 @@ the header.
 
 ### Stdlib-boundary statuses
 
-A small set of statuses is emitted by Go's `net/http` request reader **before**
-any wavefront handler runs, with `Content-Type: text/plain` and **no**
-`X-Wavefront-Error` header. They are deliberately out-of-envelope: replacing
-them would mean reimplementing parts of the stdlib request reader. Clients
-distinguish them from wire-error responses by the absence of the
-`X-Wavefront-Error` header.
+Go's `net/http` request reader can fail **before** any wavefront handler runs.
+For `417` and `431`, the data-plane listener preserves the stdlib parser,
+intercepts `net/http`'s replies before they reach the client, and replaces each
+with the normal wire-error envelope. For `408`, `net/http` closes the
+connection without writing a reply; the listener synthesizes a new `408`
+wire-error envelope when it observes the header-read timeout. Because no
+`http.Request` is available at that point, `X-Wavefront-Contract-Version` is
+`unknown`.
 
-| HTTP | Cause |
-|---|---|
-| 408 Request Timeout | slow client failed to send headers within `WAVEFRONT_READ_HEADER_TIMEOUT_MS` |
-| 431 Request Header Fields Too Large | request headers exceed `net/http`'s default `MaxHeaderBytes` |
-| 417 Expectation Failed | non-`100-continue` `Expect:` header |
+| HTTP | `X-Wavefront-Error` | Cause |
+|---|---|---|
+| 408 Request Timeout | `request_header_timeout` | slow client failed to send headers within `WAVEFRONT_READ_HEADER_TIMEOUT_MS` |
+| 417 Expectation Failed | `expectation_failed` | non-`100-continue` `Expect:` header |
+| 431 Request Header Fields Too Large | `request_header_too_large` | request headers exceed `net/http`'s `MaxHeaderBytes` limit |
 
-Occurrences are surfaced as the unlabelled Prometheus counter
-`wavefront_stdlib_boundary_total` so operators see the count without sniffing
-responses; intercepting and re-enveloping these is tracked as future work in
-[#91](https://github.com/alternet-dev/wavefront/issues/91).
+Occurrences remain surfaced as the Prometheus counter
+`wavefront_stdlib_boundary_total`, labelled by the captured status code or
+`unknown` when no status line was observed before the connection closed.
 
 ### Response header invariant
 
