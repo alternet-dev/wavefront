@@ -36,10 +36,10 @@ type discEntry struct {
 // parseDiscriminator returns the mapped-discriminator metadata for sc if sc is
 // an anyOf/oneOf carrying a discriminator with an explicit mapping of value →
 // $ref. It returns ok=false for every other shape: no discriminator, no
-// mapping, an empty mapping, or a mapping value that is not a #/components
-// $ref. A discriminator without a mapping stays with the previous Struct
-// lowering (#129's note that the implicit name-based mapping is ambiguous
-// across per-version proto packages).
+// mapping, an empty mapping, a non-local $ref, or a mapping whose target set
+// differs from the union's local $ref branch set. Those shapes stay with the
+// previous Struct lowering (#129's note that the implicit name-based mapping
+// is ambiguous across per-version proto packages).
 func parseDiscriminator(sc *schema) (typedDiscriminator, bool) {
 	if sc == nil {
 		return typedDiscriminator{}, false
@@ -60,6 +60,18 @@ func parseDiscriminator(sc *schema) (typedDiscriminator, bool) {
 	if len(p.Mapping) == 0 {
 		return typedDiscriminator{}, false
 	}
+	const componentPrefix = "#/components/schemas/"
+	branchTargets := make(map[string]struct{}, len(sc.OneOf)+len(sc.AnyOf))
+	for _, branch := range append(append([]*schema(nil), sc.OneOf...), sc.AnyOf...) {
+		if branch == nil || !strings.HasPrefix(branch.Ref, componentPrefix) {
+			return typedDiscriminator{}, false
+		}
+		name := refName(branch.Ref)
+		if name == "" {
+			return typedDiscriminator{}, false
+		}
+		branchTargets[branch.Ref] = struct{}{}
+	}
 	values := make([]string, 0, len(p.Mapping))
 	for v := range p.Mapping {
 		values = append(values, v)
@@ -67,16 +79,30 @@ func parseDiscriminator(sc *schema) (typedDiscriminator, bool) {
 	sort.Strings(values)
 	entries := make([]discEntry, 0, len(values))
 	used := make(map[string]bool, len(values))
+	mappingTargets := make(map[string]struct{}, len(values))
 	for _, v := range values {
 		ref := p.Mapping[v]
-		if !strings.HasPrefix(ref, "#/components/schemas/") {
+		if !strings.HasPrefix(ref, componentPrefix) {
+			return typedDiscriminator{}, false
+		}
+		targetName := refName(ref)
+		if targetName == "" {
 			return typedDiscriminator{}, false
 		}
 		entries = append(entries, discEntry{
 			value:      v,
-			targetName: refName(ref),
+			targetName: targetName,
 			fieldName:  uniqueIdent(v, used),
 		})
+		mappingTargets[ref] = struct{}{}
+	}
+	if len(mappingTargets) != len(branchTargets) {
+		return typedDiscriminator{}, false
+	}
+	for target := range branchTargets {
+		if _, ok := mappingTargets[target]; !ok {
+			return typedDiscriminator{}, false
+		}
 	}
 	return typedDiscriminator{
 		propertyName: strings.TrimSpace(p.PropertyName),

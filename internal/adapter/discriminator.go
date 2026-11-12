@@ -1,8 +1,10 @@
 package adapter
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 
 	"google.golang.org/protobuf/reflect/protoreflect"
 )
@@ -68,7 +70,16 @@ func transformJSON(md protoreflect.MessageDescriptor, resolver DiscriminatorReso
 		return in, nil
 	}
 	var v any
-	if err := json.Unmarshal(in, &v); err != nil {
+	dec := json.NewDecoder(bytes.NewReader(in))
+	dec.UseNumber()
+	if err := dec.Decode(&v); err != nil {
+		return nil, err
+	}
+	var trailing any
+	if err := dec.Decode(&trailing); err != io.EOF {
+		if err == nil {
+			return nil, fmt.Errorf("invalid JSON: multiple top-level values")
+		}
 		return nil, err
 	}
 	obj, ok := v.(map[string]any)
@@ -242,17 +253,25 @@ func wrapFlat(md protoreflect.MessageDescriptor, resolver DiscriminatorResolver,
 	if !ok {
 		return nil, fmt.Errorf("discriminator wrapper %s: discriminator value %q is not in the mapping", md.FullName(), discValue)
 	}
-	// Build the member object (everything from obj except — optionally —
-	// the discriminator; preserve it so the member's own schema stays filled).
+	memberField := memberFieldDescriptor(md, fieldName)
+	var memberDesc protoreflect.MessageDescriptor
+	if memberField != nil {
+		memberDesc = memberField.Message()
+	}
+	memberDeclaresDiscriminator := memberDesc != nil && lookupField(memberDesc, info.propertyName) != nil
+	// Build the member object. Keep the discriminator only when the selected
+	// member declares it; otherwise protojson would reject it as unknown.
 	member := make(map[string]any, len(obj))
 	for k, v := range obj {
+		if k == info.propertyName && !memberDeclaresDiscriminator {
+			continue
+		}
 		member[k] = v
 	}
 	// Recurse into the member's descriptor so nested discriminators inside
 	// the variant message are wrapped too.
-	memberDesc := memberFieldDescriptor(md, fieldName)
-	if memberDesc != nil && memberDesc.Message() != nil {
-		recursed, err := walkMessage(memberDesc.Message(), resolver, member, dirToWrapped)
+	if memberDesc != nil {
+		recursed, err := walkMessage(memberDesc, resolver, member, dirToWrapped)
 		if err != nil {
 			return nil, err
 		}
