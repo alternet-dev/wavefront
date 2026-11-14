@@ -64,14 +64,17 @@ func TestGraphQLDecodeRequestLeavesDocumentValidationUpstream(t *testing.T) {
 
 func TestGraphQLDecodeRequestRejectsInvalidEnvelope(t *testing.T) {
 	tests := map[string][]byte{
-		"malformed JSON":        []byte(`{"query":`),
-		"non-object":            []byte(`[{"query":"{ viewer { id } }"}]`),
-		"missing query":         []byte(`{"variables":{}}`),
-		"non-string query":      []byte(`{"query":42}`),
-		"operationName boolean": []byte(`{"query":"{ viewer { id } }","operationName":true}`),
-		"variables array":       []byte(`{"query":"{ viewer { id } }","variables":[]}`),
-		"extensions array":      []byte(`{"query":"{ viewer { id } }","extensions":[]}`),
-		"trailing JSON":         []byte(`{"query":"{ viewer { id } }"} {}`),
+		"malformed JSON":          []byte(`{"query":`),
+		"non-object":              []byte(`[{"query":"{ viewer { id } }"}]`),
+		"missing query":           []byte(`{"variables":{}}`),
+		"non-string query":        []byte(`{"query":42}`),
+		"operationName boolean":   []byte(`{"query":"{ viewer { id } }","operationName":true}`),
+		"variables array":         []byte(`{"query":"{ viewer { id } }","variables":[]}`),
+		"extensions array":        []byte(`{"query":"{ viewer { id } }","extensions":[]}`),
+		"duplicate member":        []byte(`{"query":"{ viewer { id } }","query":"{ item { id } }"}`),
+		"nested duplicate member": []byte(`{"query":"{ viewer { id } }","variables":{"id":"1","id":"2"}}`),
+		"malformed UTF-8":         {0x7b, 0x22, 0x71, 0x75, 0x65, 0x72, 0x79, 0x22, 0x3a, 0x22, 0xff, 0x22, 0x7d},
+		"trailing JSON":           []byte(`{"query":"{ viewer { id } }"} {}`),
 	}
 
 	a := NewGraphQL()
@@ -106,7 +109,7 @@ func TestGraphQLEncodeResponsePreservesRequestShapedEnvelope(t *testing.T) {
 
 func TestGraphQLEncodeResponseAcceptsErrorEnvelope(t *testing.T) {
 	a := NewGraphQL()
-	in := []byte(`{"data":null,"errors":[{"message":"not found","path":["item"]}]}`)
+	in := []byte(`{"data":null,"errors":[{"message":"not found","locations":[{"line":2,"column":4}],"path":["item",0],"extensions":{"code":"NOT_FOUND"}}]}`)
 
 	out, ct, werr := a.EncodeResponse(tb{}, in)
 	if werr != nil {
@@ -122,19 +125,28 @@ func TestGraphQLEncodeResponseAcceptsErrorEnvelope(t *testing.T) {
 
 func TestGraphQLEncodeResponseRejectsInvalidEnvelope(t *testing.T) {
 	tests := map[string][]byte{
-		"malformed JSON":   []byte(`{"data":`),
-		"non-object":       []byte(`[1,2,3]`),
-		"no result member": []byte(`{"extensions":{"cost":1}}`),
-		"data array":       []byte(`{"data":[]}`),
-		"null data alone":  []byte(`{"data":null}`),
-		"empty errors":     []byte(`{"errors":[]}`),
-		"errors null":      []byte(`{"errors":null}`),
-		"error not object": []byte(`{"errors":["bad"]}`),
-		"message missing":  []byte(`{"errors":[{"path":["item"]}]}`),
-		"message not text": []byte(`{"errors":[{"message":42}]}`),
-		"extensions array": []byte(`{"data":{},"extensions":[]}`),
-		"extensions null":  []byte(`{"data":{},"extensions":null}`),
-		"trailing JSON":    []byte(`{"data":{}} {}`),
+		"malformed JSON":            []byte(`{"data":`),
+		"non-object":                []byte(`[1,2,3]`),
+		"no result member":          []byte(`{"extensions":{"cost":1}}`),
+		"data array":                []byte(`{"data":[]}`),
+		"null data alone":           []byte(`{"data":null}`),
+		"empty errors":              []byte(`{"errors":[]}`),
+		"errors null":               []byte(`{"errors":null}`),
+		"error not object":          []byte(`{"errors":["bad"]}`),
+		"message missing":           []byte(`{"errors":[{"path":["item"]}]}`),
+		"message not text":          []byte(`{"errors":[{"message":42}]}`),
+		"unknown top-level member":  []byte(`{"data":{},"unexpected":true}`),
+		"path object":               []byte(`{"errors":[{"message":"not found","path":{}}]}`),
+		"path boolean segment":      []byte(`{"errors":[{"message":"not found","path":[true]}]}`),
+		"locations object":          []byte(`{"errors":[{"message":"not found","locations":{}}]}`),
+		"location missing column":   []byte(`{"errors":[{"message":"not found","locations":[{"line":2}]}]}`),
+		"location non-integer line": []byte(`{"errors":[{"message":"not found","locations":[{"line":"two","column":4}]}]}`),
+		"extensions array":          []byte(`{"data":{},"extensions":[]}`),
+		"extensions null":           []byte(`{"data":{},"extensions":null}`),
+		"duplicate member":          []byte(`{"data":{},"data":{}}`),
+		"nested duplicate member":   []byte(`{"data":{"item":{"id":"1","id":"2"}}}`),
+		"malformed UTF-8":           {0x7b, 0x22, 0x64, 0x61, 0x74, 0x61, 0x22, 0x3a, 0x7b, 0x22, 0x6e, 0x61, 0x6d, 0x65, 0x22, 0x3a, 0x22, 0xff, 0x22, 0x7d, 0x7d},
+		"trailing JSON":             []byte(`{"data":{}} {}`),
 	}
 
 	a := NewGraphQL()

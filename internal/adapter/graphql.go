@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"unicode/utf8"
 
 	"github.com/alternet-dev/wavefront/internal/wireerror"
 )
@@ -92,6 +94,11 @@ func validateGraphQLResponse(in []byte) error {
 	if err != nil {
 		return err
 	}
+	for name := range obj {
+		if name != "data" && name != "errors" && name != "extensions" {
+			return fmt.Errorf("%s is not a permitted response member", name)
+		}
+	}
 
 	dataRaw, hasData := obj["data"]
 	errorsRaw, hasErrors := obj["errors"]
@@ -131,6 +138,16 @@ func validateGraphQLResponse(in []byte) error {
 					return errors.New("each errors entry extensions must be an object")
 				}
 			}
+			if locationsRaw, ok := errorObject["locations"]; ok {
+				if err := validateErrorLocations(locationsRaw); err != nil {
+					return err
+				}
+			}
+			if pathRaw, ok := errorObject["path"]; ok {
+				if err := validateErrorPath(pathRaw); err != nil {
+					return err
+				}
+			}
 		}
 	}
 	if extensionsRaw, ok := obj["extensions"]; ok {
@@ -143,6 +160,9 @@ func validateGraphQLResponse(in []byte) error {
 }
 
 func decodeJSONObject(in []byte) (map[string]json.RawMessage, error) {
+	if err := validateJSONDocument(in); err != nil {
+		return nil, err
+	}
 	var obj map[string]json.RawMessage
 	if err := json.Unmarshal(in, &obj); err != nil {
 		return nil, errors.New("body must be one JSON object")
@@ -151,6 +171,108 @@ func decodeJSONObject(in []byte) (map[string]json.RawMessage, error) {
 		return nil, errors.New("body must be one JSON object")
 	}
 	return obj, nil
+}
+
+func validateErrorLocations(in []byte) error {
+	var locations []json.RawMessage
+	if err := json.Unmarshal(in, &locations); err != nil {
+		return errors.New("each errors entry locations must be an array")
+	}
+	for _, location := range locations {
+		obj, err := decodeJSONObject(location)
+		if err != nil {
+			return errors.New("each errors entry location must be an object")
+		}
+		for _, name := range []string{"line", "column"} {
+			raw, ok := obj[name]
+			if !ok || !isPositiveInteger(raw) {
+				return fmt.Errorf("each errors entry location %s must be a positive integer", name)
+			}
+		}
+	}
+	return nil
+}
+
+func validateErrorPath(in []byte) error {
+	var path []json.RawMessage
+	if err := json.Unmarshal(in, &path); err != nil {
+		return errors.New("each errors entry path must be an array")
+	}
+	for _, segment := range path {
+		var stringSegment string
+		if err := json.Unmarshal(segment, &stringSegment); err == nil {
+			continue
+		}
+		var integerSegment int64
+		if err := json.Unmarshal(segment, &integerSegment); err == nil {
+			continue
+		}
+		return errors.New("each errors entry path segments must be strings or integers")
+	}
+	return nil
+}
+
+func isPositiveInteger(in []byte) bool {
+	var value int64
+	return json.Unmarshal(in, &value) == nil && value > 0
+}
+
+func validateJSONDocument(in []byte) error {
+	if !utf8.Valid(in) {
+		return errors.New("body must be valid UTF-8")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(in))
+	if err := validateJSONValue(decoder); err != nil {
+		return errors.New("body must be valid JSON")
+	}
+	if _, err := decoder.Token(); err != io.EOF {
+		return errors.New("body must contain one JSON value")
+	}
+	return nil
+}
+
+func validateJSONValue(decoder *json.Decoder) error {
+	token, err := decoder.Token()
+	if err != nil {
+		return err
+	}
+	switch token := token.(type) {
+	case json.Delim:
+		switch token {
+		case '{':
+			members := make(map[string]struct{})
+			for decoder.More() {
+				nameToken, err := decoder.Token()
+				if err != nil {
+					return err
+				}
+				name, ok := nameToken.(string)
+				if !ok {
+					return errors.New("object member name is not a string")
+				}
+				if _, duplicate := members[name]; duplicate {
+					return fmt.Errorf("duplicate object member %q", name)
+				}
+				members[name] = struct{}{}
+				if err := validateJSONValue(decoder); err != nil {
+					return err
+				}
+			}
+			_, err := decoder.Token()
+			return err
+		case '[':
+			for decoder.More() {
+				if err := validateJSONValue(decoder); err != nil {
+					return err
+				}
+			}
+			_, err := decoder.Token()
+			return err
+		default:
+			return errors.New("unexpected JSON delimiter")
+		}
+	}
+	return nil
 }
 
 func validateNullableObject(in []byte) error {
