@@ -10,6 +10,7 @@ import "net/http"
 const (
 	codeUnsupportedContractVersion = "unsupported_contract_version"
 	codeDecodeFailed               = "decode_failed"
+	codeNotAcceptable              = "not_acceptable"
 	codeRequestBodyTooLarge        = "request_body_too_large"
 	codeUpstreamTimeout            = "upstream_timeout"
 	codeUpstreamError              = "upstream_error"
@@ -24,11 +25,10 @@ const (
 	codeRequestHeaderTooLarge      = "request_header_too_large"
 )
 
-// MediaTypeProtobuf is the single request and response media type the v0.1
-// codec contract names. Every wire-error envelope has Content-Type set to
-// this value; an inbound request that carries a body must declare it. A
-// future multi-codec selector (issue #44) would replace direct comparison
-// against this constant with a per-codec table.
+// MediaTypeProtobuf is the fixed wire-error envelope media type. Successful and
+// contract-declared responses may negotiate another codec, but every
+// wavefront-originated failure remains a protobuf wavefront.v0.Error so errors
+// that occur before content negotiation have one stable representation.
 const MediaTypeProtobuf = "application/protobuf"
 
 // Error is a typed, wavefront-originated failure. It satisfies the error
@@ -161,6 +161,16 @@ func DecodeFailed(msg string) *Error {
 	}
 }
 
+// NotAcceptable — the request's Accept header excludes every response codec
+// wavefront can produce. 406 (RFC 9110 §15.5.7).
+func NotAcceptable(msg string) *Error {
+	return &Error{
+		code:    codeNotAcceptable,
+		message: msgOr(msg, "no acceptable response representation is available"),
+		status:  http.StatusNotAcceptable,
+	}
+}
+
 // RequestBodyTooLarge — the inbound body exceeded WAVEFRONT_MAX_BODY_BYTES.
 // 413.
 func RequestBodyTooLarge(msg string) *Error {
@@ -238,15 +248,18 @@ func UnknownRoute(msg string) *Error {
 	}
 }
 
-// UnsupportedMediaType — the inbound request declared a Content-Type that is
-// not the contract's protobuf media type. Distinct from `decode_failed`: a
-// wrong envelope is rejected before the body is read, so this code is
-// reserved for the envelope mismatch and `decode_failed` is reserved for a
-// valid envelope whose bytes don't parse. 415 (RFC 9110 §15.5.16).
+// UnsupportedMediaType — the inbound request body does not match any
+// registered decoder: either the client declared a Content-Type for which no
+// decoder is registered, or the request carried a body with no Content-Type at
+// all (a body-bearing request has not declared any envelope the codec contract
+// can honor). Distinct from `decode_failed`: a wrong or absent envelope is
+// rejected before the body is read, so this code is reserved for the envelope
+// mismatch and `decode_failed` is reserved for a valid envelope whose bytes
+// don't parse. 415 (RFC 9110 §15.5.16).
 func UnsupportedMediaType(msg string) *Error {
 	return &Error{
 		code:    codeUnsupportedMediaType,
-		message: msgOr(msg, "request Content-Type is not "+MediaTypeProtobuf),
+		message: msgOr(msg, "request Content-Type has no registered codec"),
 		status:  http.StatusUnsupportedMediaType,
 	}
 }

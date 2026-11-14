@@ -1,6 +1,7 @@
 package server_test
 
 import (
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -84,6 +85,48 @@ func TestDeclaredErrorStatusIsTyped(t *testing.T) {
 	}
 	if got := item.Get(itemMD.Fields().ByName("id")).Int(); got != 7 {
 		t.Errorf("decoded id = %d, want 7", got)
+	}
+}
+
+func TestDeclaredErrorUsesNegotiatedJSONCodec(t *testing.T) {
+	b := loadBundleWithErrors(t)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusConflict)
+		_, _ = w.Write([]byte(`{"id":7,"text":"already exists"}`))
+	}))
+	defer upstream.Close()
+
+	s := server.New(baseCfg(upstream.URL))
+	s.SetBundle(b)
+	front := httptest.NewServer(s.DataHandler())
+	defer front.Close()
+
+	req, _ := http.NewRequest(http.MethodPost, front.URL+"/v3/echo", strings.NewReader(`{"text":"hi","n":1}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("X-Api-Contract-Version", "2024-11")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("status = %d, want 409", resp.StatusCode)
+	}
+	if got := resp.Header.Get("X-Wavefront-Error"); got != "" {
+		t.Errorf("X-Wavefront-Error = %q, want empty", got)
+	}
+	if got := resp.Header.Get("Content-Type"); got != "application/json" {
+		t.Errorf("Content-Type = %q, want application/json", got)
+	}
+	var body map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("body is not JSON: %v", err)
+	}
+	if got := body["text"]; got != "already exists" {
+		t.Errorf("text = %v, want already exists", got)
 	}
 }
 

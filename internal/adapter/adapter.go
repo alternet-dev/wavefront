@@ -2,8 +2,9 @@
 // core passes a Binding (never positional proto names) and the adapter never
 // sees the inbound transport — DecodeRequest's product is the upstream intent.
 // A future GraphQL adapter (single endpoint, request-defined response shape)
-// would implement the same interface without touching server/negotiate.
-// The raw protobuf and unary gRPC codecs both convert to and from JSON.
+// would implement the same interface without touching server/negotiate. The
+// shipped codecs are external protobuf, external JSON, and unary gRPC framing,
+// each converting to and from the internal JSON representation.
 package adapter
 
 import (
@@ -40,10 +41,21 @@ type UpstreamCall struct {
 
 // Adapter converts between an external codec and the internal JSON backend.
 type Adapter interface {
+	MediaType() string
 	DecodeRequest(b Binding, in []byte) (UpstreamCall, *wireerror.Error)
 	EncodeResponse(b Binding, upstreamJSON []byte) (out []byte, contentType string, err *wireerror.Error)
 	EncodeError(b Binding, status int, upstreamJSON []byte) (out []byte, contentType string, err *wireerror.Error)
 }
+
+const (
+	// MediaTypeProtobuf is the external protobuf representation. It aliases the
+	// wire-error media type because wavefront-originated errors always use the
+	// fixed protobuf envelope, regardless of negotiated response codec.
+	MediaTypeProtobuf = wireerror.MediaTypeProtobuf
+	// MediaTypeJSON is the descriptor-validated external JSON representation and
+	// the representation used for every upstream request and response.
+	MediaTypeJSON = "application/json"
+)
 
 // MessageResolver resolves a fully-qualified proto name to its descriptor.
 // bundle.Bundle satisfies it structurally.
@@ -58,6 +70,8 @@ type ProtoJSON struct {
 }
 
 func NewProtoJSON(r MessageResolver) *ProtoJSON { return &ProtoJSON{resolver: r} }
+
+func (*ProtoJSON) MediaType() string { return MediaTypeProtobuf }
 
 func (p *ProtoJSON) DecodeRequest(b Binding, in []byte) (UpstreamCall, *wireerror.Error) {
 	md, err := p.resolver.Message(b.RequestMessage())
@@ -92,7 +106,7 @@ func (p *ProtoJSON) DecodeRequest(b Binding, in []byte) (UpstreamCall, *wireerro
 		Method:      b.Method(),
 		Path:        b.Route(),
 		Body:        flat,
-		ContentType: "application/json",
+		ContentType: MediaTypeJSON,
 	}, nil
 }
 
@@ -124,7 +138,7 @@ func (p *ProtoJSON) encodeMessage(name string, upstreamJSON []byte) ([]byte, str
 	// (e.g. an operation whose only declared response is 204). Encode no body
 	// rather than unmarshalling an absent/empty upstream JSON body.
 	if md.Fields().Len() == 0 {
-		return nil, "application/protobuf", nil
+		return nil, MediaTypeProtobuf, nil
 	}
 	// Upstream carries the flattened discriminator shape; protojson needs the
 	// wrapped proto3-oneof shape (#132). The original bytes pass through when
@@ -141,5 +155,82 @@ func (p *ProtoJSON) encodeMessage(name string, upstreamJSON []byte) ([]byte, str
 	if err != nil {
 		return nil, "", wireerror.UpstreamError("could not encode upstream response")
 	}
-	return out, "application/protobuf", nil
+	return out, MediaTypeProtobuf, nil
+}
+
+// JSONJSON is the external JSON adapter. It still resolves and validates every
+// body against the binding's protobuf descriptor; JSON is not passed through
+// unchecked. Its upstream representation is the same canonical protobuf JSON
+// mapping used by ProtoJSON.
+type JSONJSON struct {
+	resolver MessageResolver
+}
+
+func NewJSONJSON(r MessageResolver) *JSONJSON { return &JSONJSON{resolver: r} }
+
+func (*JSONJSON) MediaType() string { return MediaTypeJSON }
+
+func (j *JSONJSON) DecodeRequest(b Binding, in []byte) (UpstreamCall, *wireerror.Error) {
+	md, err := j.resolver.Message(b.RequestMessage())
+	if err != nil {
+		return UpstreamCall{}, wireerror.DecodeFailed("request_message " + b.RequestMessage() + " is not resolvable")
+	}
+	// A zero-field message is the generator's synthetic Empty, bound to a
+	// bodyless operation (no requestBody). The upstream call then carries no
+	// body and no Content-Type. Any bytes the client did supply are still
+	// descriptor-validated: protojson rejects malformed JSON or unknown fields
+	// with decode_failed, so an invalid body is caught rather than silently
+	// discarded. A descriptor-valid body with no declared fields (`{}`) passes
+	// validation and is still dropped from the upstream call.
+	empty := md.Fields().Len() == 0
+	msg := dynamicpb.NewMessage(md)
+	if !empty || len(in) > 0 {
+		if err := protojson.Unmarshal(in, msg); err != nil {
+			return UpstreamCall{}, wireerror.DecodeFailed("request body is not valid JSON for " + b.RequestMessage())
+		}
+	}
+	if empty {
+		return UpstreamCall{Method: b.Method(), Path: b.Route()}, nil
+	}
+	canonical, err := protojson.Marshal(msg)
+	if err != nil {
+		return UpstreamCall{}, wireerror.DecodeFailed("could not canonicalize request JSON")
+	}
+	return UpstreamCall{
+		Method:      b.Method(),
+		Path:        b.Route(),
+		Body:        canonical,
+		ContentType: MediaTypeJSON,
+	}, nil
+}
+
+func (j *JSONJSON) EncodeResponse(b Binding, upstreamJSON []byte) ([]byte, string, *wireerror.Error) {
+	return j.encodeMessage(b.ResponseMessage(), upstreamJSON)
+}
+
+func (j *JSONJSON) EncodeError(b Binding, status int, upstreamJSON []byte) ([]byte, string, *wireerror.Error) {
+	name, ok := b.ErrorMessage(status)
+	if !ok {
+		return nil, "", wireerror.UpstreamError("no declared error message for status " + strconv.Itoa(status))
+	}
+	return j.encodeMessage(name, upstreamJSON)
+}
+
+func (j *JSONJSON) encodeMessage(name string, upstreamJSON []byte) ([]byte, string, *wireerror.Error) {
+	md, err := j.resolver.Message(name)
+	if err != nil {
+		return nil, "", wireerror.UpstreamError("message " + name + " is not resolvable")
+	}
+	if md.Fields().Len() == 0 {
+		return nil, MediaTypeJSON, nil
+	}
+	msg := dynamicpb.NewMessage(md)
+	if err := protojson.Unmarshal(upstreamJSON, msg); err != nil {
+		return nil, "", wireerror.UpstreamError("upstream body did not match " + name)
+	}
+	out, err := protojson.Marshal(msg)
+	if err != nil {
+		return nil, "", wireerror.UpstreamError("could not encode upstream response")
+	}
+	return out, MediaTypeJSON, nil
 }

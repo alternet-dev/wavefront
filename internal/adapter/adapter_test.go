@@ -106,6 +106,17 @@ func msgOf(t *testing.T, files *protoregistry.Files, name string) protoreflect.M
 }
 
 var _ Adapter = (*ProtoJSON)(nil)
+var _ Adapter = (*JSONJSON)(nil)
+
+func TestAdapterMediaTypesAreDistinct(t *testing.T) {
+	resolver := testResolver{testFiles(t)}
+	if got := NewProtoJSON(resolver).MediaType(); got != MediaTypeProtobuf {
+		t.Errorf("ProtoJSON.MediaType() = %q, want %q", got, MediaTypeProtobuf)
+	}
+	if got := NewJSONJSON(resolver).MediaType(); got != MediaTypeJSON {
+		t.Errorf("JSONJSON.MediaType() = %q, want %q", got, MediaTypeJSON)
+	}
+}
 
 func TestDecodeRequestProtoToJSON(t *testing.T) {
 	files := testFiles(t)
@@ -146,6 +157,48 @@ func TestDecodeRequestInvalidProtobuf(t *testing.T) {
 	_, werr := a.DecodeRequest(tb{method: "POST", route: "/x", req: "acme.v1.Ping", resp: "acme.v1.Pong"}, []byte("\xde\xad\xbe\xef not proto"))
 	if werr == nil || werr.Code() != "decode_failed" {
 		t.Fatalf("want decode_failed, got %v", werr)
+	}
+}
+
+func TestDecodeRequestJSONToCanonicalJSON(t *testing.T) {
+	files := testFiles(t)
+	a := NewJSONJSON(testResolver{files})
+
+	call, werr := a.DecodeRequest(
+		tb{method: "POST", route: "/v3/x", req: "acme.v1.Ping", resp: "acme.v1.Pong"},
+		[]byte(`{ "n": 7, "text": "hi" }`),
+	)
+	if werr != nil {
+		t.Fatalf("DecodeRequest: %v", werr)
+	}
+	if call.Method != "POST" || call.Path != "/v3/x" {
+		t.Errorf("method/path = %q %q", call.Method, call.Path)
+	}
+	if call.ContentType != MediaTypeJSON {
+		t.Errorf("ContentType = %q, want %q", call.ContentType, MediaTypeJSON)
+	}
+	msg := dynamicpb.NewMessage(msgOf(t, files, "acme.v1.Ping"))
+	if err := protojson.Unmarshal(call.Body, msg); err != nil {
+		t.Fatalf("upstream body is not descriptor-valid JSON: %v (body=%s)", err, call.Body)
+	}
+	if got := msg.Get(msg.Descriptor().Fields().ByName("text")).String(); got != "hi" {
+		t.Errorf("decoded text = %q", got)
+	}
+	if got := msg.Get(msg.Descriptor().Fields().ByName("n")).Int(); got != 7 {
+		t.Errorf("decoded n = %d", got)
+	}
+}
+
+func TestDecodeRequestJSONRejectsMalformedAndUnknownFields(t *testing.T) {
+	a := NewJSONJSON(testResolver{testFiles(t)})
+	binding := tb{method: "POST", route: "/x", req: "acme.v1.Ping", resp: "acme.v1.Pong"}
+	for _, in := range [][]byte{
+		[]byte(`{"text":`),
+		[]byte(`{"text":"hi","unknown":true}`),
+	} {
+		if _, werr := a.DecodeRequest(binding, in); werr == nil || werr.Code() != "decode_failed" {
+			t.Errorf("DecodeRequest(%q) error = %v, want decode_failed", in, werr)
+		}
 	}
 }
 
@@ -190,6 +243,25 @@ func TestEncodeResponseEmptyMessageReturnsNoBody(t *testing.T) {
 	}
 }
 
+// TestEncodeResponseEmptyMessageReturnsNoBodyJSON pins the JSONJSON side of the
+// same bodyless-response invariant: the content type is the JSON media type,
+// not the protobuf alias, so a 204 served through the JSON adapter advertises
+// no body and no incorrect envelope.
+func TestEncodeResponseEmptyMessageReturnsNoBodyJSON(t *testing.T) {
+	a := NewJSONJSON(testResolver{testFiles(t)})
+
+	out, ct, werr := a.EncodeResponse(tb{method: "DELETE", route: "/v3/items/{id}", req: "acme.v1.Empty", resp: "acme.v1.Empty"}, nil)
+	if werr != nil {
+		t.Fatalf("EncodeResponse: %v", werr)
+	}
+	if len(out) != 0 {
+		t.Errorf("out = %q, want empty", out)
+	}
+	if ct != MediaTypeJSON {
+		t.Errorf("contentType = %q, want %q", ct, MediaTypeJSON)
+	}
+}
+
 func TestEncodeResponseJSONToProtoWithWKT(t *testing.T) {
 	files := testFiles(t)
 	a := NewProtoJSON(testResolver{files})
@@ -222,6 +294,51 @@ func TestEncodeResponseInvalidJSON(t *testing.T) {
 	_, _, werr := a.EncodeResponse(tb{method: "POST", route: "/x", req: "acme.v1.Ping", resp: "acme.v1.Pong"}, []byte("definitely not json"))
 	if werr == nil || werr.Code() != "upstream_error" {
 		t.Fatalf("want upstream_error, got %v", werr)
+	}
+}
+
+func TestEncodeResponseJSONToJSONWithWKT(t *testing.T) {
+	files := testFiles(t)
+	a := NewJSONJSON(testResolver{files})
+
+	out, ct, werr := a.EncodeResponse(
+		tb{method: "POST", route: "/x", req: "acme.v1.Ping", resp: "acme.v1.Pong"},
+		[]byte(`{"text":"ok","at":"2026-05-17T00:00:00Z"}`),
+	)
+	if werr != nil {
+		t.Fatalf("EncodeResponse: %v", werr)
+	}
+	if ct != MediaTypeJSON {
+		t.Errorf("contentType = %q, want %q", ct, MediaTypeJSON)
+	}
+	pong := dynamicpb.NewMessage(msgOf(t, files, "acme.v1.Pong"))
+	if err := protojson.Unmarshal(out, pong); err != nil {
+		t.Fatalf("out not valid JSON for Pong: %v (out=%s)", err, out)
+	}
+	if got := pong.Get(pong.Descriptor().Fields().ByName("text")).String(); got != "ok" {
+		t.Errorf("decoded text = %q", got)
+	}
+}
+
+func TestEncodeErrorJSONTypesDeclaredStatus(t *testing.T) {
+	files := testFiles(t)
+	a := NewJSONJSON(testResolver{files})
+	b := tb{method: "POST", route: "/v3/echo", req: "acme.v1.Ping", resp: "acme.v1.Pong",
+		errs: map[int]string{409: "acme.v1.Ping"}}
+
+	out, ct, werr := a.EncodeError(b, 409, []byte(`{"n":42,"text":"conflict"}`))
+	if werr != nil {
+		t.Fatalf("EncodeError: %v", werr)
+	}
+	if ct != MediaTypeJSON {
+		t.Errorf("content-type = %q, want %q", ct, MediaTypeJSON)
+	}
+	msg := dynamicpb.NewMessage(msgOf(t, files, "acme.v1.Ping"))
+	if err := protojson.Unmarshal(out, msg); err != nil {
+		t.Fatalf("output is not JSON acme.v1.Ping: %v", err)
+	}
+	if got := msg.Get(msg.Descriptor().Fields().ByName("n")).Int(); got != 42 {
+		t.Errorf("decoded n = %d, want 42", got)
 	}
 }
 
@@ -263,6 +380,124 @@ func TestEncodeErrorUnboundStatusIsUpstreamError(t *testing.T) {
 	b := tb{method: "POST", route: "/v3/echo", resp: "acme.v1.Pong", errs: nil}
 	if _, _, werr := a.EncodeError(b, 409, []byte(`{}`)); werr == nil {
 		t.Fatal("EncodeError on an unbound status returned nil error; want upstream_error")
+	}
+}
+
+// TestEncodeErrorJSONUnboundStatusIsUpstreamError pins the JSONJSON side of the
+// unbound-status rule: a status with no declared error message is a bundle-
+// level programmer error on either adapter and must surface as upstream_error.
+func TestEncodeErrorJSONUnboundStatusIsUpstreamError(t *testing.T) {
+	files := testFiles(t)
+	a := NewJSONJSON(testResolver{files})
+	b := tb{method: "POST", route: "/v3/echo", resp: "acme.v1.Pong", errs: nil}
+	_, _, werr := a.EncodeError(b, 409, []byte(`{}`))
+	if werr == nil {
+		t.Fatal("EncodeError on an unbound status returned nil error; want upstream_error")
+	}
+	if werr.Code() != "upstream_error" {
+		t.Errorf("code = %q, want upstream_error", werr.Code())
+	}
+}
+
+// TestDecodeRequestEmptyMessageSendsNoBodyJSON: a zero-field request_message
+// through the JSON adapter must also send no body and no Content-Type — the
+// bodyless path is codec-independent and must hold for JSONJSON as it does for
+// ProtoJSON.
+func TestDecodeRequestEmptyMessageSendsNoBodyJSON(t *testing.T) {
+	a := NewJSONJSON(testResolver{testFiles(t)})
+
+	call, werr := a.DecodeRequest(tb{method: "GET", route: "/v3/items/{id}", req: "acme.v1.Empty", resp: "acme.v1.Pong"}, nil)
+	if werr != nil {
+		t.Fatalf("DecodeRequest: %v", werr)
+	}
+	if call.Method != "GET" || call.Path != "/v3/items/{id}" {
+		t.Errorf("method/path = %q %q", call.Method, call.Path)
+	}
+	if len(call.Body) != 0 {
+		t.Errorf("Body = %q, want empty (bodyless upstream call must not send {})", call.Body)
+	}
+	if call.ContentType != "" {
+		t.Errorf("ContentType = %q, want empty (no body declares no envelope)", call.ContentType)
+	}
+}
+
+// TestEncodeResponseInvalidJSONForJSONJSON: invalid upstream JSON through the
+// JSON adapter must surface as upstream_error, not a panic or nil error — the
+// same invariant that ProtoJSON holds for descriptor-invalid upstream bodies.
+func TestEncodeResponseInvalidJSONForJSONJSON(t *testing.T) {
+	a := NewJSONJSON(testResolver{testFiles(t)})
+	_, _, werr := a.EncodeResponse(tb{method: "POST", route: "/x", req: "acme.v1.Ping", resp: "acme.v1.Pong"}, []byte("definitely not json"))
+	if werr == nil || werr.Code() != "upstream_error" {
+		t.Fatalf("want upstream_error, got %v", werr)
+	}
+}
+
+// TestUnresolvableBindingIsTypedErrorJSONJSON: an unresolvable request_message
+// through the JSON adapter must return a *wireerror.Error — the same typed-
+// error contract that ProtoJSON provides.
+func TestUnresolvableBindingIsTypedErrorJSONJSON(t *testing.T) {
+	a := NewJSONJSON(testResolver{testFiles(t)})
+	_, werr := a.DecodeRequest(tb{method: "POST", route: "/x", req: "acme.v1.Ghost", resp: "acme.v1.Pong"}, []byte{})
+	var we *wireerror.Error
+	if !errors.As(error(werr), &we) {
+		t.Fatalf("want *wireerror.Error, got %v", werr)
+	}
+}
+
+// TestJSONJSONBodylessRejectsMalformedBody: bytes supplied against a
+// zero-field request_message must be descriptor-validated. Malformed JSON
+// surfaces as decode_failed instead of being silently discarded; the JSON
+// adapter advertises descriptor validation on every body.
+func TestJSONJSONBodylessRejectsMalformedBody(t *testing.T) {
+	a := NewJSONJSON(testResolver{testFiles(t)})
+	_, werr := a.DecodeRequest(
+		tb{method: "POST", route: "/v3/items", req: "acme.v1.Empty", resp: "acme.v1.Pong"},
+		[]byte("not json"),
+	)
+	if werr == nil {
+		t.Fatal("DecodeRequest accepted malformed JSON against Empty; want decode_failed")
+	}
+	if werr.Code() != "decode_failed" {
+		t.Errorf("code = %q, want decode_failed", werr.Code())
+	}
+}
+
+// TestJSONJSONBodylessRejectsUnknownFields: a body with fields the
+// zero-field request_message does not declare must fail validation. The
+// adapter contract is that unknown fields are a client contract breach, not
+// a silently accepted payload — the bodyless path is no exception.
+func TestJSONJSONBodylessRejectsUnknownFields(t *testing.T) {
+	a := NewJSONJSON(testResolver{testFiles(t)})
+	_, werr := a.DecodeRequest(
+		tb{method: "POST", route: "/v3/items", req: "acme.v1.Empty", resp: "acme.v1.Pong"},
+		[]byte(`{"unexpected":1}`),
+	)
+	if werr == nil {
+		t.Fatal("DecodeRequest accepted unknown fields against Empty; want decode_failed")
+	}
+	if werr.Code() != "decode_failed" {
+		t.Errorf("code = %q, want decode_failed", werr.Code())
+	}
+}
+
+// TestJSONJSONBodylessAcceptsEmptyObject: a syntactically valid body carrying
+// no declared fields is still a bodyless binding. The descriptor validates
+// (no unknown fields), and the upstream call stays bodyless rather than
+// forwarding `{}` to the backend.
+func TestJSONJSONBodylessAcceptsEmptyObject(t *testing.T) {
+	a := NewJSONJSON(testResolver{testFiles(t)})
+	call, werr := a.DecodeRequest(
+		tb{method: "POST", route: "/v3/items", req: "acme.v1.Empty", resp: "acme.v1.Pong"},
+		[]byte(`{}`),
+	)
+	if werr != nil {
+		t.Fatalf("DecodeRequest: %v", werr)
+	}
+	if len(call.Body) != 0 {
+		t.Errorf("Body = %q, want empty", call.Body)
+	}
+	if call.ContentType != "" {
+		t.Errorf("ContentType = %q, want empty", call.ContentType)
 	}
 }
 

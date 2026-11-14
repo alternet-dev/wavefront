@@ -43,7 +43,7 @@ const (
 type Server struct {
 	cfg     *config.Config
 	bundle  atomic.Pointer[bundle.Bundle]
-	adapter adapter.Adapter
+	codecs  codecRegistry
 	client  *http.Client
 	metrics *metrics
 	tracer  *tracing.Exporter
@@ -70,7 +70,10 @@ func New(cfg *config.Config) *Server {
 		metrics: newMetrics(),
 		logger:  slog.Default(),
 	}
-	s.adapter = adapter.NewProtoJSON(s) // *Server is the MessageResolver
+	// *Server is the MessageResolver for every descriptor-backed adapter.
+	// Protobuf stays first as the compatibility preference when no request or
+	// Accept header distinguishes otherwise.
+	s.codecs = newCodecRegistry(adapter.NewProtoJSON(s), adapter.NewJSONJSON(s))
 	s.tracer = tracing.NewExporter(tracing.Config{
 		Endpoint:    cfg.TracesEndpoint,
 		ServiceName: cfg.TracesServiceName,

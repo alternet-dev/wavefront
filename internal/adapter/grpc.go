@@ -35,6 +35,8 @@ func NewGRPCJSON(r MessageResolver) *GRPCJSON {
 
 var _ Adapter = (*GRPCJSON)(nil)
 
+func (*GRPCJSON) MediaType() string { return MediaTypeGRPCProto }
+
 func (g *GRPCJSON) DecodeRequest(b Binding, in []byte) (UpstreamCall, *wireerror.Error) {
 	payload, werr := decodeUnaryGRPC(in)
 	if werr != nil {

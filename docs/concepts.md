@@ -13,15 +13,15 @@ declarative edge so the internal API stays singular and free to evolve.
 
 ## The selector axis
 
-Every request carries selectors that pick which transform profile applies.
-`wavefront` always resolves on the contract **version** and can refine that
-resolution with optional `profile`, `tenant`, and `cohort` selectors. The
-model is general: the same engine, bundle format, and transform vocabulary
-can extend to other selectors.
+Every request carries selectors that determine how it is interpreted.
+`wavefront` always resolves on the contract **version** and the negotiated
+**codec**, and can refine that resolution with optional `profile`, `tenant`,
+and `cohort` selectors. The model is general: the same engine, bundle format,
+and transform vocabulary can extend to other selectors.
 
 - **version** — the client's external contract version. The required base
   selector.
-- **codec** — content negotiation (protobuf / CBOR / JSON ⇄ internal JSON).
+- **codec** — content negotiation (protobuf or JSON ⇄ internal JSON).
 - **profile** — client surface (mobile / web / TV) → BFF-shaped responses.
 - **tenant** — partner/tenant key → negotiated field names/units.
 - **cohort** — migration cohort → old contract over a rewritten backend.
@@ -29,8 +29,8 @@ can extend to other selectors.
 `profile`, `tenant`, and `cohort` are optional exact-match refinements of the
 version selector, carried by configurable request headers. They are opaque
 resolution inputs, not identities: `wavefront` does not authenticate,
-authorize, or otherwise interpret them. `codec` is designed-for, not yet
-built. This selector generality is why `wavefront` is not "a protobuf gateway."
+authorize, or otherwise interpret them. This selector generality is why
+`wavefront` is not "a protobuf gateway."
 
 ## Vocabulary
 
@@ -42,12 +42,12 @@ built. This selector generality is why `wavefront` is not "a protobuf gateway."
 - **Contract version** — an external contract a client speaks.
 - **Transform** — the declarative request/response mapping for a selector
   value: field add / rename / optionalize / default / coerce; route remap.
-- **Adapter** — a codec pair (decode external, encode external). `protobuf ↔
-  OpenAPI/JSON` is the reference adapter. The adapter package also provides a
-  unary gRPC framing variant: it unwraps one uncompressed gRPC message before
-  the same descriptor-driven conversion and frames the encoded reply. Listener
-  protocol support and runtime adapter selection remain transport concerns, not
-  codec behavior.
+- **Adapter** — a codec pair (decode external, encode external). The shipped
+  protobuf and descriptor-validated JSON adapters both target OpenAPI/JSON.
+  The adapter package also provides a unary gRPC framing variant: it unwraps
+  one uncompressed gRPC message before the same descriptor-driven conversion
+  and frames the encoded reply. Listener protocol support and runtime adapter
+  selection remain transport concerns, not codec behavior.
 - **Target (upstream)** — an internal HTTP/JSON backend. A deployment
   configures a default target plus, optionally, named targets; a contract
   version routes to one.

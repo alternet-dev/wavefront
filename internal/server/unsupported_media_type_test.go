@@ -35,7 +35,7 @@ func TestUnsupportedMediaTypeWrongContentType(t *testing.T) {
 		contentType string
 	}{
 		{name: "text/plain", contentType: "text/plain"},
-		{name: "application/json", contentType: "application/json"},
+		{name: "application/yaml", contentType: "application/yaml"},
 		{name: "application/xml", contentType: "application/xml"},
 		{name: "application/octet-stream", contentType: "application/octet-stream"},
 		// A bare value (no slash) is still wrong — wavefront does no parsing
@@ -61,8 +61,8 @@ func TestUnsupportedMediaTypeWrongContentType(t *testing.T) {
 			if got := resp.Header.Get("X-Wavefront-Error"); got != "unsupported_media_type" {
 				t.Errorf("X-Wavefront-Error=%q want unsupported_media_type", got)
 			}
-			// Response Content-Type is the envelope's protobuf type even though
-			// the client sent something else (body-type invariant).
+			// Response Content-Type is the fixed error envelope's protobuf type
+			// even though the client sent something else.
 			if got := resp.Header.Get("Content-Type"); got != "application/protobuf" {
 				t.Errorf("Content-Type=%q want application/protobuf", got)
 			}

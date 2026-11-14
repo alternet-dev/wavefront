@@ -10,11 +10,15 @@ Implementation shape — package layout and the request path.
 - **negotiate** (`internal/negotiate/`) — resolves the contract serving a
   request from its `(URL.Path, Method, X-Api-Contract-Version)` against the
   loaded bundle; maps to a transform profile or a typed error.
-- **adapter** (`internal/adapter/`) — codec pairs. Decode inbound external
-  bytes to a neutral value tree; encode the response back. `ProtoJSON` handles
-  raw protobuf and `GRPCJSON` adds strict unary gRPC message framing around the
-  same descriptor-driven conversion. The server transport, not the adapter,
-  owns HTTP/2 routing and `grpc-status` trailers.
+- **adapter** (`internal/adapter/`) — descriptor-backed codec pairs. Decode
+  external protobuf, external JSON, or unary gRPC-framed protobuf to the
+  internal JSON value tree, then encode the response. `ProtoJSON` and
+  `JSONJSON` are the HTTP codecs and share the same descriptor-driven
+  conversion; their response representation is selected by `Accept`.
+  `GRPCJSON` wraps the same conversion in strict unary gRPC message framing
+  and does not participate in `Accept` negotiation — a gRPC request is always
+  answered with a gRPC response. The server transport, not the adapter, owns
+  HTTP/2 routing and `grpc-status` trailers.
 - **transform** (`internal/transform/`) — applies the declarative mapping
   (add/rename/optionalize/default/coerce, route remap) in both directions.
 - **server** (`internal/server/`) — `net/http` listener, the one upstream
@@ -23,11 +27,12 @@ Implementation shape — package layout and the request path.
 
 ## Request path
 
-`server` accepts → route gate (path+method) → `negotiate` resolves the
-contract on (path, method, contract-version, profile, tenant, cohort) → `adapter` decodes → `transform`
-maps request → `server` calls the resolved upstream → `transform` maps response
-→ `adapter` encodes → `server` responds. On any failure, a typed error is
-encoded in the client's contract version.
+`server` accepts → route gate (path+method) → content negotiation selects
+request/response adapters → `negotiate` resolves the contract on (path, method,
+contract-version, profile, tenant, cohort) → the request adapter decodes →
+`transform` maps request → `server` calls the resolved upstream → `transform`
+maps response → the response adapter encodes → `server` responds. On any
+wavefront-originated failure, the fixed protobuf error type is returned.
 
 ## Concurrency model
 
