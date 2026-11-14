@@ -128,6 +128,12 @@ bundle/
 `retire` take a version out of service, and `verify` gates the bundle's
 consistency in your CI.
 
+Consumers generate language-native message types from a selected layer with
+`wavefront-bundle gen-types`; the command drives any installed protoc
+generator without owning language-specific output semantics. See
+[docs/client.md](docs/client.md#generating-message-types) for TypeScript, Go,
+Python, and Rust examples.
+
 To ship a smaller derived artifact while keeping the canonical bundle
 directory available to descriptor tooling, pack it after verification:
 

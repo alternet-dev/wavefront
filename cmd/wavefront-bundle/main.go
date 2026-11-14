@@ -11,6 +11,7 @@
 //	wavefront-bundle retire --version <id> --bundle <dir>
 //	wavefront-bundle verify --bundle <dir-or-archive>
 //	wavefront-bundle draft-shim --bundle <dir-or-archive> --from <id> --to <id> [--out <file>] [--strict] [--rename-confidence <0..1>] [--rename-intent <file>]
+//	wavefront-bundle gen-types --bundle <dir> --out <dir> --plugin <name> [--version <id>] [--plugin-path <file>] [--opt <value> ...]
 package main
 
 import (
@@ -20,6 +21,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/alternet-dev/wavefront/internal/bundle"
 	"github.com/alternet-dev/wavefront/internal/bundlegen"
@@ -33,7 +35,7 @@ func main() {
 // to errOut. It is the testable entry point — main is a thin os.Exit wrapper.
 func run(args []string, errOut io.Writer) int {
 	if len(args) == 0 {
-		fmt.Fprintln(errOut, "usage: wavefront-bundle <add|pack|remove|retire|verify|draft-shim> [flags]")
+		fmt.Fprintln(errOut, "usage: wavefront-bundle <add|pack|remove|retire|verify|draft-shim|gen-types> [flags]")
 		return 2
 	}
 	switch args[0] {
@@ -49,10 +51,59 @@ func run(args []string, errOut io.Writer) int {
 		return runVerify(args[1:], errOut)
 	case "draft-shim":
 		return runDraftShim(args[1:], errOut, os.Stdout)
+	case "gen-types":
+		return runGenTypes(args[1:], errOut, os.Stdout)
 	default:
 		fmt.Fprintf(errOut, "wavefront-bundle: unknown subcommand %q\n", args[0])
 		return 2
 	}
+}
+
+type repeatedFlag []string
+
+func (f *repeatedFlag) String() string { return strings.Join(*f, ",") }
+
+func (f *repeatedFlag) Set(value string) error {
+	*f = append(*f, value)
+	return nil
+}
+
+func runGenTypes(args []string, errOut, stdout io.Writer) int {
+	fs := flag.NewFlagSet("gen-types", flag.ContinueOnError)
+	fs.SetOutput(errOut)
+	bundleDir := fs.String("bundle", "", "bundle directory to read")
+	outDir := fs.String("out", "", "output directory (created if missing; must otherwise be empty)")
+	version := fs.String("version", "", "pin to a contract version (default: latest)")
+	plugin := fs.String("plugin", "", "protoc generator suffix, such as es, go, python, or prost")
+	pluginPath := fs.String("plugin-path", "", "optional path to an external protoc-gen-<plugin> executable")
+	var pluginOptions repeatedFlag
+	fs.Var(&pluginOptions, "opt", "generator option; repeat for multiple values; {source} expands once per bundle source file")
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 2
+	}
+	if *bundleDir == "" || *outDir == "" || *plugin == "" {
+		fmt.Fprintln(errOut, "usage: wavefront-bundle gen-types --bundle <dir> --out <dir> --plugin <name> [--version <id>] [--plugin-path <file>] [--opt <value> ...]")
+		return 2
+	}
+	result, err := bundlegen.GenTypes(bundlegen.GenTypesOptions{
+		BundleDir:     *bundleDir,
+		OutDir:        *outDir,
+		Version:       *version,
+		Plugin:        *plugin,
+		PluginPath:    *pluginPath,
+		PluginOptions: pluginOptions,
+	})
+	if err != nil {
+		fmt.Fprintln(errOut, "wavefront-bundle:", err)
+		return 1
+	}
+	fmt.Fprintf(stdout,
+		"gen-types: bundle=%s version=%s plugin=%s out=%s\n  emitted %d file(s)\n",
+		result.BundleDir, result.Version, result.Plugin, result.OutDir, len(result.GeneratedFiles))
+	return 0
 }
 
 func runPack(args []string, errOut io.Writer) int {
