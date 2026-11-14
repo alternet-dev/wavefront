@@ -192,6 +192,14 @@ func TestContentNegotiationFailuresPreserveGateOrdering(t *testing.T) {
 			if tc.wantCode == "not_acceptable" && !headerValuesContainToken(resp.Header.Values("Vary"), "Accept") {
 				t.Errorf("Vary = %q, want Accept", resp.Header.Values("Vary"))
 			}
+			if tc.wantCode == "unsupported_media_type" {
+				if got := resp.Header.Values("Vary"); !headerValuesContainToken(got, "Accept") {
+					t.Errorf("Vary = %q, want Accept", got)
+				}
+				if got := resp.Header.Values("Vary"); !headerValuesContainToken(got, "Content-Type") {
+					t.Errorf("Vary = %q, want Content-Type", got)
+				}
+			}
 		})
 	}
 	if got := upstreamCalls.Load(); got != 0 {

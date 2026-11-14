@@ -296,17 +296,17 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request) {
 	// protobuf is the compatibility fallback decoder, and Accept still chooses
 	// the response. With bytes, an absent Content-Type is unsupported just like
 	// any other media type not present in the registry.
+	// A cache must not reuse one negotiated representation for a request with a
+	// different Accept or Content-Type value. Content-Type participates because
+	// the request codec breaks omitted, wildcard, and equal-weight Accept ties.
+	// Set these before either codec selection so both the 415 and 406 alternatives
+	// are covered; later upstream Vary values are appended.
+	addVary(w.Header(), headerAccept, headerContentType)
 	requestCodec, ok := s.codecs.requestAdapter(r.Header.Get(headerContentType), hasRequestBody(r))
 	if !ok {
 		fail(wireerror.UnsupportedMediaType("request Content-Type must be "+adapter.MediaTypeProtobuf+" or "+adapter.MediaTypeJSON), "")
 		return
 	}
-	// A cache must not reuse one negotiated representation for a request with a
-	// different Accept or Content-Type value. Content-Type participates because
-	// the request codec breaks omitted, wildcard, and equal-weight Accept ties.
-	// Set these before response negotiation so the 406 alternative is covered
-	// too; later upstream Vary values are appended.
-	addVary(w.Header(), headerAccept, headerContentType)
 	responseCodec, ok := s.codecs.responseAdapter(r.Header.Values(headerAccept), requestCodec)
 	if !ok {
 		fail(wireerror.NotAcceptable("request Accept does not permit "+adapter.MediaTypeProtobuf+" or "+adapter.MediaTypeJSON), "")

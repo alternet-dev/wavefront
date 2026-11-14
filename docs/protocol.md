@@ -242,8 +242,8 @@ resolved route binding and both become JSON at the internal backend boundary.
 - Request and response choices are independent: a JSON request may ask for a
   protobuf response, and the reverse is also valid.
 
-Responses that reach codec negotiation carry `Vary: Accept, Content-Type`,
-including the 406 alternative, so shared caches account for both the requested
+Responses that pass the route gate carry `Vary: Accept, Content-Type`, including
+the 415 and 406 alternatives, so shared caches account for both the requested
 response representation and the request codec used to break negotiation ties.
 The internal request always asks the backend for `application/json`; when it
 has a body, that body is also sent as `application/json`.
@@ -294,7 +294,7 @@ error — return:
 | `unsupported_contract_version` | 400 | `Content-Type` | version header missing / unknown / unsupported |
 | `decode_failed` | 400 | `Content-Type` | client body fails to decode into `request_message` |
 | `not_acceptable` | 406 | `Content-Type`, `Vary` | request `Accept` permits neither `application/protobuf` nor `application/json` |
-| `unsupported_media_type` | 415 | `Content-Type` | a request with a body has an absent or unsupported `Content-Type`; the wrong envelope is rejected before the body is read, separating it from `decode_failed` |
+| `unsupported_media_type` | 415 | `Content-Type`, `Vary` | a request with a body has an absent or unsupported `Content-Type`; the wrong envelope is rejected before the body is read, separating it from `decode_failed` |
 | `request_body_too_large` | 413 | `Content-Type` | inbound body exceeds `WAVEFRONT_MAX_BODY_BYTES` |
 | `upstream_timeout` | 504 | `Content-Type`, `Retry-After` | upstream exceeds `WAVEFRONT_REQUEST_TIMEOUT_MS` |
 | `upstream_error` | 502 | `Content-Type` | upstream unreachable / reply un-encodable / capability ceiling (see below) / undeclared status under `strict: true` |
@@ -448,17 +448,14 @@ source of truth. A CORS preflight (`OPTIONS` with `Origin` +
 response relayed, bypassing routing and the codec; it never 404s as an unbound
 route. On a proxied response, the upstream's `Access-Control-*` values are
 carried through verbatim and its `Vary` tokens are merged with wavefront's
-codec-negotiation `Accept` and `Content-Type` tokens. The one gap is
-deliberate: a
-wavefront-originated error is written by wavefront, not the upstream, so
-there are no upstream CORS headers to mirror. Browsers therefore cannot read
-any of them cross-origin, whether synthesized before any upstream call
-(`unsupported_contract_version`, `not_acceptable`, `unknown_route`,
+codec-negotiation `Accept` and `Content-Type` tokens. The deliberate gap is a
+wavefront-originated error synthesized before an upstream response: there are
+no upstream CORS headers to mirror, so browsers cannot read it cross-origin.
+This includes `unsupported_contract_version`, `not_acceptable`, `unknown_route`,
 `unsupported_media_type`, `decode_failed`, `request_body_too_large`,
-request-side `transform_failed`, boot-time `unavailable`) or produced during
-or after one (`upstream_timeout`, response-side `transform_failed`,
-reply-unencodable `upstream_error`). These are client-configuration,
-wavefront-configuration, or upstream-failure conditions, not the normal flow.
+request-side `transform_failed`, boot-time `unavailable`, and
+`upstream_timeout`. A wavefront error synthesized after an upstream response
+retains the upstream's CORS headers and is readable when that policy permits.
 
 ## Stability declaration
 
