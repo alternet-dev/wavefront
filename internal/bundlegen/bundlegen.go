@@ -5,19 +5,25 @@
 // `anyOf:[T, {type: null}]` idiom — are supported. A typed dict
 // (additionalProperties:<scalar|$ref>) lowers to
 // map<string,V>; an open object (additionalProperties:true|{}, or a bare
-// {type:object} with no properties) and a discriminated (tagged) anyOf/oneOf
-// union — always a JSON object, but with a
-// flattened wire shape no proto3 oneof can carry — both to
-// google.protobuf.Struct; and an untagged anyOf/oneOf union or an unconstrained
-// {} schema to google.protobuf.Value (repeated as array items), with
-// google/protobuf/struct.proto embedded in the layer when any are used. These
-// lowerings apply inline or via a $ref: a non-object component (enum, typed
-// dict, union, open object) referenced by a field lowers the same as the
-// equivalent inline schema. Only an object-with-properties component becomes a
-// generated proto message; a body that $refs an open object, unconstrained
-// schema, or untagged union binds directly to its Struct/Value message. allOf,
-// a mixed additionalProperties, an inline (non-$ref) body, and an untyped
-// non-empty leaf stay hard errors rather than a lossy bundle. Output is
+// {type:object} with no properties) lowers to google.protobuf.Struct; an
+// untagged anyOf/oneOf union or an unconstrained {} schema lowers to
+// google.protobuf.Value (repeated as array items); and a discriminated
+// (tagged) anyOf/oneOf carrying an explicit mapping lowers to a nested
+// wrapper message holding a proto3 oneof, with the mapping persisted into a
+// per-layer discriminators.yaml sidecar the adapter uses to transform between
+// the flattened OpenAPI wire shape and the wrapped protojson shape (#132). A
+// discriminated union with no mapping keeps the Struct lowering (the implicit
+// name-based mapping is ambiguous across per-version proto packages).
+// google/protobuf/struct.proto is embedded in the layer when any WKT lowering
+// is used. These lowerings apply inline or via a $ref: a non-object component
+// (enum, typed dict, union, open object) referenced by a field lowers the same
+// as the equivalent inline schema; an object-with-properties component becomes
+// a generated proto message, while an open object, unconstrained schema, or
+// untagged union becomes the corresponding Struct/Value message. A request or
+// response body may $ref any component that lowers to one of those messages.
+// allOf, a mixed
+// additionalProperties, an inline (non-$ref) body, and an untyped non-empty
+// leaf stay hard errors rather than a lossy bundle. Output is
 // byte-reproducible (sorted, deterministic marshal) for the consumer's
 // buf-breaking story.
 //
@@ -198,7 +204,7 @@ func Add(openapiSrc, bundleDir string, force bool) error {
 		raws = append(raws, rawBinding{o.route, strings.ToUpper(o.method), reqName, respName, errNames})
 	}
 
-	descBytes, bindingNames, err := buildDescriptors(doc, roots, pkg, version)
+	descBytes, bindingNames, metadata, err := buildDescriptors(doc, roots, pkg, version)
 	if err != nil {
 		return err
 	}
@@ -222,7 +228,8 @@ func Add(openapiSrc, bundleDir string, force bool) error {
 	}
 
 	versions := renderVersionsYAML(version, entries)
-	return writeLayer(bundleDir, version, raw, descBytes, versions, force)
+	discriminators := renderDiscriminatorsYAML(metadata)
+	return writeLayer(bundleDir, version, raw, descBytes, versions, discriminators, force)
 }
 
 // loadAndPrevalidate fetches/reads the OpenAPI source, parses it, and
@@ -257,16 +264,16 @@ func protoPackage(version string) string {
 // buildDescriptors walks every schema reachable from roots, validates each
 // touched schema against the fail-loud doctrine, and returns the deterministic
 // wire bytes of a FileDescriptorSet plus the fully-qualified message name for
-// each body root. Most roots name generated messages in pkg; open objects,
-// unconstrained schemas, and untagged unions name their Struct/Value WKT
-// directly.
-func buildDescriptors(doc openAPI, roots []string, pkg, version string) ([]byte, map[string]string, error) {
+// each body root and the per-wrapper discriminator metadata the adapter will
+// need. Most roots name generated messages in pkg; open objects, unconstrained
+// schemas, and untagged unions name their Struct/Value WKT directly.
+func buildDescriptors(doc openAPI, roots []string, pkg, version string) ([]byte, map[string]string, []discriminatorMetadata, error) {
 	// The synthetic Empty message has no OpenAPI component, so split it out
 	// before walking the document and inject it directly below.
 	realRoots, needEmpty := partitionEmpty(roots)
 	needed, err := collectSchemas(doc, realRoots)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
 	// A request/response/error body must lower to a proto message. A generated
@@ -282,7 +289,7 @@ func buildDescriptors(doc openAPI, roots []string, pkg, version string) ([]byte,
 		if wkt := bodyWKTMessageName(doc.Components.Schemas[r]); wkt != "" {
 			bodyWKTs[r] = wkt
 		} else {
-			return nil, nil, fmt.Errorf("schema %q must be an object with properties", r)
+			return nil, nil, nil, fmt.Errorf("schema %q must be an object with properties, an open object, an unconstrained {} schema, or an untagged union", r)
 		}
 	}
 
@@ -317,15 +324,16 @@ func buildDescriptors(doc openAPI, roots []string, pkg, version string) ([]byte,
 	}
 
 	msgs := make([]*descriptorpb.DescriptorProto, 0, len(names))
+	var metadata []discriminatorMetadata
 	for _, n := range names {
 		if needed[n] == nil {
 			// Synthetic zero-field Empty message.
 			msgs = append(msgs, &descriptorpb.DescriptorProto{Name: proto.String(msgNames[n])})
 			continue
 		}
-		dp, derr := buildMessage(msgNames[n], needed[n], pkg, msgNames, doc.Components.Schemas)
+		dp, derr := buildMessage(msgNames[n], needed[n], pkg, msgNames, doc.Components.Schemas, &metadata)
 		if derr != nil {
-			return nil, nil, derr
+			return nil, nil, nil, derr
 		}
 		msgs = append(msgs, dp)
 	}
@@ -350,13 +358,13 @@ func buildDescriptors(doc openAPI, roots []string, pkg, version string) ([]byte,
 	}
 	fds := &descriptorpb.FileDescriptorSet{File: files}
 	if _, err := protodesc.NewFiles(fds); err != nil {
-		return nil, nil, fmt.Errorf("generated descriptors are invalid: %w", err)
+		return nil, nil, nil, fmt.Errorf("generated descriptors are invalid: %w", err)
 	}
 	descBytes, err := proto.MarshalOptions{Deterministic: true}.Marshal(fds)
 	if err != nil {
-		return nil, nil, fmt.Errorf("marshal descriptors: %w", err)
+		return nil, nil, nil, fmt.Errorf("marshal descriptors: %w", err)
 	}
-	return descBytes, bindingNames, nil
+	return descBytes, bindingNames, metadata, nil
 }
 
 // contractEntry is one row in versions.yaml.contracts. Fields are written
@@ -415,7 +423,7 @@ func renderVersionsYAML(version string, entries []contractEntry) string {
 // caller that passes an unexpected version string; safeLayerName upstream
 // already rejects path separators and "." / "..", but os.RemoveAll is
 // destructive enough that one extra guard is worth the line.
-func writeLayer(bundleDir, version string, openapiRaw, descBytes []byte, versions string, force bool) error {
+func writeLayer(bundleDir, version string, openapiRaw, descBytes []byte, versions, discriminators string, force bool) error {
 	layerDir := filepath.Join(bundleDir, version)
 	info, err := os.Stat(layerDir)
 	if err == nil {
@@ -443,7 +451,16 @@ func writeLayer(bundleDir, version string, openapiRaw, descBytes []byte, version
 	if err := os.WriteFile(filepath.Join(layerDir, "openapi.json"), openapiRaw, 0o644); err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(layerDir, "versions.yaml"), []byte(versions), 0o644)
+	if err := os.WriteFile(filepath.Join(layerDir, "versions.yaml"), []byte(versions), 0o644); err != nil {
+		return err
+	}
+	// Only write the discriminators sidecar when the layer actually uses mapped
+	// discriminated unions. A layer with none stays byte-identical to a pre-#132
+	// bundle, so the consumer's buf-breaking story holds for unaffected bundles.
+	if discriminators != "" {
+		return os.WriteFile(filepath.Join(layerDir, "discriminators.yaml"), []byte(discriminators), 0o644)
+	}
+	return nil
 }
 
 // Remove hard-deletes a version's layer from bundleDir. It is oldest-only:
@@ -686,16 +703,26 @@ func collectSchemas(doc openAPI, roots []string) (map[string]*schema, error) {
 	visited := map[string]bool{} // guard across messages and non-message components
 	var visit func(name string) error
 	// walkRefs visits the component($refs) a schema would pull into the descriptor
-	// set when it is lowered: a $ref, an array of $ref, a typed-dict $ref value, or
-	// a nullable $ref. It applies equally to a message's property and to a
-	// non-message component lowered inline. Union members are deliberately not
-	// walked — they are absorbed into google.protobuf.{Value,Struct}.
-	walkRefs := func(s *schema) error {
+	// set when it is lowered: a $ref, an array of $ref, a typed-dict $ref value, a
+	// nullable $ref, or each mapped target of a discriminator-with-mapping (a
+	// tagged union that lowers to a proto3 oneof; its members must be collected
+	// as messages). Untagged-union members are deliberately not walked — they are
+	// absorbed into google.protobuf.{Value,Struct}.
+	var walkRefs func(s *schema) error
+	walkRefs = func(s *schema) error {
+		if info, ok := parseDiscriminator(s); ok {
+			for _, e := range info.entries {
+				if err := visit(e.targetName); err != nil {
+					return err
+				}
+			}
+			return nil
+		}
 		switch {
 		case s.Ref != "":
 			return visit(refName(s.Ref))
-		case s.Type == "array" && s.Items != nil && s.Items.Ref != "":
-			return visit(refName(s.Items.Ref))
+		case s.Type == "array" && s.Items != nil:
+			return walkRefs(s.Items)
 		case s.Type == "object":
 			if value, ok := mapValueSchema(s.AdditionalProperties); ok && value.Ref != "" {
 				return visit(refName(value.Ref))
@@ -777,10 +804,40 @@ func hasDiscriminator(sc *schema) bool {
 }
 
 // isDiscriminatedUnion reports whether sc is an anyOf/oneOf carrying a
-// discriminator: a tagged union. Its flattened wire shape is incompatible with
-// a proto3 oneof, so it lowers to google.protobuf.Struct (#129).
+// discriminator: a tagged union. A discriminator carrying an explicit mapping
+// lowers to a typed proto3 oneof plus a wrapper message (#132); a
+// discriminator with no mapping stays with the Struct lowering, because the
+// implicit name-based mapping is ambiguous across per-version proto packages
+// (#129).
 func isDiscriminatedUnion(sc *schema) bool {
 	return hasDiscriminator(sc) && (len(sc.OneOf) > 0 || len(sc.AnyOf) > 0)
+}
+
+// isMappedDiscriminator reports whether sc is a discriminated union with an
+// explicit mapping — the shape the typed-oneof lowering (#132) accepts.
+func isMappedDiscriminator(sc *schema) bool {
+	_, ok := parseDiscriminator(sc)
+	return ok
+}
+
+// resolveMappedDiscriminator returns the underlying mapped-discriminator schema
+// behind sc, following one level of $ref to a non-object component. It covers
+// both the inline property-level form (sc carries the anyOf/discriminator
+// itself) and the $ref-to-union component form (sc is a $ref whose target is
+// the union). Returns nil for anything that is not a mapped discriminator.
+func resolveMappedDiscriminator(sc *schema, components map[string]*schema) *schema {
+	if sc == nil {
+		return nil
+	}
+	if isMappedDiscriminator(sc) {
+		return sc
+	}
+	if sc.Ref != "" {
+		if target := components[refName(sc.Ref)]; target != nil && !isMessageComponent(target) && isMappedDiscriminator(target) {
+			return target
+		}
+	}
+	return nil
 }
 
 // isUntaggedUnion reports whether sc is a polymorphic union without a
@@ -840,14 +897,16 @@ const (
 )
 
 // wktMessageName returns the fully-qualified well-known-type a schema lowers to,
-// or "" when it is not a WKT shape: an open object or a discriminated (tagged)
-// union → google.protobuf.Struct (both are always JSON objects); an untagged
-// union or an unconstrained {} schema → google.protobuf.Value. A discriminated
-// union targets Struct rather than a proto3 oneof because its flattened wire
-// shape — discriminator as a sibling property, member fields at the top level —
-// is not what protojson encodes a oneof as (wrapped under the member key).
+// or "" when it is not a WKT shape: an open object → google.protobuf.Struct;
+// a discriminated (tagged) union WITHOUT an explicit mapping → Struct (the
+// implicit name-based mapping is ambiguous across per-version proto packages);
+// an untagged union or an unconstrained {} schema → google.protobuf.Value. A
+// discriminated union WITH an explicit mapping takes the typed-oneof path
+// (#132) and is handled in buildMessage directly rather than as a WKT.
 func wktMessageName(sc *schema) string {
 	switch {
+	case isMappedDiscriminator(sc):
+		return ""
 	case isOpenObject(sc), isDiscriminatedUnion(sc):
 		return structFullName
 	case isUntaggedUnion(sc), isEmptySchema(sc):
@@ -859,7 +918,9 @@ func wktMessageName(sc *schema) string {
 // bodyWKTMessageName is the subset of WKT lowerings accepted as a component
 // bound directly to a request, response, or error body for #121. A tagged union
 // is also Struct-backed when nested (#129), but accepting it as a body root is a
-// separate surface and is deliberately not folded into this helper.
+// separate surface and is deliberately not folded into this helper. An inline
+// empty {} body binds the synthetic Empty in refSchemaName; only a $ref'd empty
+// component reaches this helper and binds google.protobuf.Value.
 func bodyWKTMessageName(sc *schema) string {
 	switch {
 	case isOpenObject(sc):
@@ -999,7 +1060,7 @@ func isNullableLeaf(sc *schema) bool {
 	return false
 }
 
-func buildMessage(name string, sc *schema, pkg string, msgNames map[string]string, components map[string]*schema) (*descriptorpb.DescriptorProto, error) {
+func buildMessage(name string, sc *schema, pkg string, msgNames map[string]string, components map[string]*schema, metadata *[]discriminatorMetadata) (*descriptorpb.DescriptorProto, error) {
 	props := make([]string, 0, len(sc.Properties))
 	for p := range sc.Properties {
 		props = append(props, p)
@@ -1009,11 +1070,56 @@ func buildMessage(name string, sc *schema, pkg string, msgNames map[string]strin
 	dp := &descriptorpb.DescriptorProto{Name: proto.String(name)}
 	num := int32(1)
 	usedFields := make(map[string]bool, len(props))
+	usedNested := make(map[string]bool)
 	for _, pname := range props {
+		prop := sc.Properties[pname]
 		// Sanitize the proto field name (buildField preserves the original key
 		// as json_name); disambiguate within this message's field set.
 		fname := uniqueIdent(pname, usedFields)
-		f, optional, nested, err := buildField(name, pname, fname, num, sc.Properties[pname], pkg, msgNames, components)
+
+		// Discriminator with an explicit mapping: emit a nested wrapper message
+		// whose single oneof holds one field per mapped member, then a parent
+		// field (singular or repeated) referencing the wrapper. The wire shape
+		// is the parent property name holding the member's object; the adapter
+		// transforms between that flattened upstream shape and the wrapped shape
+		// protojson produces (#132).
+		var discProp *schema
+		var repeated bool
+		switch {
+		case resolveMappedDiscriminator(prop, components) != nil:
+			discProp = resolveMappedDiscriminator(prop, components)
+		case prop.Type == "array" && prop.Items != nil && resolveMappedDiscriminator(prop.Items, components) != nil:
+			discProp = resolveMappedDiscriminator(prop.Items, components)
+			repeated = true
+		}
+		if discProp != nil {
+			info, _ := parseDiscriminator(discProp)
+			wrapperName := uniqueIdent(variantMessageName(fname), usedNested)
+			nested, meta, derr := buildDiscriminatorWrapper(wrapperName, info, pkg, msgNames, components)
+			if derr != nil {
+				return nil, fmt.Errorf("message %q field %q: %w", name, pname, derr)
+			}
+			meta.Message = pkg + "." + name + "." + wrapperName
+			dp.NestedType = append(dp.NestedType, nested)
+			*metadata = append(*metadata, meta)
+
+			f := &descriptorpb.FieldDescriptorProto{
+				Name:     proto.String(fname),
+				Number:   proto.Int32(num),
+				Label:    descriptorpb.FieldDescriptorProto_LABEL_OPTIONAL.Enum(),
+				Type:     descriptorpb.FieldDescriptorProto_TYPE_MESSAGE.Enum(),
+				TypeName: proto.String("." + pkg + "." + name + "." + wrapperName),
+				JsonName: proto.String(pname),
+			}
+			if repeated {
+				f.Label = descriptorpb.FieldDescriptorProto_LABEL_REPEATED.Enum()
+			}
+			dp.Field = append(dp.Field, f)
+			num++
+			continue
+		}
+
+		f, optional, nested, err := buildField(name, pname, fname, num, prop, pkg, msgNames, components)
 		if err != nil {
 			return nil, fmt.Errorf("message %q field %q: %w", name, pname, err)
 		}
@@ -1032,6 +1138,74 @@ func buildMessage(name string, sc *schema, pkg string, msgNames map[string]strin
 		num++
 	}
 	return dp, nil
+}
+
+// variantMessageName returns the nested-type name for a discriminated-union
+// wrapper generated from a parent property: the field name CamelCased with
+// "Variant" appended (pet → PetVariant, user_tags → UserTagsVariant). The
+// discriminator metadata keys off the wrapper's fully-qualified name, so the
+// convention stays mechanical for byte-reproducibility.
+func variantMessageName(field string) string {
+	var b strings.Builder
+	upNext := true
+	for _, r := range field {
+		if r == '_' {
+			upNext = true
+			continue
+		}
+		if upNext {
+			b.WriteRune(unicode.ToUpper(r))
+			upNext = false
+		} else {
+			b.WriteRune(r)
+		}
+	}
+	return b.String() + "Variant"
+}
+
+// buildDiscriminatorWrapper emits the nested wrapper message for a mapped
+// discriminated union: a single `oneof variant` whose fields are the mapped
+// members, numbered sequentially in sorted discriminator-value order. The
+// returned metadata records the propertyName and value → oneof-field-name
+// mapping the adapter needs to flatten/wrap the wire shape (#132).
+func buildDiscriminatorWrapper(wrapperName string, info typedDiscriminator, pkg string, msgNames map[string]string, components map[string]*schema) (*descriptorpb.DescriptorProto, discriminatorMetadata, error) {
+	const oneofName = "variant"
+	nested := &descriptorpb.DescriptorProto{
+		Name: proto.String(wrapperName),
+		OneofDecl: []*descriptorpb.OneofDescriptorProto{
+			{Name: proto.String(oneofName)},
+		},
+	}
+	mapping := make(map[string]string, len(info.entries))
+	fieldNum := int32(1)
+	for _, e := range info.entries {
+		target := components[e.targetName]
+		if target == nil {
+			return nil, discriminatorMetadata{}, fmt.Errorf("discriminator mapping target %q is not defined", e.targetName)
+		}
+		if !isMessageComponent(target) {
+			return nil, discriminatorMetadata{}, fmt.Errorf("discriminator mapping target %q must be an object component with properties", e.targetName)
+		}
+		sanitized, ok := msgNames[e.targetName]
+		if !ok {
+			return nil, discriminatorMetadata{}, fmt.Errorf("discriminator mapping target %q is not in the collected message set", e.targetName)
+		}
+		nested.Field = append(nested.Field, &descriptorpb.FieldDescriptorProto{
+			Name:       proto.String(e.fieldName),
+			Number:     proto.Int32(fieldNum),
+			Label:      descriptorpb.FieldDescriptorProto_LABEL_OPTIONAL.Enum(),
+			Type:       descriptorpb.FieldDescriptorProto_TYPE_MESSAGE.Enum(),
+			TypeName:   proto.String("." + pkg + "." + sanitized),
+			JsonName:   proto.String(e.fieldName),
+			OneofIndex: proto.Int32(0),
+		})
+		mapping[e.value] = e.fieldName
+		fieldNum++
+	}
+	return nested, discriminatorMetadata{
+		PropertyName: info.propertyName,
+		Mapping:      mapping,
+	}, nil
 }
 
 func buildField(msgName, pname, fname string, num int32, sc *schema, pkg string, msgNames map[string]string, components map[string]*schema) (*descriptorpb.FieldDescriptorProto, bool, *descriptorpb.DescriptorProto, error) {
@@ -1425,10 +1599,9 @@ func Verify(bundleDir string) error {
 const candidatesBlockMarker = "# AMBIGUOUS pair"
 
 func verifyNoUnresolvedCandidates(bundleDir string) error {
-	path := filepath.Join(bundleDir, "resolution.yaml")
-	raw, err := os.ReadFile(path)
+	raw, err := bundle.ReadFile(bundleDir, "resolution.yaml")
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, fs.ErrNotExist) {
 			return nil
 		}
 		return fmt.Errorf("read resolution.yaml: %w", err)

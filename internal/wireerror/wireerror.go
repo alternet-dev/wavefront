@@ -19,6 +19,9 @@ const (
 	codeUpstreamStatus             = "upstream_status"
 	codeUnsupportedMediaType       = "unsupported_media_type"
 	codeUnavailable                = "unavailable"
+	codeRequestHeaderTimeout       = "request_header_timeout"
+	codeExpectationFailed          = "expectation_failed"
+	codeRequestHeaderTooLarge      = "request_header_too_large"
 )
 
 // MediaTypeProtobuf is the single request and response media type the v0.1
@@ -263,6 +266,39 @@ func Unavailable(msg string) *Error {
 		code:    codeUnavailable,
 		message: msgOr(msg, "service unavailable"),
 		status:  http.StatusServiceUnavailable,
+	}
+}
+
+// RequestHeaderTimeout — the client did not finish its headers before the
+// data-plane ReadHeaderTimeout elapsed. 408. This is emitted by the listener
+// boundary because net/http detects the timeout before it creates a Request.
+func RequestHeaderTimeout(msg string) *Error {
+	return &Error{
+		code:    codeRequestHeaderTimeout,
+		message: msgOr(msg, "request headers timed out"),
+		status:  http.StatusRequestTimeout,
+	}
+}
+
+// ExpectationFailed — the client sent an unsupported Expect header. 417.
+// net/http detects it before the wavefront handler runs, so the listener
+// boundary replaces the stdlib text reply with this envelope.
+func ExpectationFailed(msg string) *Error {
+	return &Error{
+		code:    codeExpectationFailed,
+		message: msgOr(msg, "Expect header must be 100-continue"),
+		status:  http.StatusExpectationFailed,
+	}
+}
+
+// RequestHeaderTooLarge — the request headers exceeded net/http's configured
+// MaxHeaderBytes limit. 431. The listener boundary emits this because the
+// stdlib rejects the request before it creates a Request.
+func RequestHeaderTooLarge(msg string) *Error {
+	return &Error{
+		code:    codeRequestHeaderTooLarge,
+		message: msgOr(msg, "request headers exceed the configured limit"),
+		status:  http.StatusRequestHeaderFieldsTooLarge,
 	}
 }
 

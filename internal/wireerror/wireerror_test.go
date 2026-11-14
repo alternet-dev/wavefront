@@ -36,6 +36,9 @@ func TestCodeStatusTableMatchesProtocol(t *testing.T) {
 		{TransformFailedResponse(""), "transform_failed", 502},
 		{UnknownRoute(""), "unknown_route", 404},
 		{UnsupportedMediaType(""), "unsupported_media_type", 415},
+		{RequestHeaderTimeout(""), "request_header_timeout", 408},
+		{ExpectationFailed(""), "expectation_failed", 417},
+		{RequestHeaderTooLarge(""), "request_header_too_large", 431},
 		{Unavailable(""), "unavailable", 503},
 		{UpstreamStatus(401, ""), "upstream_status", 401},
 		{UpstreamStatus(403, ""), "upstream_status", 403},
@@ -63,6 +66,7 @@ func TestContentTypeAlwaysProtobuf(t *testing.T) {
 		UpstreamTimeout(""), UpstreamError(""),
 		TransformFailedRequest(""), TransformFailedResponse(""),
 		UnknownRoute(""), UnsupportedMediaType(""),
+		RequestHeaderTimeout(""), ExpectationFailed(""), RequestHeaderTooLarge(""),
 		Unavailable(""),
 		UpstreamStatus(401, ""), UpstreamStatus(429, ""),
 	} {
@@ -80,6 +84,7 @@ func TestRetryAfterOnlyOnUpstreamTimeout(t *testing.T) {
 		UnsupportedContractVersion(""), DecodeFailed(""), RequestBodyTooLarge(""), UpstreamError(""),
 		TransformFailedRequest(""), TransformFailedResponse(""),
 		UnknownRoute(""), UnsupportedMediaType(""),
+		RequestHeaderTimeout(""), ExpectationFailed(""), RequestHeaderTooLarge(""),
 		// unavailable WITHOUT WithRetryAfter must not synthesize one — the
 		// hint is opt-in, just like upstream_status. Callers attach it at the
 		// emit site (the proxy uses "1"; /ready does not).

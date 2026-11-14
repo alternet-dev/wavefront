@@ -77,11 +77,19 @@ port externally; deployments that remap it should have their edge overwrite
 
 ## Bundle rollout
 
-The bundle is loaded at boot. A missing or invalid bundle at boot is fatal —
-`wavefront` refuses to start (fail-fast), so a bad bundle cannot take
-traffic. Because replicas are stateless, a normal rolling deploy is a clean
-swap — readiness gates on the bundle, so the load balancer does not send
-traffic to a fresh pod until it has loaded.
+The bundle is loaded at boot from either its canonical directory or an
+optional gzip-compressed tar archive produced by `wavefront-bundle pack`. A
+packed archive is a derived delivery artifact: keep using the directory for
+`add`, `remove`, `retire`, and consumer descriptor generation, then pack it
+for an image or mount. The proxy decompresses an archive in memory during
+load; it does not extract files onto disk. Expanded archive file content is
+capped at 1 GiB; use the canonical directory directly for a larger bundle.
+
+A missing, invalid, or malformed compressed bundle at boot is fatal —
+`wavefront` refuses to start (fail-fast), so a bad bundle cannot take traffic.
+Because replicas are stateless, a normal rolling deploy is a clean swap —
+readiness gates on the bundle, so the load balancer does not send traffic to
+a fresh pod until it has loaded.
 
 For in-place updates without a redeploy, `wavefront` accepts `SIGHUP`: on
 the signal it re-reads `WAVEFRONT_BUNDLE_PATH` and atomically swaps the
@@ -172,7 +180,6 @@ request.
 | Symptom | Cause | Fix |
 |---|---|---|
 | Process refuses to start | bad/missing bundle or required env unset | stderr logs the specific error; check `WAVEFRONT_BUNDLE_PATH`, `WAVEFRONT_UPSTREAM_BASE_URL` |
-| `/ready` stays 503 forever | bundle didn't load at boot | check the fail-fast log line; verify the bundle directory |
 | Spike of `unsupported_contract_version` (400) | client header value not in the bundle | check the bundle has that version; check `WAVEFRONT_CONTRACT_VERSION_HEADER` matches between ingress and the proxy |
 | Spike of `transform_failed` (422) on one version | a request stanza can't apply to live payloads | inspect that version's `resolution.yaml` entry; the source field is absent or unparseable |
 | Spike of `transform_failed` (502) on one version | the live upstream shape drifted from that version's response stanzas | regenerate the bundle or update the version's response stanzas to the new shape |
@@ -184,7 +191,8 @@ request.
 | Spike of `unknown_route` (404) | client URL `(path, method)` not bound by any contract in the bundle | check the bundle's bindings; wrong-method folds here on purpose (no `Allow` header) |
 | Spike of `internal_error` (500) | a handler panic recovered by middleware | check logs for the panic stack — this is always a bug |
 | `unavailable` (503) on the proxy path at boot | request arrived before the bundle finished loading | `Retry-After: 1` hint; legitimate boot race, brief and self-healing |
-| Non-zero `wavefront_stdlib_boundary_total` in `http1` mode | clients hitting `net/http`'s boundary (408 slow header / 431 oversized headers / 417 bad `Expect`) before the wavefront handler runs | tune `WAVEFRONT_READ_HEADER_TIMEOUT_MS` or check client behavior; these are out-of-envelope by design |
+| Non-zero `wavefront_stdlib_boundary_total` with a `408`, `417`, or `431` label in `http1` mode | clients hitting `net/http`'s boundary (408 slow header / 417 bad `Expect` / 431 oversized headers) before the wavefront handler runs | tune `WAVEFRONT_READ_HEADER_TIMEOUT_MS` or check client behavior; wavefront returns the matching wire-error envelope |
+| Non-zero `wavefront_stdlib_boundary_total` with an `unknown` label or a non-matching status label in `http1` mode | a pre-handler connection closed without producing one of the three intercepted statuses (e.g., abrupt client disconnect mid-read or net/http wrote a non-intercepted status) | investigate client behavior; no wire-error envelope was sent for these cases |
 
 ## Failure modes
 
@@ -208,4 +216,4 @@ request.
 | Upstream exceeds `WAVEFRONT_REQUEST_TIMEOUT_MS` | `upstream_timeout` (504) |
 | Bundle not yet loaded when a request arrives on the proxy path | `unavailable` (503) with a `Retry-After: 1` hint |
 | Recovered handler panic | `internal_error` (500) |
-| Slow header / oversized headers / non-`100-continue` `Expect:` | net/http stdlib boundary: `408 / 431 / 417` with `Content-Type: text/plain`; counted via `wavefront_stdlib_boundary_total`; deliberately out-of-envelope per the [error contract](protocol.md#error-contract) |
+| Slow header / oversized headers / non-`100-continue` `Expect:` in `http1` mode | net/http stdlib boundary: `408 / 431 / 417`, intercepted at the data-plane listener and returned as the matching wire-error envelope; counted via `wavefront_stdlib_boundary_total` |
