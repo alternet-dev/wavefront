@@ -2,8 +2,9 @@ package bundle
 
 import (
 	"bytes"
-	"os"
-	"path/filepath"
+	"errors"
+	"io/fs"
+	"path"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -39,12 +40,12 @@ type yamlDiscriminator struct {
 // layer. An absent file is not an error — most layers do not use mapped
 // discriminated unions. A malformed or unknown-schema-version file is a hard
 // error: shipping the sidecar implies the layer depends on the transform.
-func loadDiscriminators(layerDir string) (map[string]discriminatorInfo, error) {
-	raw, err := os.ReadFile(filepath.Join(layerDir, fileDiscriminators))
-	if os.IsNotExist(err) {
-		return nil, nil
-	}
+func loadDiscriminators(source bundleSource, layerDir string) (map[string]discriminatorInfo, error) {
+	raw, err := source.readFile(path.Join(layerDir, fileDiscriminators))
 	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, nil
+		}
 		return nil, &ReadError{File: fileDiscriminators, Err: err}
 	}
 	dec := yaml.NewDecoder(bytes.NewReader(raw))

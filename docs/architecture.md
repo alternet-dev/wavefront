@@ -36,9 +36,13 @@ loaded bundle, held behind an `atomic.Pointer` and set once at boot.
 
 ## Memory bounds
 
-Inbound body capped by `WAVEFRONT_MAX_BODY_BYTES`. The bundle is loaded once
-and shared immutably. No per-client state, no queues, no buffers that grow with
-client count.
+Inbound body capped by `WAVEFRONT_MAX_BODY_BYTES`. The bundle is loaded at
+boot and swapped atomically on SIGHUP; each request reads the pointer once
+from an `atomic.Pointer` and sees a stable view. An optional packed bundle
+is decompressed in memory at each load (boot and each SIGHUP reload), capped
+at 1 GiB of expanded file content, and discarded after the resolved bundle is
+built. Larger canonical directories still load directly.
+No per-client state, no queues, no buffers that grow with client count.
 
 ## What's NOT in the binary
 
