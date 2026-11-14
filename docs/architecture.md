@@ -10,11 +10,14 @@ Implementation shape — package layout and the request path.
 - **negotiate** (`internal/negotiate/`) — resolves the contract serving a
   request from its `(URL.Path, Method, X-Api-Contract-Version)` against the
   loaded bundle; maps to a transform profile or a typed error.
-- **adapter** (`internal/adapter/`) — codec pairs. Decode inbound external
-  bytes to a neutral value tree; encode the response back. `ProtoJSON` handles
-  raw protobuf and `GRPCJSON` adds strict unary gRPC message framing around the
-  same descriptor-driven conversion. The server transport, not the adapter,
-  owns HTTP/2 routing and `grpc-status` trailers.
+- **adapter** (`internal/adapter/`) — codec and interaction-model pairs. An
+  adapter decodes inbound bytes into one complete upstream call and encodes the
+  corresponding response. `ProtoJSON` is selected by the server and handles
+  raw protobuf; `GRPCJSON` adds strict unary gRPC message framing around the
+  same descriptor-driven conversion; `GraphQL` implements the single-endpoint,
+  request-shaped GraphQL exchange behind the same boundary, ready for separate
+  runtime-selection work. The server transport, not the adapter, owns HTTP/2
+  routing and `grpc-status` trailers.
 - **transform** (`internal/transform/`) — applies the declarative mapping
   (add/rename/optionalize/default/coerce, route remap) in both directions.
 - **server** (`internal/server/`) — `net/http` listener, the one upstream

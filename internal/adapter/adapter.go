@@ -1,9 +1,12 @@
 // Package adapter is the codec boundary. It is interaction-model-agnostic: the
 // core passes a Binding (never positional proto names) and the adapter never
 // sees the inbound transport — DecodeRequest's product is the upstream intent.
-// A future GraphQL adapter (single endpoint, request-defined response shape)
-// would implement the same interface without touching server/negotiate.
-// The raw protobuf and unary gRPC codecs both convert to and from JSON.
+// ProtoJSON maps fixed protobuf messages to an HTTP/JSON backend. GRPCJSON
+// adds strict unary gRPC message framing around the same descriptor-driven
+// conversion. GraphQL maps GraphQL-over-HTTP envelopes to its single endpoint
+// while preserving the request-defined response shape. Runtime selection
+// between adapters is a separate concern; the server currently selects
+// ProtoJSON.
 package adapter
 
 import (
