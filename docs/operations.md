@@ -27,6 +27,54 @@ All via environment, read once at startup — see the table in
 [README.md](../README.md#configuration). Required: `WAVEFRONT_BUNDLE_PATH`
 and `WAVEFRONT_UPSTREAM_BASE_URL`.
 
+## Inbound protocols
+
+`WAVEFRONT_PROTOCOL_INBOUND` selects one data-plane mode:
+
+| Mode | TCP listener | UDP listener | TLS files |
+|---|---|---|---|
+| `http1` (default) | plaintext HTTP/1.1 | — | — |
+| `h2c` | plaintext HTTP/1.1 + prior-knowledge HTTP/2 | — | — |
+| `https` | TLS HTTP/1.1 + HTTP/2 (ALPN) | — | required |
+| `https+h3` | TLS HTTP/1.1 + HTTP/2 (ALPN) | HTTP/3 on the same address | required |
+
+TLS modes require `WAVEFRONT_TLS_CERT_FILE` and `WAVEFRONT_TLS_KEY_FILE`.
+The files are loaded at startup; a missing or invalid pair is fatal. Certificate
+issuance, renewal, and rotation are operator responsibilities, so replacing a
+pair requires restarting the process. The ops listener remains plaintext on
+`WAVEFRONT_METRICS_ADDR` in every mode.
+
+For `https+h3`, publish both TCP and UDP for `WAVEFRONT_LISTEN_ADDR`. HTTPS
+responses carry `Alt-Svc` for the configured port so capable clients can move
+to HTTP/3. Direct HTTP/3 clients may connect without first fetching that
+advertisement.
+
+Service-mesh h2c with prior knowledge needs only the mode switch:
+
+```bash
+WAVEFRONT_PROTOCOL_INBOUND=h2c ./wavefront
+```
+
+A direct-edge container serving HTTPS and HTTP/3 needs the same container port
+published for both transports:
+
+```bash
+docker run --rm \
+  -p 8443:8080/tcp -p 8443:8080/udp \
+  -e WAVEFRONT_PROTOCOL_INBOUND=https+h3 \
+  -e WAVEFRONT_TLS_CERT_FILE=/run/wavefront/tls.crt \
+  -e WAVEFRONT_TLS_KEY_FILE=/run/wavefront/tls.key \
+  -e WAVEFRONT_BUNDLE_PATH=/etc/wavefront/bundle \
+  -e WAVEFRONT_UPSTREAM_BASE_URL=http://core-api:9000 \
+  -v /operator/tls:/run/wavefront:ro \
+  -v $(pwd)/bundle:/etc/wavefront/bundle:ro \
+  ghcr.io/alternet-dev/wavefront:latest
+```
+
+The port in `Alt-Svc` is taken from `WAVEFRONT_LISTEN_ADDR`. Publish that same
+port externally; deployments that remap it should have their edge overwrite
+`Alt-Svc` with the externally reachable UDP port.
+
 ## Bundle rollout
 
 The bundle is loaded at boot from either its canonical directory or an
@@ -94,6 +142,10 @@ request.
 - Every response (success or error) carries `X-Wavefront-Contract-Version`,
   so an ingress log or client trace pins which version a request resolved
   against without help from the proxy.
+- `wavefront_stdlib_boundary_total` is available in the dedicated `http1`
+  inbound mode only. Its status-line detector is deliberately not attached to
+  multiplexed h2c or encrypted TLS/QUIC connections. Requests that reach the
+  handler retain the regular request and error metrics in every mode.
 
 ## Common scenarios
 
@@ -139,8 +191,8 @@ request.
 | Spike of `unknown_route` (404) | client URL `(path, method)` not bound by any contract in the bundle | check the bundle's bindings; wrong-method folds here on purpose (no `Allow` header) |
 | Spike of `internal_error` (500) | a handler panic recovered by middleware | check logs for the panic stack — this is always a bug |
 | `unavailable` (503) on the proxy path at boot | request arrived before the bundle finished loading | `Retry-After: 1` hint; legitimate boot race, brief and self-healing |
-| Non-zero `wavefront_stdlib_boundary_total` with a `408`, `417`, or `431` label | clients hitting `net/http`'s boundary (408 slow header / 417 bad `Expect` / 431 oversized headers) before the wavefront handler runs | tune `WAVEFRONT_READ_HEADER_TIMEOUT_MS` or check client behavior; wavefront returns the matching wire-error envelope |
-| Non-zero `wavefront_stdlib_boundary_total` with an `unknown` label or a non-matching status label | a pre-handler connection closed without producing one of the three intercepted statuses (e.g., abrupt client disconnect mid-read or net/http wrote a non-intercepted status) | investigate client behavior; no wire-error envelope was sent for these cases |
+| Non-zero `wavefront_stdlib_boundary_total` with a `408`, `417`, or `431` label in `http1` mode | clients hitting `net/http`'s boundary (408 slow header / 417 bad `Expect` / 431 oversized headers) before the wavefront handler runs | tune `WAVEFRONT_READ_HEADER_TIMEOUT_MS` or check client behavior; wavefront returns the matching wire-error envelope |
+| Non-zero `wavefront_stdlib_boundary_total` with an `unknown` label or a non-matching status label in `http1` mode | a pre-handler connection closed without producing one of the three intercepted statuses (e.g., abrupt client disconnect mid-read or net/http wrote a non-intercepted status) | investigate client behavior; no wire-error envelope was sent for these cases |
 
 ## Failure modes
 
@@ -164,4 +216,4 @@ request.
 | Upstream exceeds `WAVEFRONT_REQUEST_TIMEOUT_MS` | `upstream_timeout` (504) |
 | Bundle not yet loaded when a request arrives on the proxy path | `unavailable` (503) with a `Retry-After: 1` hint |
 | Recovered handler panic | `internal_error` (500) |
-| Slow header / oversized headers / non-`100-continue` `Expect:` | net/http stdlib boundary: `408 / 431 / 417`, intercepted at the data-plane listener and returned as the matching wire-error envelope; counted via `wavefront_stdlib_boundary_total` |
+| Slow header / oversized headers / non-`100-continue` `Expect:` in `http1` mode | net/http stdlib boundary: `408 / 431 / 417`, intercepted at the data-plane listener and returned as the matching wire-error envelope; counted via `wavefront_stdlib_boundary_total` |

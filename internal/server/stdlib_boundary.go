@@ -26,7 +26,7 @@ import (
 // Because no http.Request exists for these replies, their contract version is
 // unknown.
 //
-// State model (HTTP/1.1; wavefront is plaintext-only, no HTTP/2):
+// State model (the dedicated plaintext HTTP/1.1 mode):
 //
 //   StateNew      — connection accepted; retain a passive entry so a
 //                   zero-byte header timeout can be counted.
@@ -197,8 +197,10 @@ func (s *Server) markBoundaryEmitted(c net.Conn) {
 // WireDataServer covers the half of the observability that lives on the
 // *http.Server. The other half — wrapping the listener so every accepted
 // conn is a *sniffingConn that intercepts the boundary response — is
-// WrapDataListener. Run wires both; boundary tests wrap the
-// httptest.Server.Listener before Start() so the same path is exercised.
+// WrapDataListener. Run wires both only in the dedicated `http1` inbound
+// mode; h2c and TLS/QUIC modes use multiplexed or encrypted framing this
+// observer does not parse. Boundary tests wrap the httptest.Server.Listener
+// before Start() so the same path is exercised.
 func (s *Server) WireDataServer(srv *http.Server) {
 	srv.ConnContext = s.connContext
 	srv.ConnState = s.connState

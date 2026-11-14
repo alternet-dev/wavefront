@@ -221,6 +221,11 @@ The client declares its contract version in
 Missing / unknown / unsupported ⇒ a typed `unsupported_contract_version`
 error (see the error contract below), never a silent best-guess.
 
+Negotiation is transport-neutral. HTTP/1.1, h2c, HTTP/2 over TLS, and HTTP/3
+all present the same header and protobuf envelope to the handler, and receive
+the same status, response headers, and error contract. Changing inbound
+transport never selects or alters a bundle layer.
+
 After version negotiation, `wavefront` reads the optional profile, tenant,
 and cohort headers configured by `WAVEFRONT_PROFILE_HEADER`,
 `WAVEFRONT_TENANT_HEADER`, and `WAVEFRONT_COHORT_HEADER` (defaults
